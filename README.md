@@ -78,17 +78,20 @@ Covers the Mac recorder only; the server and MCP have their own setup.
 
 - macOS 14.2+ (Core Audio Taps floor)
 - Swift and Node toolchains
+- `meson` and `ninja` — `brew install meson ninja`. Build tools only, for `recorder/aec` (the echo
+  canceller, below); nothing is installed on a user's machine.
 - `ffmpeg` on `PATH` — `brew install ffmpeg`. Not optional, but not for capture: `transcribe.py` uses it
   to downsample both tracks to the 16 kHz the transcription engines read. The mic is captured by Clipwise's own
   `miccap` binary, which replaced the ffmpeg mic path.
 
-**Build the Swift binaries.** All three are gitignored build outputs, so a fresh
+**Build the binaries.** All of these are gitignored build outputs, so a fresh
 clone has none of them.
 
 ```sh
 (cd recorder && swiftc -O audiodevs.swift -o audiodevs)
 (cd recorder/systemtap && swift build -c release)
 (cd recorder/miccap && swift build -c release)
+recorder/aec/build.sh
 ```
 
 **Install the app shell.**
@@ -161,6 +164,16 @@ step is transcription.
 - Whisper, selectable with `CLIPWISE_TRANSCRIBER=whisper`: `brew install whisper-cpp` for the
   `whisper-cli` binary, and the GGML model — `transcribe.py` prints the download command in its
   error message. Whisper output keeps its Silero VAD gating and its measured segment ends.
+- Echo removal: when the capture's output device was the built-in speakers, the mic also records the
+  call, so other people's speech would be stored as the user's. After downsampling and before
+  transcription, `recorder/aec` (WebRTC AEC3, echo cancellation only, the tap as the reference) writes
+  `mic-<stem>.16k.aec.wav` and both engines transcribe that. The raw `mic-<stem>.16k.wav` is kept.
+  The rule is one manifest field: the system track's `device_uid` is `BuiltInSpeakerDevice`. Any other
+  output device, a missing manifest, or `CLIPWISE_AEC=off` leaves the mic untouched. The transcript's
+  `aec` block records whether it ran and why or why not, and ingest stores it in
+  `recordings.metadata.aec`. Build it with `recorder/aec/build.sh` (`build-app.sh` runs it); if a
+  capture needs it and it isn't built, transcription stops rather than transcribe the echo. The device
+  is the one the manifest recorded at capture start, so an output switch mid-call isn't seen.
 - A selected engine that isn't installed is an error, not a fallback to the other one. The capture's
   audio is kept and re-transcribes once the engine is present. Each transcript records which engine
   wrote it in its `engine` key, and ingest stores that as the transcript's `provider`.

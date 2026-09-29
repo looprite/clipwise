@@ -57,7 +57,21 @@ Selected by CLIPWISE_TRANSCRIBER. A selected engine that is not installed is an
 error, never a silent fallback to the other one — same reasoning as the missing
 VAD model below: a recoverable failure beats a transcript from the wrong engine.
 
+Echo removal (SAA-218). When the capture's output device was the built-in
+speakers, the mic records the call as well as the user: other people's speech
+lands on the mic track and is stored as the user's. After downsampling and before
+transcription, recorder/aec (WebRTC AEC3, echo cancellation only, the tap as the
+far-end reference) writes a cleaned mic, `mic-<stem>.16k.aec.wav`, and both
+engines transcribe that. The raw `mic-<stem>.16k.wav` is kept and is what the
+content statistics and diarize read. The rule is one field of the capture
+manifest: the system track's `device_uid` equals AEC_BUILTIN_SPEAKER_UID. Any
+other device, or no answer, leaves the mic untouched and says why in the
+transcript's `aec` block. If the rule says run and recorder/aec is missing or
+fails, this dies rather than transcribe the echo — same reasoning as the engines.
+
 Environment:
+    CLIPWISE_AEC        auto | off. Default: auto (the rule above). off skips the step.
+    AEC_BIN             aec binary. Default: recorder/aec/.build/release/aec
     CLIPWISE_TRANSCRIBER  whisper | parakeet. Default: parakeet.
     PARAKEET_BIN        parakeet binary. Default: recorder/parakeet/.build/release/parakeet
     PARAKEET_MODELS     Directory holding parakeet-tdt-0.6b-v2/. Default:
@@ -104,6 +118,13 @@ PARAKEET_DIR = Path(__file__).resolve().parent / "parakeet"
 DEFAULT_PARAKEET_BIN = str(PARAKEET_DIR / ".build" / "release" / "parakeet")
 DEFAULT_PARAKEET_MODELS = str(PARAKEET_DIR / "models")
 PARAKEET_MODEL_NAME = "parakeet-tdt-0.6b-v2"
+
+AEC_DIR = Path(__file__).resolve().parent / "aec"
+DEFAULT_AEC_BIN = str(AEC_DIR / ".build" / "release" / "aec")
+# Core Audio's UID for the built-in speakers, as the manifest's system track
+# records it (`device_source: coreaudio_default_output_at_start`).
+AEC_BUILTIN_SPEAKER_UID = "BuiltInSpeakerDevice"
+AEC_RULE = f"system track device_uid == {AEC_BUILTIN_SPEAKER_UID}"
 
 # A pause between two words of at least this long starts a new line. The value
 # SAA-219 scored the engine at; its results held at 0.3, 0.6 and 1.0 s.
@@ -608,6 +629,56 @@ def run_whisper(
     ]
 
 
+def decide_aec(mic_src: Path) -> dict:
+    """Whether to remove speaker echo from this capture's mic, and why.
+
+    Reads the manifest that sits beside the capture, `manifest-<stem>.json`. The
+    device it names is the default output when the capture STARTED: an output
+    switch mid-call is not seen, and systemtap does not report the device it
+    tapped. Anything short of a positive match leaves the mic untouched.
+    """
+    mode = os.environ.get("CLIPWISE_AEC", "auto")
+    if mode not in ("auto", "off"):
+        die(f"CLIPWISE_AEC={mode!r}: expected auto or off")
+    plan = {"rule": AEC_RULE, "output_device_uid": None, "output_device_name": None}
+    if mode == "off":
+        return {**plan, "run": False, "reason": "disabled by CLIPWISE_AEC=off"}
+    name = mic_src.name
+    if not (name.startswith("mic-") and name.endswith(".wav")):
+        return {**plan, "run": False, "reason": f"cannot derive a capture stem from {name}"}
+    manifest = mic_src.with_name(f"manifest-{name[4:-4]}.json")
+    if not manifest.is_file():
+        return {**plan, "run": False, "reason": f"no {manifest.name}: output device unknown"}
+    try:
+        tracks = json.loads(manifest.read_text()).get("tracks", [])
+    except (OSError, ValueError) as e:
+        return {**plan, "run": False, "reason": f"{manifest.name} unreadable: {e}"}
+    system = next((t for t in tracks if t.get("track") == "system"), None)
+    uid = system.get("device_uid") if system else None
+    if not uid:
+        return {**plan, "run": False, "reason": f"{manifest.name} has no output device for the system track"}
+    plan.update(output_device_uid=uid, output_device_name=system.get("device_name"))
+    if uid == AEC_BUILTIN_SPEAKER_UID:
+        return {**plan, "run": True, "reason": f"output device was the built-in speakers ({uid})"}
+    label = f"{uid} ({plan['output_device_name']})" if plan["output_device_name"] else uid
+    return {**plan, "run": False, "reason": f"output device {label} is not the built-in speakers"}
+
+
+def run_aec(tap_16k: Path, mic_16k: Path, aec_bin: str) -> tuple[Path, dict]:
+    """Write the cleaned mic beside the raw one; return its path and the
+    binary's own report (library, config, timing, AEC3's reported delay)."""
+    cleaned = mic_16k.with_name(mic_16k.name[: -len(".wav")] + ".aec.wav")
+    cleaned.unlink(missing_ok=True)
+    r = subprocess.run(
+        [aec_bin, str(tap_16k), str(mic_16k), str(cleaned)],
+        check=True, capture_output=True, text=True,
+    )
+    sys.stderr.write(r.stderr)
+    if not cleaned.exists():
+        die(f"aec: expected {cleaned} not written")
+    return cleaned, json.loads(r.stdout.strip().splitlines()[-1])
+
+
 def build_lines(words: list[dict], gap_ms: int = LINE_GAP_MS) -> list[dict]:
     """Words → segments. A gap of gap_ms or more between one word's end and the
     next word's start begins a new line; a line ends at its last word's end."""
@@ -737,6 +808,14 @@ def main() -> int:
                 f"Fetch them with:\n  {PARAKEET_DIR / 'fetch-models.sh'}"
             )
 
+    aec_plan = decide_aec(mic_src)
+    aec_bin = os.environ.get("AEC_BIN", DEFAULT_AEC_BIN)
+    if aec_plan["run"] and not os.access(aec_bin, os.X_OK):
+        die(
+            f"aec binary not found at {aec_bin}, and this capture needs it "
+            f"({aec_plan['reason']}). Build it with:\n  {AEC_DIR / 'build.sh'}"
+        )
+
     model_path = Path(os.environ.get("WHISPER_MODEL", DEFAULT_MODEL))
     whisper_cli = os.environ.get("WHISPER_CLI", "whisper-cli")
     vad_model = None
@@ -753,6 +832,9 @@ def main() -> int:
     else:
         print(f"model:    {parakeet_models / PARAKEET_MODEL_NAME}")
         print(f"parakeet: {parakeet_bin}")
+    print(f"aec:      {'RUN' if aec_plan['run'] else 'skipped'} — {aec_plan['reason']}")
+    if aec_plan["run"]:
+        print(f"aec bin:  {aec_bin}")
 
     tap_bytes = tap_src.stat().st_size
     tap_frames = tap_bytes // (TAP_SAMPLE_BYTES * TAP_CH)
@@ -784,11 +866,30 @@ def main() -> int:
     print(f"downsampling mic → {mic_16k}")
     ffmpeg_downsample_wav(mic_src, mic_16k)
 
+    # The mic every transcription step reads: the cleaned copy when AEC ran.
+    mic_asr_16k = mic_16k
+    aec_record = {k: aec_plan[k] for k in ("rule", "output_device_uid", "output_device_name")}
+    aec_record.update(ran=False, reason=aec_plan["reason"])
+    if aec_plan["run"]:
+        print(f"removing speaker echo → {mic_16k.name[: -len('.wav')]}.aec.wav")
+        mic_asr_16k, report = run_aec(tap_16k, mic_16k, aec_bin)
+        aec_record.update(ran=True, input=mic_16k.name, output=mic_asr_16k.name, **report)
+        print(
+            f"aec: {report['processing_s']}s, AEC3 delay ms "
+            f"min/median/max {report['delay_ms']['min']:.0f}/"
+            f"{report['delay_ms']['median']:.0f}/{report['delay_ms']['max']:.0f}"
+        )
+
     tap_samples, tap_rate = read_s16_mono(tap_16k)
     mic_samples, mic_rate = read_s16_mono(mic_16k)
     tap_stats = sample_content_check(tap_samples, tap_rate)
+    # Statistics stay on the raw mic: the capture classifier reads them to judge
+    # whether the mic recorded at all, and echo removal must not change that.
     mic_stats = sample_content_check(mic_samples, mic_rate)
     tap_levels = frame_levels_db(tap_samples, tap_rate, SEGMENT_END_FRAME_MS)
+    if mic_asr_16k != mic_16k:
+        mic_samples, mic_rate = read_s16_mono(mic_asr_16k)
+    # Segment ends are measured from the audio that was transcribed.
     mic_levels = frame_levels_db(mic_samples, mic_rate, SEGMENT_END_FRAME_MS)
     print(
         f"tap  16k content: samples={tap_stats['samples']} "
@@ -813,7 +914,7 @@ def main() -> int:
     print(f"tap segments: {len(tap_segs)}")
 
     print("transcribing mic track ...")
-    mic_segs = transcribe(mic_16k)
+    mic_segs = transcribe(mic_asr_16k)
     print(f"mic segments: {len(mic_segs)}")
 
     # Whisper only. Before the merge, so both tracks are on measured ends by the
@@ -895,7 +996,13 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "inputs": {"tap": str(tap_src), "mic": str(mic_src)},
-        "downsampled": {"tap_16k": str(tap_16k), "mic_16k": str(mic_16k)},
+        "downsampled": {
+            "tap_16k": str(tap_16k),
+            "mic_16k": str(mic_16k),
+            **({"mic_16k_aec": str(mic_asr_16k)} if mic_asr_16k != mic_16k else {}),
+        },
+        # Whether speaker echo was removed from the mic, and if not, why not.
+        "aec": aec_record,
         # Which engine wrote the segments. A file written before SAA-220 has no
         # `engine` key; every one of those came from whisper.cpp.
         "engine": "parakeet" if engine == "parakeet" else "whisper.cpp",

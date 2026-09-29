@@ -3,6 +3,7 @@ recorder/systemtap/.build/
 recorder/miccap/.build/
 recorder/diarize/.build/
 recorder/parakeet/.build/
+recorder/aec/.build/
 # Fetched by fetch-models.sh (SAA-194), verified against the checked-in
 # CHECKSUMS.sha256 — the 21 MiB of model weights themselves don't belong in
 # git.
