@@ -34,9 +34,10 @@
 // reads speakers.display_name live at extraction time with no re-run of its
 // own. When this recording's current_extraction_run was already set before
 // this call — extraction already happened on the old, unnamed state — and
-// the answer names exactly one guest (the only case applySpeakerNames ever
-// writes a name), this re-runs extraction the same way apply-voice-names.ts
-// does, and for the same reason storeIdentityMetadata is deferred there: so
+// the answer names a host or exactly one guest (the cases applySpeakerNames
+// can write a name in — the host unconditionally, `them` only at one guest),
+// this re-runs extraction the same way apply-voice-names.ts does, and for
+// the same reason storeIdentityMetadata is deferred there: so
 // a crash mid-re-extract leaves this answer unrecorded and the next sweep
 // retries the whole thing. (A separate, narrower race — identity resolving
 // *during* an in-flight run rather than after one already finished — is
@@ -165,16 +166,21 @@ export async function applyIdentityForCapture(
   const speakerMapping = await applySpeakerNames(db, recordingId, answer);
   const scope = await applyScope(db, recordingId, answer);
 
-  // The only case applySpeakerNames ever writes a name in (SAA-129) — see
-  // its own guests.length !== 1 decline. Read from the answer, not from
-  // speakerMapping.applied: a sweep retry after a crash below finds the
-  // name already written by the crashed attempt and reports it skipped,
-  // not applied, but the answer's own content — and the need to retry —
-  // hasn't changed.
-  const namesOneGuest = attendeeRowsFrom(answer).filter((r) => !r.isHost).length === 1;
+  // The cases applySpeakerNames can write a name in (SAA-129, extended to
+  // always name the host regardless of guest count): `them` only when the
+  // answer names exactly one guest — see its own guests.length !== 1
+  // decline — and `me` whenever the answer names a host, unconditionally.
+  // Read from the answer, not from speakerMapping.applied: a sweep retry
+  // after a crash below finds the name already written by the crashed
+  // attempt and reports it skipped, not applied, but the answer's own
+  // content — and the need to retry — hasn't changed.
+  const attendeeRows = attendeeRowsFrom(answer);
+  const namesOneGuest = attendeeRows.filter((r) => !r.isHost && r.name).length === 1;
+  const namesHost = attendeeRows.some((r) => r.isHost && r.name);
+  const namesSomething = namesOneGuest || namesHost;
 
   let extractionRunUuid: string | null = null;
-  if (namesOneGuest && extractionAlreadyRan) {
+  if (namesSomething && extractionAlreadyRan) {
     if (!process.env.ANTHROPIC_API_KEY) {
       console.log(
         "apply-identity: name applied after extraction already ran, but ANTHROPIC_API_KEY is not set — moments not re-extracted",

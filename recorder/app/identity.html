@@ -334,6 +334,9 @@
 
   function renderVoices(namingData) {
     document.getElementById('waiting').style.display = 'none';
+    // Re-enable Save, disabled by showStep2Waiting() until there was
+    // something real to submit.
+    document.getElementById('save').disabled = false;
     const container = document.getElementById('voices');
     container.innerHTML = '';
     for (const voice of namingData.voices) {
@@ -435,6 +438,13 @@
     document.getElementById('waiting').style.display = 'block';
     document.getElementById('skip').textContent = 'Later';
     document.getElementById('save').textContent = 'Save';
+    // Nothing has been rendered yet — voiceChoices is empty — so a click here
+    // would submit an empty voices list, which writes a real
+    // voice-names-<stem>.json (pendingVoiceNamingStems and mostRecentNamedStem
+    // in identity-answer.js both key off that file's mere existence) while
+    // naming nothing. Disabled until renderVoices() has something to save, or
+    // the stopped state (which disables it again for its own reason).
+    document.getElementById('save').disabled = true;
     resize();
   }
 

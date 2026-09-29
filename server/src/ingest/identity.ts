@@ -349,12 +349,19 @@ export async function applySpeakerNames(
   const guests = rows.filter((r) => !r.isHost && r.name);
   const host = rows.find((r) => r.isHost && r.name) ?? null;
 
-  if (guests.length !== 1) {
+  // The guest-count gate below is about `them` only: with anything but
+  // exactly one guest, `them` is a mixed track and no single name belongs on
+  // it (SAA-94). It has no bearing on `me` — the host's own name comes from
+  // `self` in the same answer regardless of how many guests were also named,
+  // and used to be blocked by this same early return before it ever reached
+  // the naming loop below. `wanted` is built unconditionally so `me` is
+  // still offered a name on every path, including the declined one.
+  const oneGuestNamed = guests.length === 1;
+  if (!oneGuestNamed) {
     mapping.declined =
       guests.length === 0
         ? "the answer names no guest — nothing to map `them` to"
-        : `the answer names ${guests.length} guests — \`them\` is a mixed track and no assignment to it is correct (SAA-94). Labels left as ${HOST_LABEL}/${GUEST_LABEL}.`;
-    return mapping;
+        : `the answer names ${guests.length} guests — \`them\` is a mixed track and no assignment to it is correct (SAA-94). \`${GUEST_LABEL}\` left unnamed.`;
   }
 
   let speakers = await executor
@@ -367,12 +374,12 @@ export async function applySpeakerNames(
     .where(eq(schema.speakers.recordingId, recordingId));
 
   // Identity vs. diarization disagreement (SAA-194, addition 1), the
-  // "diarize already split `them` before this answer arrived" half. The
-  // answer above names exactly one guest — diarization's voice count is
-  // outranked by that confirmed answer, not the other way round: merge the
-  // Voice N rows back into a single `them` row so the naming below finds
-  // exactly what it would have found had diarize never run. The other half
-  // — identity already applied before diarize runs — is handled in
+  // "diarize already split `them` before this answer arrived" half. Only
+  // applies when the answer names exactly one guest — diarization's voice
+  // count is outranked by that confirmed answer, not the other way round:
+  // merge the Voice N rows back into a single `them` row so the naming below
+  // finds exactly what it would have found had diarize never run. The other
+  // half — identity already applied before diarize runs — is handled in
   // pipeline/diarize.ts, which checks `them.displayName` before ever
   // splitting.
   //
@@ -387,7 +394,7 @@ export async function applySpeakerNames(
   // whichever one Postgres returns first — the near-empty original, most
   // likely — naming it while every reassigned segment stayed pointed at the
   // other, unnamed one.
-  const voiceRows = speakers.filter((s) => isVoiceLabel(s.label));
+  const voiceRows = oneGuestNamed ? speakers.filter((s) => isVoiceLabel(s.label)) : [];
   if (voiceRows.length > 0) {
     const voiceIds = voiceRows.map((s) => s.id);
     const existingThem = speakers.find((s) => s.label === GUEST_LABEL);
@@ -411,7 +418,7 @@ export async function applySpeakerNames(
 
   const wanted = new Map<string, string | null>([
     [HOST_LABEL, host?.name ?? null],
-    [GUEST_LABEL, guests[0].name],
+    [GUEST_LABEL, oneGuestNamed ? guests[0].name : null],
   ]);
 
   for (const [label, name] of wanted) {
@@ -447,14 +454,18 @@ export async function applySpeakerNames(
 }
 
 export function describeMapping(mapping: SpeakerMapping): string {
-  if (mapping.declined) return `declined — ${mapping.declined}`;
+  // `declined` used to mean "nothing below ran" and could short-circuit the
+  // whole description. It no longer implies that — `me` can be applied in
+  // the same call that declines `them` — so it's reported alongside applied/
+  // skipped now, not instead of them.
   const applied = mapping.applied.length
     ? mapping.applied.map((a) => `${a.label}→${a.displayName}`).join(", ")
     : "none";
   const skipped = mapping.skipped.length
     ? ` skipped=${mapping.skipped.map((s) => `${s.label} (${s.reason})`).join(", ")}`
     : "";
-  return `applied=${applied}${skipped}`;
+  const declined = mapping.declined ? ` declined=${JSON.stringify(mapping.declined)}` : "";
+  return `applied=${applied}${skipped}${declined}`;
 }
 
 export function describeRows(rows: AttendeeRow[]): string {
