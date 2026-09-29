@@ -50,10 +50,12 @@ type DiarizeVoice = {
 };
 
 // voiceIndex is null for a diarized segment that exists but was excluded
-// (host echo, or under minimumVoiceSeconds — see main.swift). That's
-// different from no entry at all for a time range (a true diarization gap)
-// — assignVoice below treats the two differently.
-type DiarizeSegment = {
+// (host echo, or under minimumVoiceSeconds — see main.swift). assignVoice
+// below no longer treats that differently from no entry at all for a time
+// range (a true diarization gap): neither counts toward any voice's
+// coverage, and both leave a segment unnamed unless some OTHER real voice
+// covers a majority of it regardless.
+export type DiarizeSegment = {
   start: number;
   end: number;
   voiceIndex: number | null;
@@ -97,52 +99,59 @@ function skip(reason: string, extra: Partial<DiarizationStepResult> = {}): Diari
   };
 }
 
-// Reassign a `them` segment to the diarized voice with the greatest time
-// overlap — real or excluded. A null result means "leave this segment on
-// `them`," which happens two ways:
-//  - its best overlap is with an excluded voice's time range (host echo,
-//    or under minimumVoiceSeconds): deliberate, not a fallback.
-//  - no diarized segment overlaps it at all (a true gap under a whisper
-//    segment — the mic and the tap don't share a VAD): falls back to the
-//    nearest diarized segment by time distance, but only among REAL
-//    (non-excluded) voices — snapping a gap onto an excluded voice's
-//    position isn't a place to fall back to either.
-function assignVoice(
+// Reassign a `them` segment to the diarized voice whose real turns cover
+// MOST of it — majority rule (SAA-199, 2026-09-29), replacing "any positive
+// overlap wins." That rule attributed a segment on a sliver of overlap next
+// to an otherwise-uncovered stretch: 173.79-177.22 on the 09-28 sync, 10%
+// real coverage from one turn ending 0.34s into it, labelled Voice 1 when
+// the content is someone else's. A null result means "leave this segment on
+// `them`" — no real voice covers a majority of it, whether because nothing
+// overlaps it at all (a true gap), only an excluded voice's time range does
+// (host echo, or under minimumVoiceSeconds), or several real voices each
+// cover a minority (a genuine multi-speaker merge inside one whisper
+// segment — see the 430s/442s pair found the same day).
+//
+// No nearest-distance fallback either. Snapping an uncovered segment onto
+// whichever real voice happens to be closest in time is a guess with the
+// same shape as the sliver-overlap rule this replaces — proximity is not
+// coverage. Absent a majority, the segment goes unnamed.
+export const ASSIGN_VOICE_MAJORITY_FRACTION = 0.5;
+// Exported for the dry-run comparison this rule was verified against
+// (2026-09-29, against the removed sliver-overlap/nearest-fallback rule and
+// against the Fathom ground-truth file) — not called from outside this
+// module in the pipeline itself.
+export function assignVoice(
   segStart: number,
   segEnd: number,
   diarized: DiarizeSegment[],
 ): number | null {
-  let bestOverlap = 0;
-  // A separate `found` flag, not `bestVoice`'s own type, tracks "no
-  // overlapping segment yet": `d.voiceIndex` for an excluded segment is
-  // `null` in the type but arrives as `undefined` at runtime (Swift's
-  // JSONEncoder omits a nil Optional key rather than writing `null` —
-  // confirmed empirically, same issue fixed for hostEchoSourceLabel above),
-  // so `undefined` can't double as that sentinel without colliding with a
-  // real excluded-voice result.
-  let found = false;
-  let bestVoice: number | null = null;
+  const segDuration = segEnd - segStart;
+  if (segDuration <= 0) return null;
+  // Summed per real voiceIndex, not per individual turn: a segment can span
+  // several short turns of the same voice, and each should count toward
+  // that voice's total coverage rather than only the single best turn.
+  // Excluded-voice turns (`d.voiceIndex` null in the type, or `undefined`
+  // at runtime — Swift's JSONEncoder omits a nil Optional key rather than
+  // writing `null`, confirmed empirically) are never a candidate to assign
+  // onto; their time simply isn't counted toward any real voice's total.
+  const overlapByVoice = new Map<number, number>();
   for (const d of diarized) {
+    if (d.voiceIndex == null) continue;
     const overlap = Math.min(segEnd, d.end) - Math.max(segStart, d.start);
+    if (overlap <= 0) continue;
+    overlapByVoice.set(d.voiceIndex, (overlapByVoice.get(d.voiceIndex) ?? 0) + overlap);
+  }
+  let bestVoice: number | null = null;
+  let bestOverlap = 0;
+  for (const [voice, overlap] of overlapByVoice) {
     if (overlap > bestOverlap) {
       bestOverlap = overlap;
-      bestVoice = d.voiceIndex ?? null;
-      found = true;
+      bestVoice = voice;
     }
   }
-  if (found) return bestVoice;
-
-  let bestDistance = Infinity;
-  let nearestVoice: number | null = null;
-  for (const d of diarized) {
-    if (d.voiceIndex == null) continue; // catches both null and an omitted-key undefined
-    const distance = segStart >= d.end ? segStart - d.end : segEnd <= d.start ? d.start - segEnd : 0;
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      nearestVoice = d.voiceIndex;
-    }
-  }
-  return nearestVoice;
+  return bestVoice !== null && bestOverlap > segDuration * ASSIGN_VOICE_MAJORITY_FRACTION
+    ? bestVoice
+    : null;
 }
 
 export async function runDiarizationForCapture(

@@ -45,6 +45,40 @@ if arguments.count == 3, arguments[1] == "--fetch-models" {
     exit(0)
 }
 
+// Regression check for clipExclusionRanges (SAA-199, 2026-09-29), the same
+// plain-script/exit-code shape as pipeline/check-match-calendar.ts on the
+// server side: no models, no audio, no live dependency — just the pure
+// function against the three cases its own comment describes.
+//
+// Usage: diarize --check-clip-exclusion
+if arguments.count == 2, arguments[1] == "--check-clip-exclusion" {
+    struct Case { let name: String; let hostVoiceRanges: [ClipRange]; let micSpeechRanges: [(Double, Double)]; let expected: [(Double, Double)] }
+    let cases: [Case] = [
+        Case(
+            name: "no host reference at all -> exclude all mic speech",
+            hostVoiceRanges: [], micSpeechRanges: [(0, 10), (20, 30)],
+            expected: [(0, 10), (20, 30)]),
+        Case(
+            name: "reference existed, no cluster reached the cut-off -> exclude all mic speech",
+            hostVoiceRanges: [], micSpeechRanges: [(5, 12)],
+            expected: [(5, 12)]),
+        Case(
+            name: "reference with host cluster(s) found -> exclude only the host ranges",
+            hostVoiceRanges: [ClipRange(start: 5, end: 8)], micSpeechRanges: [(0, 10), (20, 30)],
+            expected: [(5, 8)]),
+    ]
+    var failures = 0
+    for c in cases {
+        let got = clipExclusionRanges(hostVoiceRanges: c.hostVoiceRanges, micSpeechRanges: c.micSpeechRanges)
+        let ok = got.count == c.expected.count
+            && zip(got, c.expected).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
+        print("\(ok ? "PASS" : "FAIL") \(c.name): got \(got)")
+        if !ok { failures += 1 }
+    }
+    print("\n\(cases.count - failures)/\(cases.count) passed")
+    exit(failures == 0 ? 0 : 1)
+}
+
 #if arch(arm64)
 #else
 FileHandle.standardError.write(
@@ -77,6 +111,24 @@ let outputPath = arguments[4]
 // recorded twice, so it should score in the true-match range — this sits
 // with margin on both sides of that gap.
 let hostEchoCosineThreshold: Float = 0.55
+
+// Cosine-similarity cut-off for classifying a MIC-track diarized cluster as
+// the host's own voice vs. bleed (SAA-199's "keep mic segments only where
+// the host-reference match says Jon is speaking"). A different comparison
+// from hostEchoCosineThreshold above — that one matches a whole TAP voice
+// cluster against the host reference; this matches a whole MIC voice
+// cluster against it — and not assumed to share its value.
+//
+// Calibrated from the only two clean-control mic clusters measured so far
+// (09-14 sync, AirPods — bleed is not physically possible there): a real
+// Jon cluster scored 0.918, and a non-speech noise cluster scored 0.510.
+// The cut-off sits in the upper half of that gap rather than at its
+// midpoint, because SAA-199's correct-or-absent rule makes a false keep
+// (someone else's words landing under Jon's name) worse than a false drop
+// (losing some of his own) — a cluster has to look confidently like Jon,
+// not just more like Jon than not, to be classified host. Revisit once
+// more clean-control data exists — this is two points, not a distribution.
+let hostClusterCosineThreshold: Float = 0.75
 
 // The diarizer's own clustering threshold — one of many OfflineDiarizerConfig
 // parameters below, all set to fluidaudiocli's offline-mode defaults
@@ -136,11 +188,19 @@ struct DiarizeSidecar: Codable {
     let modelRevision: String
     let clusteringThreshold: Double
     let hostEchoThreshold: Float
+    let hostClusterThreshold: Float
     let processingTimeSeconds: Double
     let voices: [VoiceOut]
     let segments: [SegmentOut]
     let hostEchoSourceLabel: String?
     let hostEchoSimilarity: Float?
+    // Time ranges on the MIC track classified as the host's own voice
+    // (SAA-199), not bleed — every mic cluster scoring >= hostClusterThreshold
+    // against the host reference embedding. Empty when no host reference
+    // could be built at all (see below): with nothing to compare against,
+    // nothing is claimed as host, which is the same drop-by-default posture
+    // as everywhere else this ships.
+    let hostVoiceRanges: [ClipRange]
     let error: String?
 }
 
@@ -159,8 +219,9 @@ func fail(_ message: String) -> Never {
         DiarizeSidecar(
             model: "fluidaudio-community-1", modelRevision: "",
             clusteringThreshold: diarizationClusteringThreshold,
-            hostEchoThreshold: hostEchoCosineThreshold, processingTimeSeconds: 0, voices: [], segments: [],
-            hostEchoSourceLabel: nil, hostEchoSimilarity: nil, error: message))
+            hostEchoThreshold: hostEchoCosineThreshold, hostClusterThreshold: hostClusterCosineThreshold,
+            processingTimeSeconds: 0, voices: [], segments: [],
+            hostEchoSourceLabel: nil, hostEchoSimilarity: nil, hostVoiceRanges: [], error: message))
     FileHandle.standardError.write("diarize: \(message)\n".data(using: .utf8)!)
     exit(1)
 }
@@ -343,6 +404,24 @@ func selectClips(
     return candidates.prefix(maxClipsPerVoice).map { ClipRange(start: $0.clip.0, end: $0.clip.1) }
 }
 
+// What selectClips excludes mic time on, given this capture's host
+// classification (SAA-199, 2026-09-29). hostVoiceRanges empty covers BOTH
+// "no host reference could be built" and "a reference existed but no mic
+// cluster reached hostClusterCosineThreshold" — the function can't tell
+// those apart from its arguments alone, and doesn't need to: either way the
+// answer is the same, fall back to excluding on every mic speech range
+// (micSpeechRanges), the old, unrestricted behavior. That's the STRICTER
+// fallback, not the looser one — an empty exclusion set would let a clip
+// through with no mic-based check on it at all, worse than before this
+// change, not equivalent to it. Only once at least one mic cluster clears
+// the cut-off does the exclusion narrow to hostVoiceRanges alone.
+func clipExclusionRanges(
+    hostVoiceRanges: [ClipRange],
+    micSpeechRanges: [(Double, Double)]
+) -> [(Double, Double)] {
+    hostVoiceRanges.isEmpty ? micSpeechRanges : hostVoiceRanges.map { ($0.start, $0.end) }
+}
+
 // No Task{}/DispatchSemaphore wrapper here — this file is literally
 // main.swift, which Swift treats as an implicit async context at the top
 // level (SE-0343), so `try await` works directly. An earlier version of
@@ -463,21 +542,71 @@ do {
             }
         }
 
-        // Mic speech ranges for clip selection (SAA-195), independent of and
-        // separate from the host-reference computation above: a full,
-        // ordinary diarization of the whole mic track. Its cluster identity
-        // doesn't matter here — this is deliberately not repeating the
-        // "pick the right cluster" problem the host reference had, since all
-        // that's needed is "was anyone speaking on mic at all during this
-        // window," for which every segment counts regardless of speaker.
+        // Host-classified mic ranges (SAA-199, addition 2026-09-29): a full,
+        // ordinary diarization of the whole mic track, same as before — but
+        // now each resulting cluster's own mean embedding is kept and
+        // compared against the host reference, instead of every segment
+        // counting regardless of speaker. Used for two things downstream:
+        // selectClips's exclusion set below (a clip is only ever colored by
+        // the host's OWN voice underneath it, never by bleed, since clips
+        // are cut from the tap file bleed never reaches), and SAA-199's own
+        // mic-segment keep/drop filter (built downstream of this sidecar,
+        // not here).
+        //
+        // Every cluster's score is logged when a host reference exists —
+        // this is the whole measurement the threshold above was calibrated
+        // against, and the next capture that needs recalibrating it depends
+        // on having this trail.
+        //
+        // No host reference at all (hostEmbedding nil) means nothing CAN be
+        // classified host — hostVoiceRanges (what the sidecar reports)
+        // stays empty, absent evidence claims nothing. But clip selection
+        // must not get looser just because the reference couldn't be built:
+        // micSpeechRanges (the old, unfiltered "was anyone on mic at all"
+        // list) is still computed every time and is what selectClips falls
+        // back to excluding on whenever there's no host reference to narrow
+        // it with — the same behavior this file had before this change.
         var micSpeechRanges: [(Double, Double)] = []
+        var hostVoiceRanges: [ClipRange] = []
         if FileManager.default.fileExists(atPath: micPath) {
             let micResult = try await manager.process(URL(fileURLWithPath: micPath))
             micSpeechRanges = micResult.segments.map { (Double($0.startTimeSeconds), Double($0.endTimeSeconds)) }
-            FileHandle.standardError.write(
-                "diarize: mic speech ranges for clip selection — \(micSpeechRanges.count) segment(s)\n"
-                    .data(using: .utf8)!)
+
+            if let hostEmbedding {
+                let micClusters = meanEmbeddings(micResult.segments)
+                var segmentsByMicLabel: [String: [(Double, Double)]] = [:]
+                for seg in micResult.segments {
+                    segmentsByMicLabel[seg.speakerId, default: []].append(
+                        (Double(seg.startTimeSeconds), Double(seg.endTimeSeconds)))
+                }
+                for (label, cluster) in micClusters {
+                    let similarity = cosineSimilarity(hostEmbedding, cluster.embedding)
+                    let isHost = similarity >= hostClusterCosineThreshold
+                    FileHandle.standardError.write(
+                        ("diarize: mic cluster \(label) — \(String(format: "%.1f", cluster.totalSeconds))s, " +
+                            "similarity_to_host=\(String(format: "%.3f", similarity)), " +
+                            "\(isHost ? "HOST" : "not-host")\n").data(using: .utf8)!)
+                    if isHost {
+                        for (s, e) in segmentsByMicLabel[label] ?? [] {
+                            hostVoiceRanges.append(ClipRange(start: s, end: e))
+                        }
+                    }
+                }
+                hostVoiceRanges.sort { $0.start < $1.start }
+                FileHandle.standardError.write(
+                    ("diarize: host-classified mic ranges — \(hostVoiceRanges.count) segment(s), " +
+                        "cut-off=\(hostClusterCosineThreshold)\n").data(using: .utf8)!)
+            } else {
+                FileHandle.standardError.write(
+                    ("diarize: no host reference — no mic cluster classified as host; all mic speech will be " +
+                        "dropped from the named transcript, and clip selection falls back to excluding on all " +
+                        "mic speech (unchanged from before this change)\n").data(using: .utf8)!)
+            }
         }
+        // See clipExclusionRanges's own comment for what this falls back to
+        // and why. Covered by `diarize --check-clip-exclusion`.
+        let micRangesToExcludeFromClips = clipExclusionRanges(
+            hostVoiceRanges: hostVoiceRanges, micSpeechRanges: micSpeechRanges)
 
         // A voice is excluded — folded back onto `them`, no Voice N of its
         // own — when it's the host echo, or when it falls under
@@ -516,7 +645,7 @@ do {
                 .flatMap { segmentsByLabel[$0] ?? [] }
             let clipRanges = selectClips(
                 ownSegments: ownSegments, otherVoiceSegments: otherSegments,
-                micSpeechRanges: micSpeechRanges)
+                micSpeechRanges: micRangesToExcludeFromClips)
             FileHandle.standardError.write(
                 "diarize: voice \(label) — \(clipRanges.count) clip(s) selected for naming\n".data(using: .utf8)!)
             return VoiceOut(
@@ -540,11 +669,13 @@ do {
                 modelRevision: modelRevision,
                 clusteringThreshold: diarizationClusteringThreshold,
                 hostEchoThreshold: hostEchoCosineThreshold,
+                hostClusterThreshold: hostClusterCosineThreshold,
                 processingTimeSeconds: processingTime,
                 voices: voicesOut,
                 segments: segmentsOut,
                 hostEchoSourceLabel: hostEchoSourceLabel,
                 hostEchoSimilarity: hostEchoSimilarity,
+                hostVoiceRanges: hostVoiceRanges,
                 error: nil
             ))
 } catch {
