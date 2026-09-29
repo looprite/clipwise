@@ -72,6 +72,9 @@ type TrackContent = {
 type Transcript = {
   inputs?: { tap?: string; mic?: string };
   downsampled?: { tap_16k?: string; mic_16k?: string };
+  // Which engine wrote the segments (SAA-220). Absent on a transcript written
+  // before that: every one of those came from whisper.cpp.
+  engine?: string;
   model?: string;
   labels?: string[];
   content?: { tap?: TrackContent; mic?: TrackContent };
@@ -175,6 +178,7 @@ export async function ingestTranscript(
 ): Promise<IngestResult> {
   const raw = readFileSync(transcriptPath, "utf8");
   const doc = JSON.parse(raw) as Transcript;
+  const engine = doc.engine ?? "whisper.cpp";
   // A malformed or missing segments field is a shape error on the file
   // itself — still refused, same as before. A transcript that parsed
   // cleanly and legitimately has no segments (SAA-91's silence gating
@@ -410,7 +414,12 @@ export async function ingestTranscript(
           transcript_source_path: transcriptPath,
           inputs: doc.inputs ?? null,
           downsampled: doc.downsampled ?? null,
-          whisper_model: doc.model ?? null,
+          // Kept under its old name for whisper transcripts so existing rows
+          // and queries read the same; a Parakeet transcript's model is under
+          // transcription_model only.
+          whisper_model: engine === "whisper.cpp" ? (doc.model ?? null) : null,
+          transcription_engine: engine,
+          transcription_model: doc.model ?? null,
           content: doc.content ?? null,
           // What the classifier decided and what it cost. A partial capture
           // has to explain itself later without anyone re-deriving it, and the
@@ -456,7 +465,7 @@ export async function ingestTranscript(
       .insert(schema.transcripts)
       .values({
         recordingId: recording.id,
-        provider: "whisper.cpp",
+        provider: engine,
         language: "en",
         // text is nullable (schema.ts:110); merged text is derivable
         // from the segments rows.
