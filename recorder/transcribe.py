@@ -40,7 +40,28 @@ Gating made this worse rather than causing it: ungated, the error could not
 exceed whisper's own 30-second window, and skipping silence removed that cap.
 See measure_segment_ends.
 
+Transcription engine (SAA-220, Architecture Decision 19). Two engines sit behind
+one boundary, and both return segments — {start_ms, end_ms, text} — so the merge,
+the payload and everything downstream of this file read the same shape:
+
+    whisper    whisper.cpp with Silero VAD gating. Segments are whisper's own,
+               with ends measured from the audio (SAA-147, measure_segment_ends).
+    parakeet   Parakeet TDT 0.6B v2 through FluidAudio (recorder/parakeet).
+               The binary returns words with start and end times; `build_lines`
+               here turns them into segments, breaking on a pause of
+               LINE_GAP_MS or more. A line ends at its last word's end time.
+               measure_segment_ends is NOT applied: whether word timings make
+               it unnecessary is unverified and deferred to Phase 4.
+
+Selected by CLIPWISE_TRANSCRIBER. A selected engine that is not installed is an
+error, never a silent fallback to the other one — same reasoning as the missing
+VAD model below: a recoverable failure beats a transcript from the wrong engine.
+
 Environment:
+    CLIPWISE_TRANSCRIBER  whisper | parakeet. Default: parakeet.
+    PARAKEET_BIN        parakeet binary. Default: recorder/parakeet/.build/release/parakeet
+    PARAKEET_MODELS     Directory holding parakeet-tdt-0.6b-v2/. Default:
+                        recorder/parakeet/models (populated by fetch-models.sh)
     WHISPER_MODEL       Path to a whisper.cpp GGML model. Default:
                         ~/Library/Application Support/whisper.cpp/models/ggml-small.en.bin
     WHISPER_CLI         whisper-cli binary. Default: whisper-cli on PATH.
@@ -75,6 +96,18 @@ TARGET_RATE = 16000
 # gap and coarse enough that an hour is ~3600 values per track rather than a
 # second transcript-sized payload.
 WINDOW_S = 1.0
+
+TRANSCRIBERS = ("whisper", "parakeet")
+DEFAULT_TRANSCRIBER = "parakeet"
+
+PARAKEET_DIR = Path(__file__).resolve().parent / "parakeet"
+DEFAULT_PARAKEET_BIN = str(PARAKEET_DIR / ".build" / "release" / "parakeet")
+DEFAULT_PARAKEET_MODELS = str(PARAKEET_DIR / "models")
+PARAKEET_MODEL_NAME = "parakeet-tdt-0.6b-v2"
+
+# A pause between two words of at least this long starts a new line. The value
+# SAA-219 scored the engine at; its results held at 0.3, 0.6 and 1.0 s.
+LINE_GAP_MS = 600
 
 DEFAULT_MODEL = str(
     Path.home()
@@ -575,19 +608,49 @@ def run_whisper(
     ]
 
 
-def main() -> int:
-    if len(sys.argv) != 4:
-        die("usage: transcribe.py <tap.f32le.pcm> <mic.wav> <output.json>")
+def build_lines(words: list[dict], gap_ms: int = LINE_GAP_MS) -> list[dict]:
+    """Words → segments. A gap of gap_ms or more between one word's end and the
+    next word's start begins a new line; a line ends at its last word's end."""
+    lines: list[list[dict]] = []
+    cur: list[dict] = []
+    for w in words:
+        if cur and w["start_ms"] - cur[-1]["end_ms"] >= gap_ms:
+            lines.append(cur)
+            cur = []
+        cur.append(w)
+    if cur:
+        lines.append(cur)
+    return [
+        {
+            "start_ms": ln[0]["start_ms"],
+            "end_ms": ln[-1]["end_ms"],
+            "text": " ".join(w["text"] for w in ln),
+        }
+        for ln in lines
+    ]
 
-    tap_src = Path(sys.argv[1]).resolve()
-    mic_src = Path(sys.argv[2]).resolve()
-    out_path = Path(sys.argv[3]).resolve()
 
-    for p in (tap_src, mic_src):
-        if not p.is_file():
-            die(f"input not found: {p}")
+def run_parakeet(wav_path: Path, parakeet_bin: str, models_dir: Path) -> list[dict]:
+    """Invoke the parakeet binary on a 16 kHz WAV; build lines from its words.
 
-    model_path = Path(os.environ.get("WHISPER_MODEL", DEFAULT_MODEL))
+    The words file is kept beside the audio as `<base>.parakeet.json`, the way
+    whisper-cli's `<base>.json` is, so a line can be traced back to the words it
+    was built from.
+    """
+    out_json = wav_path.with_name(wav_path.name[: -len(".wav")] + ".parakeet.json")
+    out_json.unlink(missing_ok=True)
+    subprocess.run(
+        [parakeet_bin, str(models_dir), str(wav_path), str(out_json)],
+        check=True, stdout=sys.stderr, stderr=sys.stderr,
+    )
+    if not out_json.exists():
+        die(f"parakeet: expected {out_json} not written")
+    return build_lines(json.loads(out_json.read_text())["words"])
+
+
+def whisper_prerequisites(model_path: Path, whisper_cli: str) -> tuple[Path, str, Path | None]:
+    """The checks whisper needs before any audio is touched; returns the model,
+    the cli name and the VAD model (None only under CLIPWISE_ALLOW_NO_VAD=1)."""
     if not model_path.is_file():
         die(
             f"whisper model not found at {model_path}. "
@@ -639,12 +702,57 @@ def main() -> int:
             "transcribing ungated. Expect phantom speech over silence (SAA-91).\n"
         )
         vad_model = None
+    return model_path, whisper_cli, vad_model
+
+
+def main() -> int:
+    if len(sys.argv) != 4:
+        die("usage: transcribe.py <tap.f32le.pcm> <mic.wav> <output.json>")
+
+    tap_src = Path(sys.argv[1]).resolve()
+    mic_src = Path(sys.argv[2]).resolve()
+    out_path = Path(sys.argv[3]).resolve()
+
+    for p in (tap_src, mic_src):
+        if not p.is_file():
+            die(f"input not found: {p}")
+
+    engine = os.environ.get("CLIPWISE_TRANSCRIBER", DEFAULT_TRANSCRIBER)
+    if engine not in TRANSCRIBERS:
+        die(f"CLIPWISE_TRANSCRIBER={engine!r}: expected one of {', '.join(TRANSCRIBERS)}")
+
+    parakeet_bin = ""
+    parakeet_models = Path(DEFAULT_PARAKEET_MODELS)
+    if engine == "parakeet":
+        parakeet_bin = os.environ.get("PARAKEET_BIN", DEFAULT_PARAKEET_BIN)
+        parakeet_models = Path(os.environ.get("PARAKEET_MODELS", DEFAULT_PARAKEET_MODELS))
+        if not os.access(parakeet_bin, os.X_OK):
+            die(
+                f"parakeet binary not found at {parakeet_bin}. Build it with:\n"
+                f"  swift build -c release --package-path {PARAKEET_DIR}"
+            )
+        if not (parakeet_models / PARAKEET_MODEL_NAME).is_dir():
+            die(
+                f"parakeet models not found at {parakeet_models / PARAKEET_MODEL_NAME}. "
+                f"Fetch them with:\n  {PARAKEET_DIR / 'fetch-models.sh'}"
+            )
+
+    model_path = Path(os.environ.get("WHISPER_MODEL", DEFAULT_MODEL))
+    whisper_cli = os.environ.get("WHISPER_CLI", "whisper-cli")
+    vad_model = None
+    if engine == "whisper":
+        model_path, whisper_cli, vad_model = whisper_prerequisites(model_path, whisper_cli)
 
     print(f"tap  src: {tap_src}")
     print(f"mic  src: {mic_src}")
-    print(f"model:    {model_path}")
-    print(f"whisper:  {shutil.which(whisper_cli)}")
-    print(f"vad:      {vad_model if vad_model else 'DISABLED (CLIPWISE_ALLOW_NO_VAD=1)'}")
+    print(f"engine:   {engine}")
+    if engine == "whisper":
+        print(f"model:    {model_path}")
+        print(f"whisper:  {shutil.which(whisper_cli)}")
+        print(f"vad:      {vad_model if vad_model else 'DISABLED (CLIPWISE_ALLOW_NO_VAD=1)'}")
+    else:
+        print(f"model:    {parakeet_models / PARAKEET_MODEL_NAME}")
+        print(f"parakeet: {parakeet_bin}")
 
     tap_bytes = tap_src.stat().st_size
     tap_frames = tap_bytes // (TAP_SAMPLE_BYTES * TAP_CH)
@@ -695,42 +803,45 @@ def main() -> int:
         f"rms={mic_stats['rms']:.6f} peak={mic_stats['peak']:.6f}"
     )
 
+    def transcribe(wav: Path) -> list[dict]:
+        if engine == "parakeet":
+            return run_parakeet(wav, parakeet_bin, parakeet_models)
+        return run_whisper(wav, model_path, whisper_cli, vad_model)
+
     print("transcribing tap track ...")
-    tap_segs = run_whisper(tap_16k, model_path, whisper_cli, vad_model)
+    tap_segs = transcribe(tap_16k)
     print(f"tap segments: {len(tap_segs)}")
 
     print("transcribing mic track ...")
-    mic_segs = run_whisper(mic_16k, model_path, whisper_cli, vad_model)
+    mic_segs = transcribe(mic_16k)
     print(f"mic segments: {len(mic_segs)}")
 
-    # Before the merge, so both tracks are on measured ends by the time they
-    # share a timeline, and before anything is written, so the database and
-    # the moments extracted from it inherit the corrected value rather than
-    # needing a backfill (SAA-147).
-    tap_moved = measure_segment_ends(tap_segs, tap_levels)
-    mic_moved = measure_segment_ends(mic_segs, mic_levels)
-    print(f"tap segment ends measured from audio: {tap_moved}/{len(tap_segs)} moved")
-    print(f"mic segment ends measured from audio: {mic_moved}/{len(mic_segs)} moved")
+    # Whisper only. Before the merge, so both tracks are on measured ends by the
+    # time they share a timeline, and before anything is written, so the
+    # database and the moments extracted from it inherit the corrected value
+    # rather than needing a backfill (SAA-147). Parakeet lines already end at
+    # their last word's end time; the correction is not ported to that path.
+    if engine == "whisper":
+        tap_moved = measure_segment_ends(tap_segs, tap_levels)
+        mic_moved = measure_segment_ends(mic_segs, mic_levels)
+        print(f"tap segment ends measured from audio: {tap_moved}/{len(tap_segs)} moved")
+        print(f"mic segment ends measured from audio: {mic_moved}/{len(mic_segs)} moved")
 
     merged = []
-    for s in tap_segs:
-        merged.append({
-            "track": "them",
-            "start_ms": s["start_ms"],
-            "end_ms": s["end_ms"],
+    for track, segs in (("them", tap_segs), ("me", mic_segs)):
+        for s in segs:
+            row = {
+                "track": track,
+                "start_ms": s["start_ms"],
+                "end_ms": s["end_ms"],
+                "text": s["text"],
+            }
             # Whisper's own value, kept so the correction is auditable and so
             # a consumer can tell a measured end from an unmeasured one.
-            "end_ms_reported": s["end_ms_reported"],
-            "text": s["text"],
-        })
-    for s in mic_segs:
-        merged.append({
-            "track": "me",
-            "start_ms": s["start_ms"],
-            "end_ms": s["end_ms"],
-            "end_ms_reported": s["end_ms_reported"],
-            "text": s["text"],
-        })
+            # Parakeet has no reported end to keep.
+            if "end_ms_reported" in s:
+                row["end_ms_reported"] = s["end_ms_reported"]
+            merged.append(row)
     merged.sort(key=lambda x: (x["start_ms"], x["track"]))
 
     labels = sorted({m["track"] for m in merged})
@@ -772,7 +883,7 @@ def main() -> int:
                     samples.append((i, a, b))
         return m, d, samples
 
-    for name, segs in (("tap", tap_segs), ("mic", mic_segs)):
+    for name, segs in (("tap", tap_segs), ("mic", mic_segs)) if engine == "whisper" else ():
         raw_match, _, _ = adjacency(segs, "end_ms_reported")
         match, diff, samp = adjacency(segs, "end_ms")
         pairs = max(1, len(segs) - 1)
@@ -785,7 +896,14 @@ def main() -> int:
     payload = {
         "inputs": {"tap": str(tap_src), "mic": str(mic_src)},
         "downsampled": {"tap_16k": str(tap_16k), "mic_16k": str(mic_16k)},
-        "model": str(model_path),
+        # Which engine wrote the segments. A file written before SAA-220 has no
+        # `engine` key; every one of those came from whisper.cpp.
+        "engine": "parakeet" if engine == "parakeet" else "whisper.cpp",
+        "model": (
+            str(parakeet_models / PARAKEET_MODEL_NAME)
+            if engine == "parakeet"
+            else str(model_path)
+        ),
         # How the audio was gated, so a transcript carries the reason it looks
         # the way it does. A file written before SAA-91 has no `vad` key at
         # all, which is how an ungated one is told apart from a gated one.
@@ -805,19 +923,23 @@ def main() -> int:
         # SAA-147 has no `segment_end` key, and its `end_ms` values are
         # whisper's `offsets.to` verbatim — which is the next speaker's start
         # time wherever the utterance had no measured ending.
-        "segment_end": {
-            "method": "audio_level_decay",
-            "frame_ms": SEGMENT_END_FRAME_MS,
-            "drop_db": SEGMENT_END_DROP_DB,
-            "hang_ms": SEGMENT_END_HANG_MS,
-            "pad_ms": SEGMENT_END_PAD_MS,
-            "lead_ms": SEGMENT_END_LEAD_MS,
-            "floor_margin_db": SEGMENT_END_FLOOR_MARGIN_DB,
-            "floor_db": {
-                "tap": track_noise_floor(tap_levels),
-                "mic": track_noise_floor(mic_levels),
-            },
-        },
+        "segment_end": (
+            {"method": "word_timings", "line_gap_ms": LINE_GAP_MS}
+            if engine == "parakeet"
+            else {
+                "method": "audio_level_decay",
+                "frame_ms": SEGMENT_END_FRAME_MS,
+                "drop_db": SEGMENT_END_DROP_DB,
+                "hang_ms": SEGMENT_END_HANG_MS,
+                "pad_ms": SEGMENT_END_PAD_MS,
+                "lead_ms": SEGMENT_END_LEAD_MS,
+                "floor_margin_db": SEGMENT_END_FLOOR_MARGIN_DB,
+                "floor_db": {
+                    "tap": track_noise_floor(tap_levels),
+                    "mic": track_noise_floor(mic_levels),
+                },
+            }
+        ),
         "labels": labels,
         # Per-track sample statistics, measured above on the 16k copies that
         # Whisper actually reads. Persisted rather than only printed because

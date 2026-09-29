@@ -50,14 +50,16 @@ step "building helper binaries"
 swift build -c release --package-path "$RECORDER_DIR/systemtap"
 swift build -c release --package-path "$RECORDER_DIR/miccap"
 swift build -c release --package-path "$RECORDER_DIR/diarize"
+swift build -c release --package-path "$RECORDER_DIR/parakeet"
 
 SYSTEMTAP_BIN="$RECORDER_DIR/systemtap/.build/release/systemtap"
 MICCAP_BIN="$RECORDER_DIR/miccap/.build/release/miccap"
 AUDIODEVS_BIN="$RECORDER_DIR/audiodevs"
 MICWATCH_BIN="$RECORDER_DIR/micwatch"
 DIARIZE_BIN="$RECORDER_DIR/diarize/.build/release/diarize"
+PARAKEET_BIN="$RECORDER_DIR/parakeet/.build/release/parakeet"
 
-for b in "$SYSTEMTAP_BIN" "$MICCAP_BIN" "$AUDIODEVS_BIN" "$MICWATCH_BIN" "$DIARIZE_BIN"; do
+for b in "$SYSTEMTAP_BIN" "$MICCAP_BIN" "$AUDIODEVS_BIN" "$MICWATCH_BIN" "$DIARIZE_BIN" "$PARAKEET_BIN"; do
     [ -x "$b" ] || { echo "build-app: missing $b after build" >&2; exit 1; }
 done
 
@@ -70,6 +72,14 @@ step "fetching speaker-diarization models"
 "$RECORDER_DIR/diarize/fetch-models.sh"
 DIARIZE_MODELS_DIR="$RECORDER_DIR/diarize/models/speaker-diarization"
 [ -d "$DIARIZE_MODELS_DIR" ] || { echo "build-app: missing $DIARIZE_MODELS_DIR after fetch-models.sh" >&2; exit 1; }
+
+# SAA-220: the Parakeet TDT 0.6B v2 model files transcribe.py's default engine
+# loads at runtime. Fetched and checksum-verified like the diarization models
+# above, and, like them, read from the checkout by the pipeline. Deliberately
+# NOT copied into the bundle: it is 443 MB, nothing reads a bundle copy, and
+# packaging is Phase 4.
+step "fetching Parakeet models"
+"$RECORDER_DIR/parakeet/fetch-models.sh"
 
 # --- 2. the Electron runtime ----------------------------------------------
 #

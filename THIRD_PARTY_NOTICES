@@ -73,6 +73,11 @@ README.md for the speaker diarization algorithms and techniques its
 pipeline builds on — and Fluid Inference
 (https://github.com/FluidInference/FluidAudio).
 
+Transcription
+-----------------------------
+
+NVIDIA Parakeet TDT 0.6B v2 (https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2), created by NVIDIA, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Modified: converted to Core ML by FluidInference (https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml).
+
 Apache License, Version 2.0 (FluidAudio SDK)
 -----------------------------------------------
 
