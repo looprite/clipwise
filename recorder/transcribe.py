@@ -629,6 +629,23 @@ def run_whisper(
     ]
 
 
+def read_autostop(mic_src: Path):
+    """The recorder's auto-stop record for this capture (SAA-184), or None.
+
+    Written into the manifest by the recorder at stop and carried through
+    unchanged, like the aec block. None when there is no manifest, it is
+    unreadable, or it predates the logging build (no `autostop` key).
+    """
+    name = mic_src.name
+    if not (name.startswith("mic-") and name.endswith(".wav")):
+        return None
+    manifest = mic_src.with_name(f"manifest-{name[4:-4]}.json")
+    try:
+        return json.loads(manifest.read_text()).get("autostop")
+    except (OSError, ValueError):
+        return None
+
+
 def decide_aec(mic_src: Path) -> dict:
     """Whether to remove speaker echo from this capture's mic, and why.
 
@@ -1003,6 +1020,9 @@ def main() -> int:
         },
         # Whether speaker echo was removed from the mic, and if not, why not.
         "aec": aec_record,
+        # Would-stop decision and actual stop, logging-only build (SAA-184).
+        # Null on captures from before that build.
+        "autostop": read_autostop(mic_src),
         # Which engine wrote the segments. A file written before SAA-220 has no
         # `engine` key; every one of those came from whisper.cpp.
         "engine": "parakeet" if engine == "parakeet" else "whisper.cpp",

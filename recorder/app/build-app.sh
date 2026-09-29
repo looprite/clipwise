@@ -152,6 +152,9 @@ cp "$APP_SRC/voice-naming-wait.js" "$C/Resources/app/voice-naming-wait.js"
 # App -> scope inference (SAA-170). main.js requires this by relative path;
 # a bundle without it fails to launch at all, not just to infer scope.
 cp "$APP_SRC/app-scope.js" "$C/Resources/app/app-scope.js"
+# The auto-stop decision, logging only (SAA-184). main.js requires this by
+# relative path; a bundle without it fails to launch.
+cp "$APP_SRC/autostop.js" "$C/Resources/app/autostop.js"
 install -m 755 "$SYSTEMTAP_BIN" "$C/Resources/bin/systemtap"
 install -m 755 "$MICCAP_BIN"    "$C/Resources/bin/miccap"
 install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"

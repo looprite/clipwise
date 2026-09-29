@@ -10,7 +10,7 @@
 // start is the record the pipeline keys on.
 
 const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell } = require('electron');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const zlib = require('zlib');
 const fs = require('fs');
@@ -26,6 +26,8 @@ const {
 } = require('./identity-answer.js');
 const { stopMessageFor } = require('./voice-naming-wait.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
+// Auto-stop decision, logging only (SAA-184). Pure; nothing it returns stops a capture.
+const autostop = require('./autostop.js');
 
 // --- constants ------------------------------------------------------------
 // All measurements come from 5-second captures on 2026-08-09. A long
@@ -310,9 +312,22 @@ function displayNameForDetectedKey(key, entry) {
 }
 
 // Which application keys are using the microphone right now, maintained from
-// micwatch's in_start/in_stop pairs. Only needed to answer one question: when
-// an answer arrives after its prompt has lapsed, is the call still going?
+// micwatch's in_start/in_stop pairs: key -> Map(pid -> { name, path }). A key
+// is present only while at least one of its processes holds the microphone.
+//
+// A pid set rather than one entry per key (SAA-184): Chrome can run more than
+// one helper process under the same bundle ID, and one entry per key let a
+// second helper overwrite the first, so either one releasing emptied the key.
+// Read for two questions: is a late-answered prompt's call still going, and
+// which pids held the trigger's microphone when a capture started.
 const detectActive = new Map();
+
+function detectActiveName(key) {
+    const pids = detectActive.get(key);
+    if (!pids) return null;
+    for (const v of pids.values()) return v.name;
+    return null;
+}
 
 // Identity prompts waiting to be shown, and the one on screen (SAA-114).
 // A queue rather than a single slot: two captures can stop before either is
@@ -1113,7 +1128,7 @@ function renderTray() {
     items.push(
         { type: 'separator' },
         { label: 'Start', enabled: !active, click: startRecording },
-        { label: 'Stop',  enabled:  active, click: stopRecording },
+        { label: 'Stop',  enabled:  active, click: () => stopRecording('manual') },
     );
     items.push({ type: 'separator' }, detectedAppsMenu());
     if (permissionIssue) {
@@ -1577,8 +1592,7 @@ function answerDetectPrompt(key, choice) {
         detectPending = null;
     } else {
         const known = detectApps && detectApps[key];
-        const active = detectActive.get(key);
-        name = (active && active.name) || (known && known.name) || key;
+        name = detectActiveName(key) || (known && known.name) || key;
         console.error(`detect: answer "${choice}" for ${key} arrived after its prompt lapsed`);
     }
     // name is what gets stored (setAppDecision, below) — the raw process-
@@ -1630,11 +1644,20 @@ function handleDetectEvent(ev) {
         // its first poll.
         detectActive.clear();
         console.error(`detect: micwatch ready (poll ${ev.poll_ms}ms)`);
+        autostopFeed(session && session.autostop, { type: 'detector_ready', t: Date.now() });
         return;
     }
     if (ev.event === 'in_stop') {
         const stopKey = detectKey(ev);
-        if (stopKey) detectActive.delete(stopKey);
+        if (stopKey) {
+            const pids = detectActive.get(stopKey);
+            if (pids) {
+                pids.delete(ev.pid);
+                if (pids.size === 0) detectActive.delete(stopKey);
+            }
+            autostopFeed(session && session.autostop, { type: 'in_stop', t: Date.now(),
+                key: stopKey, pid: ev.pid, path: ev.path || null, mw_t: ev.t || null });
+        }
         return;
     }
     if (ev.event !== 'in_start') return;
@@ -1645,7 +1668,10 @@ function handleDetectEvent(ev) {
     const key = detectKey(ev);
     if (!key) return;
     const name = detectName(ev);
-    detectActive.set(key, { pid: ev.pid, name });
+    if (!detectActive.has(key)) detectActive.set(key, new Map());
+    detectActive.get(key).set(ev.pid, { name, path: ev.path || null });
+    autostopFeed(session && session.autostop, { type: 'in_start', t: Date.now(),
+        key, pid: ev.pid, path: ev.path || null, mw_t: ev.t || null });
 
     const decision = appDecision(key);
     // Refresh a stored display name once a better one can be derived. Entries
@@ -1733,6 +1759,7 @@ function startDetector() {
     proc.once('exit', (code, signal) => {
         console.error(`detect: micwatch exited code=${code} signal=${signal}`);
         if (detectProc === proc) detectProc = null;
+        autostopFeed(session && session.autostop, { type: 'detector_exit', t: Date.now(), code, signal });
         if (isQuitting) return;
         detectRestartTimer = setTimeout(() => { detectRestartTimer = null; startDetector(); }, 3000);
     });
@@ -1741,6 +1768,106 @@ function startDetector() {
 function stopDetector() {
     if (detectRestartTimer) { clearTimeout(detectRestartTimer); detectRestartTimer = null; }
     if (detectProc) { try { detectProc.kill('SIGTERM'); } catch {} detectProc = null; }
+}
+
+// --- auto-stop, logging only (SAA-184) -------------------------------------
+//
+// Carries out what autostop.step() asks for: append its log lines, run the
+// grace timer, run the fresh holder check. Those are the only three effects.
+// Nothing on this path calls stopRecording(); a would-stop is a log line and,
+// at stop, a field on the capture. The per-app table in autostop.js is all
+// off, and in this build switching an app on only changes what is recorded.
+//
+// Each capture gets its own tracker object, and callbacks (timer, holder
+// check) are bound to that object rather than read from `session`, so a late
+// callback can never land on the next capture.
+//
+// When an app is switched on later: stopRecording() ends by opening the
+// identity prompt (promptForIdentity, from teardown's callback). An auto-stop
+// through the same function would open that window with nobody at the
+// machine. Not changed here.
+
+function autostopLogLine(a, entry) {
+    try { fs.appendFileSync(a.logPath, JSON.stringify(entry) + '\n'); } catch (err) {
+        console.error(`autostop: could not write ${a.logPath}: ${String(err)}`);
+    }
+}
+
+function autostopFeed(a, ev) {
+    if (!a) return;
+    const r = autostop.step(a.state, ev);
+    a.state = r.state;
+    for (const o of r.out) {
+        if (o.kind === 'log') autostopLogLine(a, o.entry);
+        else if (o.kind === 'schedule') {
+            if (a.timer) clearTimeout(a.timer);
+            a.timer = setTimeout(() => {
+                a.timer = null;
+                autostopFeed(a, { type: 'expiry', t: Date.now(), token: o.token });
+            }, Math.max(0, o.at - Date.now()));
+        } else if (o.kind === 'cancel_timer') {
+            if (a.timer) { clearTimeout(a.timer); a.timer = null; }
+        } else if (o.kind === 'check_holders') {
+            autostopCheckHolders(a, o.token);
+        }
+    }
+}
+
+// The fresh check at expiry: micwatch's own one-shot dump of every process
+// running input right now, keyed the same way as the stream. A failed or
+// unreadable check reports null keys, which the rule treats as "do not stop".
+function autostopCheckHolders(a, token) {
+    execFile(MICWATCH_BIN, ['--once'], { timeout: 5000 }, (err, stdout) => {
+        let keys = null;
+        let error = null;
+        if (err) error = String(err);
+        else {
+            keys = [];
+            for (const line of String(stdout).split('\n')) {
+                if (!line.trim()) continue;
+                try {
+                    const ev = JSON.parse(line);
+                    const k = ev.event === 'in_now' ? detectKey(ev) : null;
+                    if (k && !keys.includes(k)) keys.push(k);
+                } catch { error = `unparsed line: ${line}`; keys = null; break; }
+            }
+        }
+        autostopFeed(a, { type: 'holders', t: Date.now(), token, keys, error });
+    });
+}
+
+function autostopBegin(stem, trigger) {
+    const a = {
+        logPath: path.join(OUTDIR, `autostop-${stem}.log`),
+        state: autostop.initialState(),
+        timer: null,
+    };
+    const pids = trigger && detectActive.get(trigger.key)
+        ? [...detectActive.get(trigger.key).keys()] : [];
+    autostopFeed(a, { type: 'capture_start', t: Date.now(), trigger: trigger || null, pids });
+    return a;
+}
+
+// At stop: close the tracker and write its record into the manifest, which
+// transcribe.py carries into the transcript and ingest into
+// recordings.metadata.autostop — the same route as the aec block. Runs before
+// teardown, whose manifest rewrites read-modify-write and keep this key.
+function autostopFinish(s, cause) {
+    const a = s && s.autostop;
+    if (!a) return;
+    autostopFeed(a, { type: 'stop', t: Date.now(), cause });
+    if (a.timer) { clearTimeout(a.timer); a.timer = null; }
+    const block = autostop.autostopBlock(a.state);
+    autostopLogLine(a, { event: 'block', ...block });
+    try {
+        const manifest = JSON.parse(fs.readFileSync(s.paths.manifest, 'utf8'));
+        manifest.autostop = block;
+        fs.writeFileSync(s.paths.manifest, JSON.stringify(manifest, null, 2) + '\n');
+    } catch (err) {
+        console.error(`autostop: could not write block to manifest: ${String(err)}`);
+        autostopLogLine(a, { event: 'manifest_write_failed', error: String(err) });
+    }
+    s.autostop = null;
 }
 
 // --- pipeline -------------------------------------------------------------
@@ -2531,6 +2658,9 @@ function startRecording() {
         growth: { tap: { size: 0, ts: 0 }, mic: { size: 0, ts: 0 } },
         timers: {},
     };
+    // Per-capture would-stop tracker and its autostop-<stem>.log (SAA-184).
+    // Logging only.
+    session.autostop = autostopBegin(stamp, trigger);
     // Only capture-child exits drive state. Poller death is not fatal.
     tapProc.once('exit', () => onCaptureChildExit('tap'));
     micProc.once('exit', () => onCaptureChildExit('mic'));
@@ -2552,7 +2682,7 @@ function onCaptureChildExit(which) {
                      `code=${proc.exitCode} signal=${proc.signalCode}\n`;
         try { fs.appendFileSync(logPath, line); } catch {}
     }
-    stopRecording();
+    stopRecording('child_exit');
 }
 
 // A capture that never produced a byte on both tracks. SAA-90 already catches
@@ -2581,7 +2711,7 @@ function onStartingTimeout() {
             note: 'Capture never started — a permission prompt may be waiting',
         };
     }
-    stopRecording();
+    stopRecording('start_timeout');
 }
 
 function pollTick() {
@@ -2635,8 +2765,12 @@ function teardown(cb) {
     }, KILL_GRACE_MS);
 }
 
-function stopRecording() {
+// `cause` is what stopped it, recorded on the capture's autostop block:
+// 'manual' (the tray), 'child_exit', 'start_timeout'. No auto-stop cause
+// exists in this build.
+function stopRecording(cause) {
     if (state === 'stopped') return;
+    autostopFinish(session, typeof cause === 'string' ? cause : 'manual');
     // Tray flips to Stopped up to KILL_GRACE_MS before children actually
     // exit. Accepted: Stop is user-initiated and nobody is watching the
     // gap. Record the gap here so it isn't rediscovered as a bug later.
@@ -2681,6 +2815,7 @@ function quitApp() {
     // get past. That capture is unidentified — the same outcome as dismissing
     // the prompt, and correctable the same way.
     isQuitting = true;
+    autostopFinish(session, 'quit');
     stopDetector();
     const stem = session && session.reachedRecording ? session.stem : null;
     if (state !== 'stopped') setState('stopped');

@@ -78,6 +78,9 @@ type Transcript = {
   // Whether speaker echo was removed from the mic before transcription, and if
   // not, why not (SAA-218). Absent on a transcript written before that.
   aec?: unknown;
+  // The recorder's would-stop decision and the actual stop (SAA-184),
+  // carried from the manifest. Absent on a transcript written before that.
+  autostop?: unknown;
   model?: string;
   labels?: string[];
   content?: { tap?: TrackContent; mic?: TrackContent };
@@ -422,6 +425,7 @@ export async function ingestTranscript(
           // transcription_model only.
           whisper_model: engine === "whisper.cpp" ? (doc.model ?? null) : null,
           aec: doc.aec ?? null,
+          autostop: doc.autostop ?? null,
           transcription_engine: engine,
           transcription_model: doc.model ?? null,
           content: doc.content ?? null,
