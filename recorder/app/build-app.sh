@@ -51,6 +51,8 @@ swift build -c release --package-path "$RECORDER_DIR/systemtap"
 swift build -c release --package-path "$RECORDER_DIR/miccap"
 swift build -c release --package-path "$RECORDER_DIR/diarize"
 swift build -c release --package-path "$RECORDER_DIR/parakeet"
+# SAA-218: WebRTC AEC3, for removing speaker echo from the mic. Needs meson and ninja.
+"$RECORDER_DIR/aec/build.sh"
 
 SYSTEMTAP_BIN="$RECORDER_DIR/systemtap/.build/release/systemtap"
 MICCAP_BIN="$RECORDER_DIR/miccap/.build/release/miccap"
@@ -58,8 +60,9 @@ AUDIODEVS_BIN="$RECORDER_DIR/audiodevs"
 MICWATCH_BIN="$RECORDER_DIR/micwatch"
 DIARIZE_BIN="$RECORDER_DIR/diarize/.build/release/diarize"
 PARAKEET_BIN="$RECORDER_DIR/parakeet/.build/release/parakeet"
+AEC_BIN="$RECORDER_DIR/aec/.build/release/aec"
 
-for b in "$SYSTEMTAP_BIN" "$MICCAP_BIN" "$AUDIODEVS_BIN" "$MICWATCH_BIN" "$DIARIZE_BIN" "$PARAKEET_BIN"; do
+for b in "$SYSTEMTAP_BIN" "$MICCAP_BIN" "$AUDIODEVS_BIN" "$MICWATCH_BIN" "$DIARIZE_BIN" "$PARAKEET_BIN" "$AEC_BIN"; do
     [ -x "$b" ] || { echo "build-app: missing $b after build" >&2; exit 1; }
 done
 

@@ -75,6 +75,9 @@ type Transcript = {
   // Which engine wrote the segments (SAA-220). Absent on a transcript written
   // before that: every one of those came from whisper.cpp.
   engine?: string;
+  // Whether speaker echo was removed from the mic before transcription, and if
+  // not, why not (SAA-218). Absent on a transcript written before that.
+  aec?: unknown;
   model?: string;
   labels?: string[];
   content?: { tap?: TrackContent; mic?: TrackContent };
@@ -418,6 +421,7 @@ export async function ingestTranscript(
           // and queries read the same; a Parakeet transcript's model is under
           // transcription_model only.
           whisper_model: engine === "whisper.cpp" ? (doc.model ?? null) : null,
+          aec: doc.aec ?? null,
           transcription_engine: engine,
           transcription_model: doc.model ?? null,
           content: doc.content ?? null,
