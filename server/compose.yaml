@@ -14,7 +14,8 @@ services:
       # container listens on 3000; host port comes from .env (PORT), default 3000
       PORT: "3000"
     ports:
-      - "${PORT:-3000}:3000"
+      - "127.0.0.1:${PORT:-3000}:3000"
+      - "[::1]:${PORT:-3000}:3000"
     volumes:
       - ./src:/app/src
       - ./tsconfig.json:/app/tsconfig.json
@@ -41,7 +42,8 @@ services:
     environment:
       PORT: "3000"
     ports:
-      - "${PORT:-3000}:3000"
+      - "127.0.0.1:${PORT:-3000}:3000"
+      - "[::1]:${PORT:-3000}:3000"
     restart: unless-stopped
 
 volumes:
