@@ -12,8 +12,9 @@
 //
 // Measurement cases: a person presses Stop within seconds of hanging up, which
 // cancels the window, so would_stop_at stays null even when the rule is right.
-// `matched` mirrors the tally SQL: would_stop_at set, or a window still open at
-// a manual stop. `detail` checks fields of the block that the tally reads.
+// `matched` mirrors the tally SQL (autostop-tally.sql): would_stop_at set and the
+// trigger's mic not back after it, or a window still open at a manual stop.
+// `detail` checks fields of the block that the tally reads.
 //
 // --naive swaps in "would stop on the first trigger release" (no pid set, no
 // grace window, no holder check). It must FAIL several MUST NOT cases. If it
@@ -39,7 +40,11 @@ const off = (key, pid, t) => ({ type: 'in_stop', t, key, pid, path: PATH[key], m
 const stop = (t, cause = 'manual') => ({ type: 'stop', t, cause });
 
 const iso = t => new Date(t).toISOString();
-const matched = b => !!(b.would_stop_at || (b.window_open_at_stop && b.stop_cause === 'manual'));
+// A would-stop followed by the mic coming back never counts; a missing
+// events_after_would_stop counts as 0, as in the SQL's coalesce.
+const reacquiredAfterWouldStop = b => ((b.events_after_would_stop && b.events_after_would_stop.in_start) || 0) > 0;
+const matched = b => !!((b.would_stop_at && !reacquiredAfterWouldStop(b))
+    || (b.window_open_at_stop && b.stop_cause === 'manual'));
 
 const CASES = [
     { name: 'call ends (Meet): release, window expires, nobody holds', expect: 'stop', at: m(30) + GRACE_MS,
@@ -84,7 +89,7 @@ const CASES = [
     { name: 'one of two helpers released, manual stop 5s later: not matched', expect: 'none', matched: false,
       detail: b => b.window_open_at_stop === null,
       events: [start(CHROME, [1337, 1338]), off(CHROME, 1338, m(30)), stop(m(30, 5))] },
-    { name: 'would-stop fires, mic comes back after: reacquire counted', expect: 'stop', at: m(10) + GRACE_MS, matched: true,
+    { name: 'would-stop fires, mic comes back after: reacquire not counted', expect: 'stop', at: m(10) + GRACE_MS, matched: false,
       detail: b => b.events_after_would_stop.in_start === 1 && b.events_after_would_stop.in_stop === 0,
       events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1400, m(15)), stop(m(40))] },
     { name: 'expiry check finds trigger still holding (missed in_start)', expect: 'none',
