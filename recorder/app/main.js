@@ -26,7 +26,9 @@ const {
 } = require('./identity-answer.js');
 const { stopMessageFor } = require('./voice-naming-wait.js');
 // Which meeting the tray's "Save transcript" item acts on (SAA-199).
-const { lastMeeting, stemTimeMs } = require('./last-meeting.js');
+const { lastMeeting, classifyCapture, stemTimeMs } = require('./last-meeting.js');
+// The recent-meetings window's rows (SAA-217).
+const { listMeetings } = require('./meetings.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // Auto-stop decision, logging only (SAA-184). Pure; nothing it returns stops a capture.
 const autostop = require('./autostop.js');
@@ -233,6 +235,7 @@ const VOICE_NAMING_STOP_MESSAGE_MS = 5000;
 // what the OS knows and not what a person would type. Guessing it would put a
 // name nobody chose on every recording.
 const IDENTITY_HTML = path.join(__dirname, 'identity.html');
+const MEETINGS_HTML = path.join(__dirname, 'meetings.html');
 // How long the prompt waits for the page to report its height before showing
 // itself anyway. Short enough not to be noticed after a capture, long enough
 // for a local file: the measurement is sent from the page's first script run.
@@ -893,11 +896,13 @@ function saveTranscript(meeting) {
     if (savingTranscript || meeting.state !== 'ready') return;
     savingTranscript = true;
     renderTray();
+    sendMeetingsData();
     const tmp = path.join(os.tmpdir(), `clipwise-transcript-${randomUUID()}.txt`);
     const done = () => {
         try { fs.rmSync(tmp, { force: true }); } catch {}
         savingTranscript = false;
         renderTray();
+        sendMeetingsData();
     };
     execFile(
         TSX_BIN,
@@ -932,6 +937,81 @@ function saveTranscript(meeting) {
                 done();
             }
         });
+}
+
+// --- recent meetings window (SAA-217) -------------------------------------
+//
+// The past week's captures, to pick the right meeting before acting on it
+// (Architecture Decision 18). Rows come from meetings.js — files only, no
+// transcript is read. The window offers the two actions that need a chosen
+// meeting: save its transcript (the same path as the tray item) and fix its
+// speaker names (the naming window, reopened for that recording).
+
+let meetingsWindow = null;
+let meetingsTimer = null;
+const STEM_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$/;
+
+function sendMeetingsData() {
+    if (!meetingsWindow || meetingsWindow.isDestroyed()) return;
+    meetingsWindow.webContents.send('meetings:data', {
+        rows: listMeetings(OUTDIR),
+        saving: savingTranscript,
+    });
+}
+
+function openMeetingsWindow() {
+    if (meetingsWindow && !meetingsWindow.isDestroyed()) {
+        meetingsWindow.show();
+        try { app.focus({ steal: true }); } catch {}
+        return;
+    }
+    meetingsWindow = new BrowserWindow({
+        width: 640,
+        height: 560,
+        minWidth: 520,
+        minHeight: 320,
+        title: 'Recent meetings',
+        show: false,
+        webPreferences: { nodeIntegration: true, contextIsolation: false },
+    });
+    const win = meetingsWindow;
+    win.once('ready-to-show', () => {
+        win.show();
+        try { app.focus({ steal: true }); } catch {}
+    });
+    win.on('closed', () => {
+        if (meetingsTimer) { clearInterval(meetingsTimer); meetingsTimer = null; }
+        if (meetingsWindow === win) meetingsWindow = null;
+    });
+    // A capture still being processed becomes ready on its own.
+    meetingsTimer = setInterval(sendMeetingsData, 5000);
+    win.loadFile(MEETINGS_HTML).catch((err) => {
+        console.error(`meetings: window failed to load: ${String(err)}`);
+        try { win.close(); } catch {}
+    });
+}
+
+function registerMeetingsIpc() {
+    ipcMain.on('meetings:ready', () => sendMeetingsData());
+    ipcMain.on('meetings:save', (_event, payload) => {
+        const stem = payload && payload.stem;
+        if (typeof stem !== 'string' || !STEM_PATTERN.test(stem)) return;
+        // Re-classified at click time: what the row showed may be stale.
+        const c = classifyCapture(OUTDIR, stem);
+        if (c.state !== 'ready') {
+            notify('Clipwise: nothing to save', `The capture ${stem} has no transcript to save yet.`);
+            sendMeetingsData();
+            return;
+        }
+        saveTranscript(c);
+    });
+    ipcMain.on('meetings:fix', (_event, payload) => {
+        const stem = payload && payload.stem;
+        if (typeof stem !== 'string' || !STEM_PATTERN.test(stem)) return;
+        // A rename only when names were already saved; otherwise it is the
+        // first naming of this call's voices.
+        reopenVoiceNaming(stem, { rename: readVoiceNamesAnswer(OUTDIR, stem) !== null });
+    });
 }
 
 // Reopens step 2 directly for a capture whose naming was left for later
@@ -1288,8 +1368,9 @@ function renderTray() {
     // meeting with a transcript, named in the label so it is visible which one
     // will be saved. See last-meeting.js for which captures count.
     const meeting = lastMeeting(OUTDIR);
+    items.push({ type: 'separator' });
+    items.push({ label: 'Recent meetings…', click: openMeetingsWindow });
     if (meeting) {
-        items.push({ type: 'separator' });
         items.push({
             label: saveTranscriptLabel(meeting),
             enabled: meeting.state === 'ready' && !savingTranscript,
@@ -3003,6 +3084,7 @@ app.whenReady().then(() => {
     tray = new Tray(iconFor('stopped'));
     setState('stopped');
     registerIdentityIpc();
+    registerMeetingsIpc();
     // Before anything spawns its own children (SAA-152) — see
     // sweepStrayChildren's comment for why that ordering matters.
     sweepStrayChildren();
