@@ -60,7 +60,7 @@ function stemTimeMs(stem) {
 }
 
 // The meeting's title: the calendar event it was matched to. Null when there
-// was no match; the caller shows "Untitled call".
+// was no match; the caller shows "Untitled".
 function calendarTitle(dir, stem) {
     const doc = readJson(path.join(dir, `calendar-match-${stem}.json`));
     return doc && typeof doc.title === 'string' && doc.title.trim() ? doc.title.trim() : null;

@@ -9,7 +9,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { listMeetings } = require('./meetings.js');
+const { listMeetings, filterRows } = require('./meetings.js');
 const { lastMeeting } = require('./last-meeting.js');
 
 let failed = 0;
@@ -73,19 +73,30 @@ check('states, newest first: pending, ready, failed, nospeech, ready, ready',
 const g = byStem['2026-03-02T15-00-00Z'];
 check('group call: title, participants without the person themselves, people count',
     g.title === 'Made-Up Sync' && g.participants.join(',') === 'Alice Example,Bob Example' && g.people === 3, JSON.stringify(g));
-check('group call: duration, work, app, voices not named yet',
-    g.durationSec > 839 && g.scope === 'work' && g.app === 'Google Chrome' && g.namingPending === true && g.canFix === true &&
-    g.line === 'Work · Google Chrome · 3 people · voices not named yet', g.line);
+check('group call: duration, work, voices not named yet; line is the state note only',
+    g.durationSec > 839 && g.scope === 'work' && g.namingPending === true && g.canFix === true &&
+    g.line === 'voices not named yet', g.line);
 const named = byStem['2026-03-05T18-00-00Z'];
 check('named group call: Fix names on, no "not named" note', named.canFix && !named.namingPending && !/not named/.test(named.line), named.line);
 const one = byStem['2026-03-03T19-00-00Z'];
-check('1:1: FaceTime, personal, Fix names off, untitled',
-    one.app === 'FaceTime' && one.scope === 'personal' && one.canFix === false && one.title === null && one.line === 'Personal · FaceTime · 2 people', one.line);
+check('1:1: personal, Fix names off, untitled, empty third line',
+    one.scope === 'personal' && one.canFix === false && one.title === null && one.line === '', one.line);
 const none = byStem['2026-03-04T14-00-00Z'];
 check('no speech: says so, cannot save', none.state === 'nospeech' && !none.canSave && none.line.startsWith('No speech captured'), none.line);
 const bad = byStem['2026-03-04T21-30-00Z'];
 check('failed capture: says so', bad.state === 'failed' && bad.line.startsWith("Couldn't be processed"), bad.line);
 check('processing: says so, cannot save yet', rows[0].state === 'pending' && !rows[0].canSave && rows[0].line.startsWith('Still processing'), rows[0].line);
+
+check('no ready row\'s line names an app, "Started manually", Personal/Work or a people count',
+    rows.every((r) => !/Chrome|FaceTime|Started manually|Personal|Work|people/.test(r.line)), rows.map((r) => r.line).join(' | '));
+const stemsOf = (f) => filterRows(rows, f).map((r) => r.stem).sort().join(',');
+const scoped = (sc) => rows.filter((r) => r.scope === sc).map((r) => r.stem).sort().join(',');
+check('filter All: every row', filterRows(rows, 'all').length === rows.length);
+check('filter Work: only Work rows (the group call)', stemsOf('work') === scoped('work') && stemsOf('work') === '2026-03-02T15-00-00Z', stemsOf('work'));
+check('filter Personal: only Personal rows (the 1:1)', stemsOf('personal') === scoped('personal') && stemsOf('personal') === '2026-03-03T19-00-00Z', stemsOf('personal'));
+check('rows with no scope recorded show under All only',
+    rows.filter((r) => r.scope === null).length === 4 &&
+    rows.filter((r) => r.scope === null).every((r) => filterRows(rows, 'all').includes(r) && !filterRows(rows, 'work').includes(r) && !filterRows(rows, 'personal').includes(r)));
 
 const sig = rows.filter((r) => r.state !== 'pending').map((r) => [r.title, r.participants.join('+'), r.startedAtMs, r.durationSec, r.line].join('|'));
 check('every row is distinguishable from its own fields', new Set(sig).size === sig.length);

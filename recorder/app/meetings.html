@@ -5,7 +5,7 @@
 <!-- The recent-meetings window (SAA-217, Architecture Decision 18): the past
      week's captures, so the right meeting can be picked before acting on it.
      A row says which meeting it is — title, who was on it, when, how long,
-     and one line on what kind of meeting — and offers two actions: save its
+     and one line for state notes (topics later) — and offers two actions: save its
      transcript, fix its speaker names. It is deliberately not a place to read
      meetings: no moments, no search, no transcript, no summary. Reading
      meetings back happens in Claude.
@@ -69,6 +69,11 @@
   button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button:disabled { opacity: 0.45; }
+  #filter { display: inline-flex; margin-top: 10px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  #filter button { border: 0; border-radius: 0; background: transparent; padding: 3px 12px; }
+  #filter button + button { border-left: 1px solid var(--border); }
+  #filter button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  #filter button[aria-pressed="true"]:hover { color: #fff; }
   #empty { color: var(--muted); padding: 24px 0; text-align: center; }
 </style>
 </head>
@@ -76,11 +81,19 @@
 <header>
   <h1>Recent meetings</h1>
   <p class="sub">The past 7 days. Pick a meeting to save its transcript or fix who said what.</p>
+  <div id="filter" role="group" aria-label="Show"></div>
 </header>
 <div id="list"></div>
 <script>
   const { ipcRenderer } = require('electron');
+  const { filterRows } = require('./meetings.js');
   const listEl = document.getElementById('list');
+  const filterEl = document.getElementById('filter');
+
+  // All / Work / Personal (filterRows: a row with no scope shows under All only).
+  const FILTERS = [['all', 'All'], ['work', 'Work'], ['personal', 'Personal']];
+  let filter = 'all';
+  let last = { rows: [], saving: false };
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -114,10 +127,26 @@
     pending: 'Still being processed.',
   };
 
-  function render(rows, saving) {
+  function renderFilter() {
+    filterEl.textContent = '';
+    for (const [key, label] of FILTERS) {
+      const b = el('button', null, label);
+      b.dataset.filter = key;
+      b.setAttribute('aria-pressed', String(key === filter));
+      b.addEventListener('click', () => { filter = key; renderFilter(); render(last.rows, last.saving); });
+      filterEl.appendChild(b);
+    }
+  }
+
+  function render(allRows, saving) {
+    last = { rows: allRows, saving };
+    const rows = filterRows(allRows, filter);
     listEl.textContent = '';
     if (rows.length === 0) {
-      listEl.appendChild(el('div', null, 'No meetings in the past 7 days.')).id = 'empty';
+      const msg = allRows.length === 0
+        ? 'No meetings in the past 7 days.'
+        : `No ${filter} meetings in the past 7 days.`;
+      listEl.appendChild(el('div', null, msg)).id = 'empty';
       return;
     }
     let lastDay = null;
@@ -133,13 +162,13 @@
       row.dataset.stem = r.stem;
       const main = el('div', 'main');
       const top = el('div', 'top');
-      top.appendChild(el('span', 'title', r.title || 'Untitled call'));
+      top.appendChild(el('span', 'title', r.title || 'Untitled'));
       top.appendChild(el('span', 'when', [date, time, dur].filter(Boolean).join(' · ')));
       main.appendChild(top);
       main.appendChild(r.participants.length
         ? el('div', 'people', r.participants.join(', '))
         : el('div', 'people none', 'No one named'));
-      main.appendChild(el('div', 'line', r.line));
+      if (r.line) main.appendChild(el('div', 'line', r.line));
       row.appendChild(main);
 
       const acts = el('div', 'acts');
@@ -147,17 +176,19 @@
       save.disabled = !r.canSave || saving;
       save.title = r.canSave ? '' : SAVE_OFF[r.state] || '';
       save.addEventListener('click', () => ipcRenderer.send('meetings:save', { stem: r.stem }));
-      const fix = el('button', null, 'Fix names');
-      fix.disabled = !r.canFix;
-      fix.title = r.canFix ? '' : 'Only a call with several voices has names to fix.';
-      fix.addEventListener('click', () => ipcRenderer.send('meetings:fix', { stem: r.stem }));
       acts.appendChild(save);
-      acts.appendChild(fix);
+      // Only a call with several voices has names to fix; otherwise no button.
+      if (r.canFix) {
+        const fix = el('button', null, 'Fix names');
+        fix.addEventListener('click', () => ipcRenderer.send('meetings:fix', { stem: r.stem }));
+        acts.appendChild(fix);
+      }
       row.appendChild(acts);
       listEl.appendChild(row);
     }
   }
 
+  renderFilter();
   ipcRenderer.on('meetings:data', (_e, payload) => render(payload.rows, payload.saving));
   ipcRenderer.send('meetings:ready');
 </script>

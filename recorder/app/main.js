@@ -883,7 +883,7 @@ function stemWeekdayTime(stem) {
 }
 
 function saveTranscriptLabel(meeting) {
-    let title = meeting.title || 'Untitled call';
+    let title = meeting.title || 'Untitled';
     if (title.length > 48) title = title.slice(0, 47) + '…';
     const base = `Save transcript — ${title}, ${stemWeekdayTime(meeting.stem)}`;
     return meeting.state === 'ready' ? base : `${base} (not ready yet)`;

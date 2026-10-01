@@ -56,15 +56,14 @@ function durationSecFor(manifest) {
     return best > 0 ? best : null;
 }
 
-// The one identifying line: what kind of meeting this was, not what was said.
+// The one identifying line. For now it carries only the state notes; topics
+// will fill it later (Decision 18, amended 2026-10-01). It does not carry the
+// app, how capture started, Personal/Work or the people count.
 function identifyingLine(row) {
     const parts = [];
     if (row.state === 'nospeech') parts.push('No speech captured');
     else if (row.state === 'failed') parts.push("Couldn't be processed");
     else if (row.state === 'pending') parts.push('Still processing');
-    if (row.scope) parts.push(row.scope === 'personal' ? 'Personal' : 'Work');
-    parts.push(row.app || 'Started manually');
-    if (row.state === 'ready' && row.people > 1) parts.push(`${row.people} people`);
     if (row.state === 'ready' && row.namingPending) parts.push('voices not named yet');
     return parts.join(' · ');
 }
@@ -105,4 +104,10 @@ function listMeetings(dir, now = Date.now(), days = DAYS) {
     return rows;
 }
 
-module.exports = { listMeetings, identifyingLine, DAYS };
+// The All / Work / Personal switch. A row with no scope recorded matches
+// neither Work nor Personal, so it shows under All only.
+function filterRows(rows, filter) {
+    return filter === 'work' || filter === 'personal' ? rows.filter((r) => r.scope === filter) : rows;
+}
+
+module.exports = { listMeetings, identifyingLine, filterRows, DAYS };
