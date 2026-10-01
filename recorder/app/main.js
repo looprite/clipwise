@@ -9,7 +9,7 @@
 // is a human. The recorder is the trigger; the manifest it wrote at capture
 // start is the record the pipeline keys on.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const zlib = require('zlib');
@@ -25,6 +25,8 @@ const {
     readVoiceNamesAnswer, mostRecentNamedStem, mostRecentCaptureStem,
 } = require('./identity-answer.js');
 const { stopMessageFor } = require('./voice-naming-wait.js');
+// Which meeting the tray's "Save transcript" item acts on (SAA-199).
+const { lastMeeting, stemTimeMs } = require('./last-meeting.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // Auto-stop decision, logging only (SAA-184). Pure; nothing it returns stops a capture.
 const autostop = require('./autostop.js');
@@ -206,6 +208,7 @@ const APPLY_IDENTITY_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'apply-ide
 // Applies a voice-naming answer (SAA-195), same reasoning one step later —
 // see startApplyVoiceNames.
 const APPLY_VOICE_NAMES_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'apply-voice-names.ts');
+const SAVE_TRANSCRIPT_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'save-transcript.ts');
 // How often the naming window polls for diarize's naming data while step 2
 // is in its waiting state (SAA-195). Diarize itself is fast (single-digit
 // seconds), but it runs after transcribe and ingest, which together have
@@ -862,6 +865,75 @@ function stemDateLabel(stem) {
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+// --- save transcript (SAA-199) --------------------------------------------
+
+let savingTranscript = false;
+
+// "Mon 1:00 PM", in the local time zone, from the capture's own start.
+function stemWeekdayTime(stem) {
+    const ms = stemTimeMs(stem);
+    if (!Number.isFinite(ms)) return stem || '';
+    const d = new Date(ms);
+    const day = d.toLocaleDateString(undefined, { weekday: 'short' });
+    const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    return `${day} ${time}`;
+}
+
+function saveTranscriptLabel(meeting) {
+    let title = meeting.title || 'Untitled call';
+    if (title.length > 48) title = title.slice(0, 47) + '…';
+    const base = `Save transcript — ${title}, ${stemWeekdayTime(meeting.stem)}`;
+    return meeting.state === 'ready' ? base : `${base} (not ready yet)`;
+}
+
+// The file is built by a server-side script (main.js has no database access),
+// from the same read get_transcript uses, into a temporary path; the person
+// then picks where it goes, in a Save dialog opening on Downloads.
+function saveTranscript(meeting) {
+    if (savingTranscript || meeting.state !== 'ready') return;
+    savingTranscript = true;
+    renderTray();
+    const tmp = path.join(os.tmpdir(), `clipwise-transcript-${randomUUID()}.txt`);
+    const done = () => {
+        try { fs.rmSync(tmp, { force: true }); } catch {}
+        savingTranscript = false;
+        renderTray();
+    };
+    execFile(
+        TSX_BIN,
+        [SAVE_TRANSCRIPT_ENTRY, OUTDIR, '--stem', meeting.stem, '--out', tmp],
+        { cwd: SERVER_DIR, env: { ...process.env, PATH: PIPELINE_PATH }, timeout: 60000, maxBuffer: 1 << 20 },
+        async (err, stdout, stderr) => {
+            try {
+                const line = String(stdout || '').split('\n').find(l => l.startsWith('SAVE_TRANSCRIPT_META '));
+                if (err || !line) {
+                    const why = String(stderr || (err && err.message) || 'no result').trim().split('\n').pop();
+                    console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: failed — ${why}`);
+                    notify('Clipwise: transcript not saved', `Couldn't build the transcript for ${meeting.stem}: ${why}`);
+                    return;
+                }
+                const meta = JSON.parse(line.slice('SAVE_TRANSCRIPT_META '.length));
+                app.focus({ steal: true });
+                const { canceled, filePath } = await dialog.showSaveDialog({
+                    title: 'Save transcript',
+                    defaultPath: path.join(app.getPath('downloads'), meta.suggestedFileName),
+                    filters: [{ name: 'Text', extensions: ['txt'] }],
+                });
+                if (canceled || !filePath) return;
+                fs.copyFileSync(tmp, filePath);
+                console.error(
+                    `[clipwise-recorder] save-transcript ${meeting.stem}: saved ${meta.turns} turns ` +
+                    `(${meta.unattributedTurns} unattributed) -> ${filePath}`);
+                notify('Clipwise: transcript saved', path.basename(filePath));
+            } catch (e) {
+                console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: ${String(e)}`);
+                notify('Clipwise: transcript not saved', String(e.message || e));
+            } finally {
+                done();
+            }
+        });
+}
+
 // Reopens step 2 directly for a capture whose naming was left for later
 // (SAA-195, tray click). Outside identityQueue entirely — that queue is for
 // captures whose pipeline just finished, and this one's already has; the
@@ -1210,6 +1282,18 @@ function renderTray() {
         items.push({
             label: `Fix speaker names — ${stemDateLabel(renameStem)} call`,
             click: () => reopenVoiceNaming(renameStem, { rename: true }),
+        });
+    }
+    // "Save transcript — <meeting>, <weekday time>" (SAA-199): the most recent
+    // meeting with a transcript, named in the label so it is visible which one
+    // will be saved. See last-meeting.js for which captures count.
+    const meeting = lastMeeting(OUTDIR);
+    if (meeting) {
+        items.push({ type: 'separator' });
+        items.push({
+            label: saveTranscriptLabel(meeting),
+            enabled: meeting.state === 'ready' && !savingTranscript,
+            click: () => saveTranscript(meeting),
         });
     }
     items.push(
