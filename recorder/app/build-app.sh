@@ -152,6 +152,10 @@ cp "$APP_SRC/voice-naming-wait.js" "$C/Resources/app/voice-naming-wait.js"
 # Which meeting the tray's "Save transcript" item names (SAA-199). main.js
 # requires this by relative path; a bundle without it fails to launch.
 cp "$APP_SRC/last-meeting.js" "$C/Resources/app/last-meeting.js"
+# The recent-meetings window (SAA-217): its page and the code that lists its rows.
+# main.js requires meetings.js and loads meetings.html by path relative to itself.
+cp "$APP_SRC/meetings.js" "$C/Resources/app/meetings.js"
+cp "$APP_SRC/meetings.html" "$C/Resources/app/meetings.html"
 # App -> scope inference (SAA-170). main.js requires this by relative path;
 # a bundle without it fails to launch at all, not just to infer scope.
 cp "$APP_SRC/app-scope.js" "$C/Resources/app/app-scope.js"

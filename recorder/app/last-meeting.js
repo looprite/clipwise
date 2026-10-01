@@ -1,21 +1,25 @@
 'use strict';
 
-// Which meeting the tray's "Save transcript" item acts on (SAA-199): the most
-// recent capture that has a transcript with something in it. Read from the
-// files the pipeline leaves beside the recordings, because main.js has no
-// database access — the same reason identity-answer.js reads files.
+// What state a capture is in, and which meeting the tray's "Save transcript"
+// item acts on (SAA-199). The recent-meetings window (SAA-217) lists captures
+// by the same classification, so the two never disagree about what counts as
+// a meeting. Read from the files the pipeline leaves beside the recordings,
+// because main.js has no database access.
 //
-// A capture counts as the meeting only when it was ingested (the pipeline
-// record has a db_recording_id and the ingest step is ok, or skipped because
-// an earlier run already did it) and its transcript has at least one line. A newer capture with no speech, or one whose
-// pipeline failed, is skipped — this is the rule that decides which meeting
-// the item names, and it is stated in the item's label (title and time) so
-// the person can see which one they are about to save.
+// States (classifyCapture):
+//   ready     ingested (the pipeline record has a db_recording_id and the
+//             ingest step is ok, or skipped because an earlier run already
+//             did it) and the transcript has at least one line
+//   nospeech  nothing to save: the transcript has no lines, or nothing was
+//             transcribed at all
+//   failed    the pipeline failed (or was abandoned) before it finished
+//   pending   still recording or still being processed
 //
-// The newest capture still being processed is reported as `pending`, not
-// skipped: showing the previous meeting while a newer one is a few seconds
-// from ready would offer the wrong one. A capture that is neither finished
-// nor recently active (a crashed pipeline) is not waited for.
+// lastMeeting picks the newest capture that is ready. A newer capture with no
+// speech or a failed pipeline is skipped. The newest capture still pending is
+// reported as pending, not skipped: showing the previous meeting while a newer
+// one is moments from ready would offer the wrong one. A capture that is
+// neither finished nor recently active (a crashed pipeline) is not waited for.
 
 const fs = require('fs');
 const path = require('path');
@@ -54,56 +58,70 @@ function stemTimeMs(stem) {
     return Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
 }
 
-// The meeting's title for the label: the calendar event it was matched to.
-// Null when there was no match; the caller shows "Untitled call".
+// The meeting's title: the calendar event it was matched to. Null when there
+// was no match; the caller shows "Untitled call".
 function calendarTitle(dir, stem) {
     const doc = readJson(path.join(dir, `calendar-match-${stem}.json`));
     return doc && typeof doc.title === 'string' && doc.title.trim() ? doc.title.trim() : null;
 }
 
-// -> { state: 'ready', stem, recordingId, title } | { state: 'pending', stem, title } | null
-function lastMeeting(dir, now = Date.now()) {
+// -> { state, stem, title, recordingId? }
+function classifyCapture(dir, stem, now = Date.now()) {
+    const title = calendarTitle(dir, stem);
+    const pipeline = readJson(path.join(dir, `pipeline-${stem}.json`));
+    const startedMs = stemTimeMs(stem);
+
+    if (!pipeline) {
+        // No pipeline record yet: still recording, or just stopped.
+        if (Number.isFinite(startedMs) && now - startedMs < PENDING_WITHOUT_PIPELINE_MS) {
+            return { state: 'pending', stem, title };
+        }
+        return { state: 'failed', stem, title };
+    }
+    const steps = pipeline.steps || {};
+    const ingest = steps.ingest ? steps.ingest.state : null;
+    const transcribe = steps.transcribe ? steps.transcribe.state : null;
+
+    // 'skipped' counts as ingested when there is a recording id: a manual
+    // re-run of an already-ingested capture skips the ingest step.
+    if ((ingest === 'ok' || ingest === 'skipped') && pipeline.db_recording_id) {
+        const lines = transcriptLineCount(path.join(dir, `transcript-${stem}.json`));
+        if (lines && lines > 0) return { state: 'ready', stem, title, recordingId: pipeline.db_recording_id };
+        return { state: 'nospeech', stem, title };
+    }
+    // Nothing was transcribed: the capture held no speech.
+    if (transcribe === 'skipped' && ingest !== 'pending') return { state: 'nospeech', stem, title };
+    if (ingest === 'failed' || ingest === 'skipped') return { state: 'failed', stem, title };
+    // Not finished: pending only while the pipeline is recently active.
+    const updatedMs = Date.parse(pipeline.updated_at || '');
+    if (Number.isFinite(updatedMs) && now - updatedMs < PENDING_WITH_PIPELINE_MS) {
+        return { state: 'pending', stem, title };
+    }
+    return { state: 'failed', stem, title };
+}
+
+function captureStems(dir) {
     let files;
     try {
         files = fs.readdirSync(dir);
     } catch {
-        return null;
+        return [];
     }
     const stems = [];
     for (const file of files) {
         const m = /^manifest-(.+)\.json$/.exec(file);
         if (m) stems.push(m[1]);
     }
-    stems.sort().reverse(); // newest first
+    return stems.sort().reverse(); // newest first
+}
 
-    for (const stem of stems) {
-        const title = calendarTitle(dir, stem);
-        const pipeline = readJson(path.join(dir, `pipeline-${stem}.json`));
-        const startedMs = stemTimeMs(stem);
-
-        if (!pipeline) {
-            // No pipeline record yet: still recording, or just stopped.
-            if (Number.isFinite(startedMs) && now - startedMs < PENDING_WITHOUT_PIPELINE_MS) {
-                return { state: 'pending', stem, title };
-            }
-            continue;
-        }
-        const ingest = pipeline.steps && pipeline.steps.ingest ? pipeline.steps.ingest.state : null;
-        // 'skipped' counts as ingested when there is a recording id: a manual
-        // re-run of an already-ingested capture skips the ingest step.
-        if ((ingest === 'ok' || ingest === 'skipped') && pipeline.db_recording_id) {
-            const lines = transcriptLineCount(path.join(dir, `transcript-${stem}.json`));
-            if (lines && lines > 0) return { state: 'ready', stem, recordingId: pipeline.db_recording_id, title };
-            continue; // ingested, but no speech
-        }
-        if (ingest === 'failed' || ingest === 'skipped') continue;
-        // Not finished: pending only while the pipeline is recently active.
-        const updatedMs = Date.parse(pipeline.updated_at || '');
-        if (Number.isFinite(updatedMs) && now - updatedMs < PENDING_WITH_PIPELINE_MS) {
-            return { state: 'pending', stem, title };
-        }
+// -> { state: 'ready', stem, recordingId, title } | { state: 'pending', stem, title } | null
+function lastMeeting(dir, now = Date.now()) {
+    for (const stem of captureStems(dir)) {
+        const c = classifyCapture(dir, stem, now);
+        if (c.state === 'ready' || c.state === 'pending') return c;
     }
     return null;
 }
 
-module.exports = { lastMeeting, calendarTitle, stemTimeMs };
+module.exports = { lastMeeting, classifyCapture, captureStems, calendarTitle, stemTimeMs, readJson };

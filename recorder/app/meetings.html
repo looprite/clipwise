@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- The recent-meetings window (SAA-217, Architecture Decision 18): the past
+     week's captures, so the right meeting can be picked before acting on it.
+     A row says which meeting it is — title, who was on it, when, how long,
+     and one line on what kind of meeting — and offers two actions: save its
+     transcript, fix its speaker names. It is deliberately not a place to read
+     meetings: no moments, no search, no transcript, no summary. Reading
+     meetings back happens in Claude.
+
+     Loaded from file:// with nodeIntegration, same reasoning as the identity
+     window: it ships inside the bundle and loads no remote content. Every
+     value from the data is put on the page with textContent. -->
+<title>Recent meetings</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1d1d1f;
+    --muted: #6e6e73;
+    --bg: #ececee;
+    --card: #ffffff;
+    --border: #d8d8dc;
+    --accent: #0a68d8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #f5f5f7;
+      --muted: #98989d;
+      --bg: #2a2a2c;
+      --card: #1e1e20;
+      --border: #3a3a3c;
+      --accent: #4a9dff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    user-select: none;
+    display: flex;
+    flex-direction: column;
+  }
+  header { padding: 16px 20px 8px; flex: 0 0 auto; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+  .sub { color: var(--muted); font-size: 12px; margin: 0; }
+  #list { flex: 1 1 auto; overflow-y: auto; padding: 4px 20px 16px; }
+  .day { color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; margin: 14px 0 6px; }
+  .day:first-child { margin-top: 6px; }
+  .row { display: flex; gap: 12px; align-items: flex-start; background: var(--card);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; }
+  .main { flex: 1 1 auto; min-width: 0; }
+  .top { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .when { color: var(--muted); font-size: 12px; white-space: nowrap; flex: 0 0 auto; }
+  .people { color: var(--fg); font-size: 12px; margin-top: 1px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .people.none { color: var(--muted); font-style: italic; }
+  .line { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .acts { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+  .row.dim .title, .row.dim .people { color: var(--muted); }
+  button { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--card); color: var(--fg); white-space: nowrap; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; }
+  #empty { color: var(--muted); padding: 24px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Recent meetings</h1>
+  <p class="sub">The past 7 days. Pick a meeting to save its transcript or fix who said what.</p>
+</header>
+<div id="list"></div>
+<script>
+  const { ipcRenderer } = require('electron');
+  const listEl = document.getElementById('list');
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function dayLabel(ms) {
+    const d = new Date(ms);
+    const mid = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+    const ago = Math.round((mid(new Date()) - mid(d)) / 86400000);
+    const date = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    if (ago <= 0) return `Today · ${date}`;
+    if (ago === 1) return `Yesterday · ${date}`;
+    return date;
+  }
+
+  function durationLabel(sec) {
+    if (!sec) return '';
+    if (sec < 60) return '<1 min';
+    const m = Math.round(sec / 60);
+    if (m < 60) return `${m} min`;
+    return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
+  }
+
+  // Why a button is off, shown when hovering it.
+  const SAVE_OFF = {
+    nospeech: 'Nothing to save: no speech was captured.',
+    failed: "This capture couldn't be processed.",
+    pending: 'Still being processed.',
+  };
+
+  function render(rows, saving) {
+    listEl.textContent = '';
+    if (rows.length === 0) {
+      listEl.appendChild(el('div', null, 'No meetings in the past 7 days.')).id = 'empty';
+      return;
+    }
+    let lastDay = null;
+    for (const r of rows) {
+      const day = dayLabel(r.startedAtMs);
+      if (day !== lastDay) { listEl.appendChild(el('div', 'day', day)); lastDay = day; }
+      const d = new Date(r.startedAtMs);
+      const date = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+      const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      const dur = durationLabel(r.durationSec);
+
+      const row = el('div', r.canSave ? 'row' : 'row dim');
+      row.dataset.stem = r.stem;
+      const main = el('div', 'main');
+      const top = el('div', 'top');
+      top.appendChild(el('span', 'title', r.title || 'Untitled call'));
+      top.appendChild(el('span', 'when', [date, time, dur].filter(Boolean).join(' · ')));
+      main.appendChild(top);
+      main.appendChild(r.participants.length
+        ? el('div', 'people', r.participants.join(', '))
+        : el('div', 'people none', 'No one named'));
+      main.appendChild(el('div', 'line', r.line));
+      row.appendChild(main);
+
+      const acts = el('div', 'acts');
+      const save = el('button', null, 'Save transcript');
+      save.disabled = !r.canSave || saving;
+      save.title = r.canSave ? '' : SAVE_OFF[r.state] || '';
+      save.addEventListener('click', () => ipcRenderer.send('meetings:save', { stem: r.stem }));
+      const fix = el('button', null, 'Fix names');
+      fix.disabled = !r.canFix;
+      fix.title = r.canFix ? '' : 'Only a call with several voices has names to fix.';
+      fix.addEventListener('click', () => ipcRenderer.send('meetings:fix', { stem: r.stem }));
+      acts.appendChild(save);
+      acts.appendChild(fix);
+      row.appendChild(acts);
+      listEl.appendChild(row);
+    }
+  }
+
+  ipcRenderer.on('meetings:data', (_e, payload) => render(payload.rows, payload.saving));
+  ipcRenderer.send('meetings:ready');
+</script>
+</body>
+</html>
