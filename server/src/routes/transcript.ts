@@ -3,6 +3,7 @@ import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "../db/index.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
+import { readTranscript } from "../lib/transcript-read.js";
 
 const speakerInputSchema = z.object({
   label: z.string().max(128),
@@ -78,41 +79,7 @@ transcriptRouter.get(
       .where(eq(schema.recordings.id, recordingId));
     if (!recording) throw new HttpError(404, "recording_not_found");
 
-    const [transcript] = await db
-      .select()
-      .from(schema.transcripts)
-      .where(eq(schema.transcripts.recordingId, recordingId))
-      .orderBy(asc(schema.transcripts.createdAt))
-      .limit(1);
-
-    if (!transcript) {
-      res.json({ transcript: null, segments: [] });
-      return;
-    }
-
-    const segments = await db
-      .select({
-        id: schema.segments.id,
-        startSec: schema.segments.startSec,
-        endSec: schema.segments.endSec,
-        text: schema.segments.text,
-        speakerLabel: schema.speakers.label,
-        speakerDisplayName: schema.speakers.displayName,
-      })
-      .from(schema.segments)
-      .leftJoin(schema.speakers, eq(schema.segments.speakerId, schema.speakers.id))
-      .where(eq(schema.segments.transcriptId, transcript.id))
-      .orderBy(asc(schema.segments.orderIndex));
-
-    res.json({
-      transcript: {
-        id: transcript.id,
-        provider: transcript.provider,
-        language: transcript.language,
-        status: transcript.status,
-      },
-      segments,
-    });
+    res.json(await readTranscript(recordingId));
   }),
 );
 
