@@ -476,6 +476,9 @@
   });
 
   function save() {
+    // Enter calls this directly, bypassing the button, so a disabled Save
+    // (waiting for voices, or the stopped state) has to be honoured here too.
+    if (document.getElementById('save').disabled) return;
     if (document.getElementById('step2').style.display === 'none') {
       // Step 1.
       const selectedNames = Array.from(knownEl.querySelectorAll('input:checked')).map((c) => c.value);

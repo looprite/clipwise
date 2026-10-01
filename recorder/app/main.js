@@ -2479,10 +2479,21 @@ function registerIdentityIpc() {
     ipcMain.on('identity:submit-voices', (_event, payload) => {
         const capture = currentCapture(payload && payload.token);
         if (!capture) return;
+        const voices = Array.isArray(payload.voices) ? payload.voices : [];
+        // An empty list names nothing but still writes voice-names-<stem>.json,
+        // which is what takes a call out of the naming reminder. No legitimate
+        // path sends one: "Not sure" for every voice is a non-empty list of
+        // null names, and Later / the stopped auto-close / the wait cap never
+        // submit. Ignored, window left as it is.
+        if (voices.length === 0) {
+            console.error(
+                `[clipwise-recorder] voice-names ${capture.stem}: empty voice list ignored, nothing written`);
+            return;
+        }
         const doc = buildVoiceNamesDoc({
             stem: capture.stem,
             recordingId: capture.recordingId,
-            voices: Array.isArray(payload.voices) ? payload.voices : [],
+            voices,
             // A new answered_at every save (buildVoiceNamesDoc's default),
             // even on a rename of the same stem — that's what lets
             // voiceNamesAlreadyApplied's guard see this as a new answer to
