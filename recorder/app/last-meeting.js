@@ -9,7 +9,8 @@
 // States (classifyCapture):
 //   ready     ingested (the pipeline record has a db_recording_id and the
 //             ingest step is ok, or skipped because an earlier run already
-//             did it) and the transcript has at least one line
+//             did it), the transcript has at least one line, and diarize has
+//             finished (ok, skipped or failed) or never was a step
 //   nospeech  nothing to save: the transcript has no lines, or nothing was
 //             transcribed at all
 //   failed    the pipeline failed (or was abandoned) before it finished
@@ -86,8 +87,22 @@ function classifyCapture(dir, stem, now = Date.now()) {
     // re-run of an already-ingested capture skips the ingest step.
     if ((ingest === 'ok' || ingest === 'skipped') && pipeline.db_recording_id) {
         const lines = transcriptLineCount(path.join(dir, `transcript-${stem}.json`));
-        if (lines && lines > 0) return { state: 'ready', stem, title, recordingId: pipeline.db_recording_id };
-        return { state: 'nospeech', stem, title };
+        if (!(lines && lines > 0)) return { state: 'nospeech', stem, title };
+        // Not ready until diarize has finished one way or another: before
+        // that, a call with several people still has all its call audio under
+        // one speaker, and a saved file would present them as one voice. A
+        // record with no diarize step at all (a capture from before diarize
+        // existed) is done. A diarize step left unfinished by a crashed
+        // pipeline is not waited for, same as any other step.
+        const diarize = steps.diarize ? steps.diarize.state : null;
+        if (steps.diarize && diarize !== 'ok' && diarize !== 'skipped' && diarize !== 'failed') {
+            const updatedMs = Date.parse(pipeline.updated_at || '');
+            if (Number.isFinite(updatedMs) && now - updatedMs < PENDING_WITH_PIPELINE_MS) {
+                return { state: 'pending', stem, title };
+            }
+            return { state: 'failed', stem, title };
+        }
+        return { state: 'ready', stem, title, recordingId: pipeline.db_recording_id };
     }
     // Nothing was transcribed: the capture held no speech.
     if (transcribe === 'skipped' && ingest !== 'pending') return { state: 'nospeech', stem, title };

@@ -31,7 +31,11 @@ function capture(stem, o = {}) {
     w(`pipeline-${stem}.json`, {
         db_recording_id: o.noDb ? null : `rid-${stem}`,
         updated_at: new Date(NOW - (o.updatedAgoMs ?? 3600e3)).toISOString(),
-        steps: { transcribe: { state: o.transcribe || 'ok' }, ingest: { state: o.ingest || 'ok' } },
+        steps: {
+            transcribe: { state: o.transcribe || 'ok' },
+            ingest: { state: o.ingest || 'ok' },
+            ...(o.diarize ? { diarize: { state: o.diarize } } : {}),
+        },
     });
     if (o.lines !== null) w(`transcript-${stem}.json`, { segments: Array.from({ length: o.lines ?? 5 }, () => ({})) });
     if (o.title) w(`calendar-match-${stem}.json`, { title: o.title, invitees: o.invitees || [] });
@@ -93,6 +97,35 @@ fs.rmSync(path.join(dir, 'pipeline-2026-03-06T19-58-00Z.json'));
 fs.rmSync(path.join(dir, 'manifest-2026-03-06T19-58-00Z.json'));
 check('without the processing capture, the tray item is the newest ready meeting',
     lastMeeting(dir, NOW).stem === '2026-03-05T18-00-00Z');
+
+// Diarize readiness: a group call is not ready until diarize has finished.
+{
+    const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-meetings-diarize-'));
+    // capture() writes to `dir`; point it at d2 for these.
+    const writeTo = (stem, o) => {
+        const keep = fs.readdirSync(dir);
+        capture(stem, o);
+        for (const f of fs.readdirSync(dir)) if (!keep.includes(f)) fs.renameSync(path.join(dir, f), path.join(d2, f));
+    };
+    const stateOf = (stem, o, now = NOW) => { for (const f of fs.readdirSync(d2)) fs.rmSync(path.join(d2, f)); writeTo(stem, o); const r = listMeetings(d2, now)[0]; return { state: r.state, canSave: r.canSave, line: r.line, last: lastMeeting(d2, now) }; };
+    const S = '2026-03-06T18-00-00Z';
+    let r = stateOf(S, { diarize: 'pending', updatedAgoMs: 60e3 });
+    check('diarize pending -> not ready (window row)', r.state === 'pending' && !r.canSave && r.line.startsWith('Still processing'), JSON.stringify(r));
+    check('diarize pending -> not ready (tray item)', r.last && r.last.state === 'pending', JSON.stringify(r.last));
+    r = stateOf(S, { diarize: 'running', updatedAgoMs: 60e3 });
+    check('diarize running -> not ready', r.state === 'pending' && !r.canSave, JSON.stringify(r));
+    for (const st of ['ok', 'skipped', 'failed']) {
+        r = stateOf(S, { diarize: st, updatedAgoMs: 60e3 });
+        check(`diarize ${st} -> ready`, r.state === 'ready' && r.canSave && r.last && r.last.state === 'ready', JSON.stringify(r));
+    }
+    r = stateOf(S, { updatedAgoMs: 60e3 });
+    check('no diarize step on a finished record -> ready', r.state === 'ready' && r.canSave && r.last.state === 'ready', JSON.stringify(r));
+    r = stateOf(S, { diarize: 'pending', updatedAgoMs: 3 * 3600e3 });
+    check('diarize left pending by a crashed pipeline (3 h) is not waited for', r.state === 'failed' && r.last === null, JSON.stringify(r));
+    r = stateOf(S, { diarize: 'pending', updatedAgoMs: 60e3, lines: 0 });
+    check('no speech stays no speech whatever diarize says', r.state === 'nospeech', JSON.stringify(r));
+    fs.rmSync(d2, { recursive: true, force: true });
+}
 
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
