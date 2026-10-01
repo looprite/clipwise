@@ -59,7 +59,7 @@ const AUTO_TITLE = /^Clipwise capture — /;
 
 export function displayTitle(title: string | null | undefined): string {
   const t = (title ?? "").trim();
-  return t && !AUTO_TITLE.test(t) ? t : "Untitled call";
+  return t && !AUTO_TITLE.test(t) ? t : "Untitled";
 }
 
 function cleanName(name: string | null | undefined): string | null {

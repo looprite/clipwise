@@ -145,8 +145,8 @@ check(
   suggestedFileName(base, "UTC"),
 );
 check(
-  "auto title -> Untitled call, unsafe characters replaced",
-  suggestedFileName({ title: "Clipwise capture — 2026-03-02T15-00-00Z", startedAt: when }, "UTC") === "2026-03-02 Untitled call – transcript.txt" &&
+  "auto title -> Untitled, unsafe characters replaced",
+  suggestedFileName({ title: "Clipwise capture — 2026-03-02T15-00-00Z", startedAt: when }, "UTC") === "2026-03-02 Untitled – transcript.txt" &&
     suggestedFileName({ title: "A/B: plan?", startedAt: when }, "UTC") === "2026-03-02 A-B- plan- – transcript.txt",
 );
 
