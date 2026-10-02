@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "../db/index.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
@@ -73,10 +73,11 @@ transcriptRouter.get(
   "/recordings/:id/transcript",
   asyncHandler(async (req, res) => {
     const recordingId = req.params.id;
+    // A trashed recording is not found (SAA-154), the same 404 as an unknown id.
     const [recording] = await db
       .select({ id: schema.recordings.id })
       .from(schema.recordings)
-      .where(eq(schema.recordings.id, recordingId));
+      .where(and(eq(schema.recordings.id, recordingId), isNull(schema.recordings.trashedAt)));
     if (!recording) throw new HttpError(404, "recording_not_found");
 
     res.json(await readTranscript(recordingId));

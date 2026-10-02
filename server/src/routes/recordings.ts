@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "../db/index.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
@@ -46,6 +46,8 @@ async function findRecording(accountId: string, recordingId: string) {
       and(
         eq(schema.recordings.accountId, accountId),
         eq(schema.recordings.id, recordingId),
+        // A trashed recording is not found (SAA-154).
+        isNull(schema.recordings.trashedAt),
       ),
     );
   return recording;
@@ -89,7 +91,7 @@ recordingsRouter.get(
     const recordings = await db
       .select()
       .from(schema.recordings)
-      .where(eq(schema.recordings.accountId, accountId))
+      .where(and(eq(schema.recordings.accountId, accountId), isNull(schema.recordings.trashedAt)))
       .orderBy(desc(schema.recordings.startedAt));
     res.json({ recordings });
   }),

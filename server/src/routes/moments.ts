@@ -170,7 +170,8 @@ async function runRecordingIndex(
   accountId: string,
   query: z.infer<typeof searchMomentsQuerySchema>,
 ): Promise<void> {
-  const conditions = [eq(schema.recordings.accountId, accountId)];
+  // A trashed recording is absent here (SAA-154).
+  const conditions = [eq(schema.recordings.accountId, accountId), isNull(schema.recordings.trashedAt)];
   if (query.recordingId) {
     conditions.push(eq(schema.recordings.id, query.recordingId));
   }
@@ -352,8 +353,11 @@ momentsRouter.get(
     // the marker exists to solve. The whole OR is parenthesized so
     // AND-binding precedence doesn't leak moments past the account
     // scope when this is joined with the other conditions.
+    // Trashed recordings (SAA-154) are absent from every search branch: the
+    // semantic and lexical queries below share this one condition list.
     const conditions = [
       eq(schema.moments.accountId, accountId),
+      isNull(schema.recordings.trashedAt),
       sql`(${schema.moments.metadata}->>'collapsed_into') IS NULL`,
       sql`((${schema.moments.metadata}->>'source') = 'hand_curated' OR (${schema.moments.metadata}->>'extraction_run') = (${schema.recordings.metadata}->>'current_extraction_run'))`,
     ];
@@ -603,16 +607,20 @@ momentsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
     const accountId = req.params.accountId;
-    const [moment] = await db
-      .select()
+    // Joined to the recording so a trashed one's moments are not found
+    // (SAA-154).
+    const [row] = await db
+      .select({ moment: schema.moments })
       .from(schema.moments)
+      .innerJoin(schema.recordings, eq(schema.moments.recordingId, schema.recordings.id))
       .where(
         and(
           eq(schema.moments.accountId, accountId),
           eq(schema.moments.id, req.params.id),
+          isNull(schema.recordings.trashedAt),
         ),
       );
-    if (!moment) throw new HttpError(404, "moment_not_found");
-    res.json({ moment });
+    if (!row) throw new HttpError(404, "moment_not_found");
+    res.json({ moment: row.moment });
   }),
 );

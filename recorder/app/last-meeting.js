@@ -115,6 +115,32 @@ function classifyCapture(dir, stem, now = Date.now()) {
     return { state: 'failed', stem, title };
 }
 
+// A capture in the trash (SAA-154) has a trashed-<stem>.json marker beside its
+// files, written by server/src/pipeline/trash.ts, which is the only writer. A
+// trashed capture is absent from every list here: the window's meetings, the
+// tray's Save transcript item, and every other per-capture selection.
+function isTrashed(dir, stem) {
+    return fs.existsSync(path.join(dir, `trashed-${stem}.json`));
+}
+
+// Stems with a marker, whether or not the capture's other files still exist
+// (a permanent delete interrupted part way leaves the marker alone).
+function trashedStems(dir) {
+    let files;
+    try {
+        files = fs.readdirSync(dir);
+    } catch {
+        return [];
+    }
+    const stems = [];
+    for (const file of files) {
+        const m = /^trashed-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)\.json$/.exec(file);
+        if (m) stems.push(m[1]);
+    }
+    return stems.sort().reverse(); // newest first
+}
+
+// Captures that are not in the trash, newest first.
 function captureStems(dir) {
     let files;
     try {
@@ -125,7 +151,7 @@ function captureStems(dir) {
     const stems = [];
     for (const file of files) {
         const m = /^manifest-(.+)\.json$/.exec(file);
-        if (m) stems.push(m[1]);
+        if (m && !files.includes(`trashed-${m[1]}.json`)) stems.push(m[1]);
     }
     return stems.sort().reverse(); // newest first
 }
@@ -139,4 +165,4 @@ function lastMeeting(dir, now = Date.now()) {
     return null;
 }
 
-module.exports = { lastMeeting, classifyCapture, captureStems, calendarTitle, stemTimeMs, readJson };
+module.exports = { lastMeeting, classifyCapture, captureStems, isTrashed, trashedStems, calendarTitle, stemTimeMs, readJson };

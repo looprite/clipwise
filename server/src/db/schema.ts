@@ -154,6 +154,12 @@ export const recordings = pgTable(
     // (settled in the issue; the recorder-side prompt UI itself is not
     // part of this change).
     scope: varchar("scope", { length: 16 }),
+    // Trash (SAA-154): when the recording was moved to the trash, null while
+    // it is live. Every read path Claude's tools use excludes a non-null
+    // value. The Mac keeps a matching trashed-<stem>.json marker beside the
+    // capture's files; the marker is the intent and recovery reconciles this
+    // column to it (see pipeline/trash.ts).
+    trashedAt: timestamp("trashed_at", { withTimezone: true }),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
