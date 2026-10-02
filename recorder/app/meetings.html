@@ -5,8 +5,10 @@
 <!-- The recent-meetings window (SAA-217, Architecture Decision 18): the past
      week's captures, so the right meeting can be picked before acting on it.
      A row says which meeting it is — title, who was on it, when, how long,
-     and one line for state notes (topics later) — and offers two actions: save its
-     transcript, fix its speaker names. It is deliberately not a place to read
+     and one line for state notes (topics later) — and offers these actions: save its
+     transcript, fix its speaker names, move it to the trash (a row's ⋯ menu, or
+     several at once with the checkboxes). The Trash view restores or permanently
+     deletes, one or several. It is deliberately not a place to read
      meetings: no moments, no search, no transcript, no summary. Reading
      meetings back happens in Claude.
 
@@ -75,13 +77,33 @@
   #filter button[aria-pressed="true"] { background: var(--accent); color: #fff; }
   #filter button[aria-pressed="true"]:hover { color: #fff; }
   #empty { color: var(--muted); padding: 24px 0; text-align: center; }
+  .bar { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .bar #filter, .bar #view { margin-top: 0; }
+  #view { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  #view button { border: 0; border-radius: 0; background: transparent; padding: 3px 12px; }
+  #view button + button { border-left: 1px solid var(--border); }
+  #view button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  #view button[aria-pressed="true"]:hover { color: #fff; }
+  #selbar { display: none; gap: 8px; align-items: center; margin-top: 10px; color: var(--muted); font-size: 12px; }
+  #selbar.on { display: flex; }
+  button.danger:hover:not(:disabled) { border-color: #d70015; color: #d70015; }
+  .pick { flex: 0 0 auto; margin-top: 2px; }
+  .menuwrap { position: relative; }
+  .menu { position: absolute; right: 0; top: 100%; z-index: 5; margin-top: 2px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 6px; padding: 3px; min-width: 130px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
+  .menu button { display: block; width: 100%; text-align: left; border: 0; }
 </style>
 </head>
 <body>
 <header>
   <h1>Recent meetings</h1>
-  <p class="sub">The past 7 days. Pick a meeting to save its transcript or fix who said what.</p>
-  <div id="filter" role="group" aria-label="Show"></div>
+  <p class="sub" id="sub">The past 7 days. Pick a meeting to save its transcript or fix who said what.</p>
+  <div class="bar">
+    <div id="view" role="group" aria-label="View"></div>
+    <div id="filter" role="group" aria-label="Show"></div>
+  </div>
+  <div id="selbar"></div>
 </header>
 <div id="list"></div>
 <script>
@@ -89,11 +111,19 @@
   const { filterRows } = require('./meetings.js');
   const listEl = document.getElementById('list');
   const filterEl = document.getElementById('filter');
+  const viewEl = document.getElementById('view');
+  const selbarEl = document.getElementById('selbar');
+  const subEl = document.getElementById('sub');
 
   // All / Work / Personal (filterRows: a row with no scope shows under All only).
   const FILTERS = [['all', 'All'], ['work', 'Work'], ['personal', 'Personal']];
   let filter = 'all';
-  let last = { rows: [], saving: false };
+  let view = 'meetings'; // 'meetings' | 'trash'
+  let last = { rows: [], trashed: [], saving: false, busy: false };
+  // Checked rows, by stem. Kept across the 5-second refresh, and pruned to
+  // what the current view still lists.
+  const picked = new Set();
+  let openMenu = null; // stem whose ⋯ menu is open
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -127,23 +157,85 @@
     pending: 'Still being processed.',
   };
 
+  function renderView() {
+    viewEl.textContent = '';
+    const trashCount = last.trashed.length;
+    for (const [key, label] of [['meetings', 'Meetings'], ['trash', trashCount ? `Trash (${trashCount})` : 'Trash']]) {
+      const b = el('button', null, label);
+      b.dataset.view = key;
+      b.setAttribute('aria-pressed', String(key === view));
+      b.addEventListener('click', () => { view = key; picked.clear(); openMenu = null; renderView(); render(); });
+      viewEl.appendChild(b);
+    }
+  }
+
   function renderFilter() {
     filterEl.textContent = '';
+    filterEl.style.display = view === 'meetings' ? '' : 'none';
     for (const [key, label] of FILTERS) {
       const b = el('button', null, label);
       b.dataset.filter = key;
       b.setAttribute('aria-pressed', String(key === filter));
-      b.addEventListener('click', () => { filter = key; renderFilter(); render(last.rows, last.saving); });
+      b.addEventListener('click', () => { filter = key; picked.clear(); renderFilter(); render(); });
       filterEl.appendChild(b);
     }
   }
 
-  function render(allRows, saving) {
-    last = { rows: allRows, saving };
-    const rows = filterRows(allRows, filter);
+  function send(channel, stems) { ipcRenderer.send(channel, { stems: Array.from(stems) }); picked.clear(); openMenu = null; }
+
+  function renderSelbar(listed) {
+    for (const s of Array.from(picked)) if (!listed.has(s)) picked.delete(s);
+    selbarEl.textContent = '';
+    selbarEl.classList.toggle('on', picked.size > 0);
+    if (picked.size === 0) return;
+    selbarEl.appendChild(el('span', null, `${picked.size} selected`));
+    const busy = last.busy;
+    if (view === 'meetings') {
+      const t = el('button', null, `Move ${picked.size} to trash`);
+      t.disabled = busy;
+      t.addEventListener('click', () => send('meetings:trash', picked));
+      selbarEl.appendChild(t);
+    } else {
+      const r = el('button', null, `Restore ${picked.size}`);
+      r.disabled = busy;
+      r.addEventListener('click', () => send('meetings:restore', picked));
+      selbarEl.appendChild(r);
+      const d = el('button', 'danger', `Delete ${picked.size} permanently…`);
+      d.disabled = busy;
+      d.addEventListener('click', () => send('meetings:delete', picked));
+      selbarEl.appendChild(d);
+    }
+    const c = el('button', null, 'Clear');
+    c.addEventListener('click', () => { picked.clear(); render(); });
+    selbarEl.appendChild(c);
+  }
+
+  function checkbox(stem, enabled) {
+    const box = el('input', 'pick');
+    box.type = 'checkbox';
+    box.checked = picked.has(stem);
+    box.disabled = !enabled;
+    box.setAttribute('aria-label', 'Select this meeting');
+    box.addEventListener('change', () => { if (box.checked) picked.add(stem); else picked.delete(stem); renderSelbar(listedNow); });
+    return box;
+  }
+
+  let listedNow = new Set();
+
+  function render() {
+    const { saving, busy } = last;
     listEl.textContent = '';
+    subEl.textContent = view === 'meetings'
+      ? 'The past 7 days. Pick a meeting to save its transcript or fix who said what.'
+      : 'Moved to trash. Claude no longer finds these. Restore one, or delete it permanently.';
+    renderFilter();
+    if (view === 'trash') return renderTrash(busy);
+
+    const rows = filterRows(last.rows, filter);
+    listedNow = new Set(rows.filter((r) => r.canTrash).map((r) => r.stem));
+    renderSelbar(listedNow);
     if (rows.length === 0) {
-      const msg = allRows.length === 0
+      const msg = last.rows.length === 0
         ? 'No meetings in the past 7 days.'
         : `No ${filter} meetings in the past 7 days.`;
       listEl.appendChild(el('div', null, msg)).id = 'empty';
@@ -160,6 +252,7 @@
 
       const row = el('div', r.canSave ? 'row' : 'row dim');
       row.dataset.stem = r.stem;
+      row.appendChild(checkbox(r.stem, r.canTrash && !busy));
       const main = el('div', 'main');
       const top = el('div', 'top');
       top.appendChild(el('span', 'title', r.title || 'Untitled'));
@@ -183,13 +276,83 @@
         fix.addEventListener('click', () => ipcRenderer.send('meetings:fix', { stem: r.stem }));
         acts.appendChild(fix);
       }
+      // ⋯ menu: Move to trash (not while the capture is still processing).
+      const wrap = el('div', 'menuwrap');
+      const more = el('button', null, '⋯');
+      more.setAttribute('aria-haspopup', 'menu');
+      more.setAttribute('aria-expanded', String(openMenu === r.stem));
+      more.setAttribute('aria-label', 'More actions');
+      more.disabled = !r.canTrash || busy;
+      more.title = r.canTrash ? '' : 'Still being processed.';
+      more.addEventListener('click', (e) => { e.stopPropagation(); openMenu = openMenu === r.stem ? null : r.stem; render(); });
+      wrap.appendChild(more);
+      if (openMenu === r.stem) {
+        const menu = el('div', 'menu');
+        menu.setAttribute('role', 'menu');
+        const t = el('button', null, 'Move to trash');
+        t.setAttribute('role', 'menuitem');
+        t.addEventListener('click', () => send('meetings:trash', [r.stem]));
+        menu.appendChild(t);
+        wrap.appendChild(menu);
+      }
+      acts.appendChild(wrap);
       row.appendChild(acts);
       listEl.appendChild(row);
     }
   }
 
+  function renderTrash(busy) {
+    const rows = last.trashed;
+    listedNow = new Set(rows.map((r) => r.stem));
+    renderSelbar(listedNow);
+    if (rows.length === 0) {
+      listEl.appendChild(el('div', null, 'The trash is empty.')).id = 'empty';
+      return;
+    }
+    for (const r of rows) {
+      const d = new Date(r.startedAtMs);
+      const date = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+      const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      const dur = durationLabel(r.durationSec);
+      const row = el('div', 'row dim');
+      row.dataset.stem = r.stem;
+      row.appendChild(checkbox(r.stem, !busy));
+      const main = el('div', 'main');
+      const top = el('div', 'top');
+      top.appendChild(el('span', 'title', r.title || 'Untitled'));
+      top.appendChild(el('span', 'when', [date, time, dur].filter(Boolean).join(' · ')));
+      main.appendChild(top);
+      main.appendChild(r.participants.length
+        ? el('div', 'people', r.participants.join(', '))
+        : el('div', 'people none', 'No one named'));
+      if (r.partial) main.appendChild(el('div', 'line', 'A permanent delete was interrupted — delete it again to finish.'));
+      row.appendChild(main);
+      const acts = el('div', 'acts');
+      const restore = el('button', null, 'Restore');
+      restore.disabled = busy || r.partial;
+      restore.title = r.partial ? 'Its files are already deleted.' : '';
+      restore.addEventListener('click', () => send('meetings:restore', [r.stem]));
+      acts.appendChild(restore);
+      const del = el('button', 'danger', 'Delete permanently…');
+      del.disabled = busy;
+      del.addEventListener('click', () => send('meetings:delete', [r.stem]));
+      acts.appendChild(del);
+      row.appendChild(acts);
+      listEl.appendChild(row);
+    }
+  }
+
+  // Click anywhere else, or Escape, closes an open ⋯ menu.
+  document.addEventListener('click', () => { if (openMenu) { openMenu = null; render(); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openMenu) { openMenu = null; render(); } });
+
+  renderView();
   renderFilter();
-  ipcRenderer.on('meetings:data', (_e, payload) => render(payload.rows, payload.saving));
+  ipcRenderer.on('meetings:data', (_e, payload) => {
+    last = { rows: payload.rows, trashed: payload.trashed || [], saving: payload.saving, busy: !!payload.busy };
+    renderView();
+    render();
+  });
   ipcRenderer.send('meetings:ready');
 </script>
 </body>

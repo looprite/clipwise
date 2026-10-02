@@ -13,7 +13,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
 
 import { db, pool, schema } from "../db/index.js";
 import { readTranscript } from "../lib/transcript-read.js";
@@ -62,7 +62,8 @@ async function main(): Promise<void> {
       durationSec: schema.recordings.durationSec,
     })
     .from(schema.recordings)
-    .where(eq(schema.recordings.id, recordingId));
+    // A trashed recording is not saved (SAA-154): not found, like to Claude.
+    .where(and(eq(schema.recordings.id, recordingId), isNull(schema.recordings.trashedAt)));
   if (!recording) throw new Error(`recording ${recordingId} not found`);
 
   const [host] = await db

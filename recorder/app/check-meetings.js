@@ -138,6 +138,87 @@ check('without the processing capture, the tray item is the newest ready meeting
     fs.rmSync(d2, { recursive: true, force: true });
 }
 
+// ---- the trash (SAA-154) -----------------------------------------------------
+// A capture with a trashed-<stem>.json marker is absent from the window's rows
+// and from every per-capture selection, and listed only by listTrashed.
+// Restoring (the marker going) brings it all back.
+{
+    const { listTrashed } = require('./meetings.js');
+    const ia = require('./identity-answer.js');
+    const t3 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-trash-meetings-check-'));
+    const tw = (name, doc) => fs.writeFileSync(path.join(t3, name), JSON.stringify(doc));
+    const tcap = (stem, extra = {}) => {
+        tw(`manifest-${stem}.json`, { started_at: stem, tracks: [{ duration_s: 600 }] });
+        tw(`pipeline-${stem}.json`, {
+            db_recording_id: `rid-${stem}`,
+            updated_at: new Date(NOW - 3600e3).toISOString(),
+            steps: { transcribe: { state: 'ok' }, ingest: { state: 'ok' } },
+        });
+        tw(`transcript-${stem}.json`, { segments: [{}, {}] });
+        for (const [name, doc] of Object.entries(extra)) tw(name.replace('<s>', stem), doc);
+    };
+    const R1 = '2026-03-02T15-00-00Z', R2 = '2026-03-03T15-00-00Z', R3 = '2026-03-04T15-00-00Z';
+    tcap(R1, { 'voice-names-<s>.json': {} });
+    tcap(R2, { 'voices-<s>.json': {}, 'identity-later-<s>.json': {} });
+    tcap(R3, { 'voice-names-<s>.json': {}, 'voices-<s>.json': {} });
+    const mark = (stem) => tw(`trashed-${stem}.json`, { stem, source_id: `src-${stem}`, trashed_at: '2026-03-05T12:00:00.000Z' });
+    const unmark = (stem) => fs.rmSync(path.join(t3, `trashed-${stem}.json`));
+    const stemsOf = (rs) => rs.map((r) => r.stem).join(' ');
+
+    // positive controls: nothing is trashed yet, everything is found
+    check('trash: before any marker, the window lists all three, newest first', stemsOf(listMeetings(t3, NOW)) === `${R3} ${R2} ${R1}`, stemsOf(listMeetings(t3, NOW)));
+    check('trash: before any marker, Save transcript names the newest', lastMeeting(t3, NOW).stem === R3);
+    check('trash: before any marker, the selectors find the newest', ia.mostRecentNamedStem(t3) === R3 && ia.mostRecentCaptureStem(t3) === R3);
+    check('trash: before any marker, the tray lists the pending identity and naming items',
+        ia.pendingIdentityStems(t3).join() === R2 && ia.pendingVoiceNamingStems(t3).join() === R2, `${ia.pendingIdentityStems(t3)} / ${ia.pendingVoiceNamingStems(t3)}`);
+    check('trash: the trash view is empty', listTrashed(t3).length === 0);
+
+    mark(R3);
+    check('trashed: gone from the window rows', stemsOf(listMeetings(t3, NOW)) === `${R2} ${R1}`, stemsOf(listMeetings(t3, NOW)));
+    check('trashed: Save transcript names the previous meeting, not the trashed one', lastMeeting(t3, NOW).stem === R2, JSON.stringify(lastMeeting(t3, NOW)));
+    check('trashed: Fix speaker names\' candidate and the newest-capture check skip it', ia.mostRecentNamedStem(t3) === R1 && ia.mostRecentCaptureStem(t3) === R2, `${ia.mostRecentNamedStem(t3)} ${ia.mostRecentCaptureStem(t3)}`);
+    const tr = listTrashed(t3);
+    check('trashed: the trash view lists it, with when it was trashed and not partial',
+        tr.length === 1 && tr[0].stem === R3 && tr[0].trashedAtMs === Date.parse('2026-03-05T12:00:00.000Z') && tr[0].partial === false, JSON.stringify(tr));
+
+    mark(R2);
+    check('trashed: a trashed capture is dropped from the pending identity and naming items',
+        ia.pendingIdentityStems(t3).length === 0 && ia.pendingVoiceNamingStems(t3).length === 0, `${ia.pendingIdentityStems(t3)} / ${ia.pendingVoiceNamingStems(t3)}`);
+    mark(R1);
+    check('trashed: with all three trashed there is nothing to save and the window is empty', lastMeeting(t3, NOW) === null && listMeetings(t3, NOW).length === 0);
+    check('trashed: all three are in the trash view, newest first', stemsOf(listTrashed(t3)) === `${R3} ${R2} ${R1}`, stemsOf(listTrashed(t3)));
+
+    for (const s of [R1, R2, R3]) unmark(s);
+    check('restored: the window, Save transcript, selectors and tray items all find them again',
+        stemsOf(listMeetings(t3, NOW)) === `${R3} ${R2} ${R1}` && lastMeeting(t3, NOW).stem === R3 &&
+        ia.mostRecentNamedStem(t3) === R3 && ia.mostRecentCaptureStem(t3) === R3 &&
+        ia.pendingIdentityStems(t3).join() === R2 && listTrashed(t3).length === 0);
+
+    // A permanent delete interrupted after the files: only the marker is left.
+    const GONE = '2026-03-01T09-00-00Z';
+    mark(GONE);
+    const g = listTrashed(t3);
+    check('a marker alone (files already deleted) is listed as partial, and is not a meeting row',
+        g.length === 1 && g[0].stem === GONE && g[0].partial === true && g[0].title === null && !listMeetings(t3, NOW).some((r) => r.stem === GONE), JSON.stringify(g));
+    unmark(GONE);
+
+    // Which rows can be sent to the trash: anything but a capture still in flight.
+    const P = '2026-03-06T19-58-00Z'; // processing right now
+    tw(`manifest-${P}.json`, { started_at: P, tracks: [{ duration_s: 60 }] });
+    tw(`pipeline-${P}.json`, { db_recording_id: null, updated_at: new Date(NOW - 60e3).toISOString(), steps: { transcribe: { state: 'ok' }, ingest: { state: 'pending' } } });
+    const N = '2026-03-04T14-00-00Z'; // no speech
+    tw(`manifest-${N}.json`, { started_at: N, tracks: [{ duration_s: 36 }] });
+    tw(`pipeline-${N}.json`, { db_recording_id: `rid-${N}`, updated_at: new Date(NOW - 3600e3).toISOString(), steps: { transcribe: { state: 'skipped' }, ingest: { state: 'ok' } } });
+    tw(`transcript-${N}.json`, { segments: [] });
+    const F = '2026-03-04T21-30-00Z'; // failed
+    tw(`manifest-${F}.json`, { started_at: F, tracks: [{ duration_s: 60 }] });
+    tw(`pipeline-${F}.json`, { db_recording_id: null, updated_at: new Date(NOW - 3600e3).toISOString(), steps: { transcribe: { state: 'ok' }, ingest: { state: 'failed' } } });
+    const canTrash = Object.fromEntries(listMeetings(t3, NOW).map((r) => [r.state, r.canTrash]));
+    check('canTrash: ready, no speech and failed can be trashed; a capture still processing cannot',
+        canTrash.ready === true && canTrash.nospeech === true && canTrash.failed === true && canTrash.pending === false, JSON.stringify(canTrash));
+    fs.rmSync(t3, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);

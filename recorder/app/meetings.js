@@ -13,7 +13,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { classifyCapture, captureStems, stemTimeMs, readJson } = require('./last-meeting.js');
+const { classifyCapture, captureStems, trashedStems, calendarTitle, stemTimeMs, readJson } = require('./last-meeting.js');
 
 const DAYS = 7;
 
@@ -93,6 +93,9 @@ function listMeetings(dir, now = Date.now(), days = DAYS) {
             app: appRaw ? APP_NAMES[appRaw] || appRaw : null,
             scope: identity && (identity.scope === 'work' || identity.scope === 'personal') ? identity.scope : null,
             canSave: c.state === 'ready',
+            // Anything finished or given up on can go to the trash; a capture
+            // still recording or processing cannot (SAA-154).
+            canTrash: c.state !== 'pending',
             // Naming data exists only for a call diarize split into voices.
             canFix: hasVoices,
             hasNames: named,
@@ -104,10 +107,35 @@ function listMeetings(dir, now = Date.now(), days = DAYS) {
     return rows;
 }
 
+// The trash view's rows (SAA-154): every capture with a trashed marker, newest
+// first, with no age limit — a trashed meeting stays until it is restored or
+// deleted. `partial` marks one whose files are already gone (a permanent
+// delete interrupted part way): it can only be deleted again.
+function listTrashed(dir) {
+    const rows = [];
+    for (const stem of trashedStems(dir)) {
+        const startedAtMs = stemTimeMs(stem);
+        if (!Number.isFinite(startedAtMs)) continue;
+        const manifest = readJson(path.join(dir, `manifest-${stem}.json`));
+        const marker = readJson(path.join(dir, `trashed-${stem}.json`));
+        const trashedAtMs = marker && Date.parse(marker.trashed_at);
+        rows.push({
+            stem,
+            startedAtMs,
+            title: calendarTitle(dir, stem),
+            participants: participantsFor(dir, stem),
+            durationSec: durationSecFor(manifest),
+            trashedAtMs: Number.isFinite(trashedAtMs) ? trashedAtMs : null,
+            partial: !manifest,
+        });
+    }
+    return rows;
+}
+
 // The All / Work / Personal switch. A row with no scope recorded matches
 // neither Work nor Personal, so it shows under All only.
 function filterRows(rows, filter) {
     return filter === 'work' || filter === 'personal' ? rows.filter((r) => r.scope === filter) : rows;
 }
 
-module.exports = { listMeetings, identifyingLine, filterRows, DAYS };
+module.exports = { listMeetings, listTrashed, identifyingLine, filterRows, DAYS };

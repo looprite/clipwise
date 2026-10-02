@@ -40,6 +40,8 @@ import { applyVoiceNamesForCapture } from "./apply-voice-names.js";
 import { describeMapping, describeRows, describeScope } from "../ingest/identity.js";
 import { describeVoiceNaming } from "../ingest/voice-names.js";
 import { runCapturePipeline, type Sidecar } from "./run-capture.js";
+import { isTrashed } from "../lib/trash-marker.js";
+import { reconcileTrash } from "./trash.js";
 
 // How many times a single capture may be picked up before this pass stops
 // offering it. Chosen at 3: the failures this exists for are transient — a
@@ -339,7 +341,22 @@ export async function runRecoveryPass(opts: {
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const dryRun = opts.dryRun ?? false;
 
-  const candidates = manifestCandidates(dir);
+  // SAA-154: a trashed capture is skipped entirely — not re-ingested, not
+  // re-run, not given an identity — and a permanently deleted one has no
+  // manifest left to be found. The marker is the intent, so the database
+  // column is reconciled to it first; a failure there must not stop recovery
+  // of everything else.
+  if (!dryRun) {
+    try {
+      const r = await reconcileTrash(dir);
+      if (r.marked > 0 || r.cleared > 0) log(`trash: ${r.marked} row(s) marked, ${r.cleared} cleared to match the markers`);
+    } catch (err) {
+      log(`trash: could not reconcile the database (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+  const all = manifestCandidates(dir);
+  const candidates = all.filter((c) => !isTrashed(dir, c.stem));
+  if (candidates.length < all.length) log(`${all.length - candidates.length} trashed capture(s) skipped`);
   const state = await loadDbState(candidates.map((c) => c.recordingId));
   log(`${candidates.length} capture(s) on disk, ${state.size} with a recording row`);
 

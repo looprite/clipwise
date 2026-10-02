@@ -226,6 +226,7 @@ function pendingIdentityStems(dir) {
         if (!m) continue;
         const stem = m[1];
         if (files.includes(`identity-${stem}.json`)) continue; // already answered
+        if (files.includes(`trashed-${stem}.json`)) continue; // in the trash (SAA-154)
         stems.push(stem);
     }
     stems.sort();
@@ -339,6 +340,7 @@ function pendingVoiceNamingStems(dir) {
         if (!m) continue;
         const stem = m[1];
         if (files.includes(`voice-names-${stem}.json`)) continue; // already answered
+        if (files.includes(`trashed-${stem}.json`)) continue; // in the trash (SAA-154)
         stems.push(stem);
     }
     stems.sort();
@@ -358,7 +360,8 @@ function mostRecentNamedStem(dir) {
     const stems = [];
     for (const file of files) {
         const m = /^voice-names-(.+)\.json$/.exec(file);
-        if (m) stems.push(m[1]);
+        // A trashed capture is not a candidate (SAA-154).
+        if (m && !files.includes(`trashed-${m[1]}.json`)) stems.push(m[1]);
     }
     if (stems.length === 0) return null;
     stems.sort();
@@ -380,7 +383,8 @@ function mostRecentCaptureStem(dir) {
     const stems = [];
     for (const file of files) {
         const m = /^manifest-(.+)\.json$/.exec(file);
-        if (m) stems.push(m[1]);
+        // The newest capture that is not in the trash (SAA-154).
+        if (m && !files.includes(`trashed-${m[1]}.json`)) stems.push(m[1]);
     }
     if (stems.length === 0) return null;
     stems.sort();

@@ -26,9 +26,9 @@ const {
 } = require('./identity-answer.js');
 const { stopMessageFor } = require('./voice-naming-wait.js');
 // Which meeting the tray's "Save transcript" item acts on (SAA-199).
-const { lastMeeting, classifyCapture, stemTimeMs } = require('./last-meeting.js');
+const { lastMeeting, classifyCapture, stemTimeMs, isTrashed } = require('./last-meeting.js');
 // The recent-meetings window's rows (SAA-217).
-const { listMeetings } = require('./meetings.js');
+const { listMeetings, listTrashed } = require('./meetings.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // Auto-stop decision, logging only (SAA-184). Pure; nothing it returns stops a capture.
 const autostop = require('./autostop.js');
@@ -211,6 +211,9 @@ const APPLY_IDENTITY_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'apply-ide
 // see startApplyVoiceNames.
 const APPLY_VOICE_NAMES_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'apply-voice-names.ts');
 const SAVE_TRANSCRIPT_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'save-transcript.ts');
+// Trash, restore and permanent delete of a capture (SAA-154). The only writer
+// of both the trashed-<stem>.json marker and recordings.trashed_at.
+const TRASH_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'trash.ts');
 // How often the naming window polls for diarize's naming data while step 2
 // is in its waiting state (SAA-195). Diarize itself is fast (single-digit
 // seconds), but it runs after transcribe and ingest, which together have
@@ -955,8 +958,110 @@ function sendMeetingsData() {
     if (!meetingsWindow || meetingsWindow.isDestroyed()) return;
     meetingsWindow.webContents.send('meetings:data', {
         rows: listMeetings(OUTDIR),
+        trashed: listTrashed(OUTDIR),
         saving: savingTranscript,
+        busy: trashBusy,
     });
+}
+
+// --- trash (SAA-154) --------------------------------------------------------
+// Move to trash, Restore and Delete permanently, one or several at once. The
+// work is trash.ts's: this asks, runs it, and reports what it said. One batch
+// at a time.
+
+let trashBusy = false;
+
+function runTrashScript(action, stems) {
+    const args = [TRASH_ENTRY, OUTDIR, action];
+    for (const stem of stems) args.push('--stem', stem);
+    return new Promise((resolve) => {
+        execFile(
+            TSX_BIN,
+            args,
+            { cwd: SERVER_DIR, env: { ...process.env, PATH: PIPELINE_PATH }, timeout: 120000, maxBuffer: 1 << 20 },
+            (err, stdout, stderr) => {
+                const results = [];
+                for (const line of String(stdout || '').split('\n')) {
+                    if (!line.startsWith('TRASH_RESULT ')) continue;
+                    try { results.push(JSON.parse(line.slice('TRASH_RESULT '.length))); } catch {}
+                }
+                // A script that never reported (it could not start, or timed out)
+                // is a failure for every stem it was given, not a success.
+                const reported = new Set(results.map((r) => r.stem));
+                const why = String(stderr || (err && err.message) || 'no result').trim().split('\n').pop();
+                for (const stem of stems) {
+                    if (!reported.has(stem)) results.push({ action, stem, ok: false, code: 'error', message: why });
+                }
+                resolve(results);
+            });
+    });
+}
+
+// One line of the delete confirmation: title, who was on the call, when. Most
+// are "Untitled", and calls minutes apart look alike without the names.
+function meetingLine(r) {
+    const when = new Date(r.startedAtMs).toLocaleString(undefined, {
+        weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+    const who = r.participants && r.participants.length ? r.participants.join(', ') : 'No one named';
+    return `\u2022 ${r.title || 'Untitled'} \u00b7 ${who} \u2014 ${when}`;
+}
+
+async function changeTrash(action, rawStems) {
+    if (trashBusy) return;
+    if (!Array.isArray(rawStems)) return;
+    const unique = Array.from(new Set(rawStems.filter((s) => typeof s === 'string' && STEM_PATTERN.test(s)))).slice(0, 100);
+    // Re-checked at click time: what the window showed may be stale.
+    let stems;
+    if (action === 'trash') {
+        stems = unique.filter((s) => !isTrashed(OUTDIR, s) && classifyCapture(OUTDIR, s).state !== 'pending');
+    } else {
+        stems = unique.filter((s) => isTrashed(OUTDIR, s));
+    }
+    if (stems.length === 0) { sendMeetingsData(); return; }
+
+    if (action === 'delete') {
+        // The confirmation names each meeting, from what is on disk, not from
+        // what the window sent. Cancel is the default and deletes nothing.
+        const byStem = new Map(listTrashed(OUTDIR).map((r) => [r.stem, r]));
+        const lines = stems.map((s) => meetingLine(byStem.get(s) || { startedAtMs: stemTimeMs(s), title: null, participants: [] }));
+        try { app.focus({ steal: true }); } catch {}
+        const { response } = await dialog.showMessageBox(meetingsWindow && !meetingsWindow.isDestroyed() ? meetingsWindow : undefined, {
+            type: 'warning',
+            buttons: ['Cancel', 'Delete permanently'],
+            defaultId: 0,
+            cancelId: 0,
+            message: stems.length === 1 ? 'Permanently delete this meeting?' : `Permanently delete these ${stems.length} meetings?`,
+            detail: `${lines.join('\n')}\n\nThe audio, the transcript and everything taken from it are deleted. This can't be undone.`,
+        });
+        if (response !== 1) return;
+        // Restored while the dialog was open? Only what is still in the trash.
+        stems = stems.filter((s) => isTrashed(OUTDIR, s));
+        if (stems.length === 0) { sendMeetingsData(); return; }
+    }
+
+    trashBusy = true;
+    sendMeetingsData();
+    let results;
+    try {
+        results = await runTrashScript(action, stems);
+    } finally {
+        trashBusy = false;
+    }
+    const failed = results.filter((r) => !r.ok);
+    for (const r of results) {
+        console.error(`[clipwise-recorder] trash ${action} ${r.stem}: ${r.ok ? 'ok' : `failed (${r.code}) ${r.message}`}`);
+    }
+    if (failed.length > 0) {
+        const verb = { trash: 'moved to trash', restore: 'restored', delete: 'deleted' }[action];
+        if (action === 'trash' && failed.every((r) => r.code === 'db_unreachable')) {
+            notify('Clipwise: not moved to trash', "Couldn't reach the database. Nothing was moved to trash.");
+        } else {
+            notify(`Clipwise: ${failed.length} not ${verb}`, `${failed[0].message || failed[0].code}`);
+        }
+    }
+    renderTray();
+    sendMeetingsData();
 }
 
 function openMeetingsWindow() {
@@ -998,16 +1103,20 @@ function registerMeetingsIpc() {
         if (typeof stem !== 'string' || !STEM_PATTERN.test(stem)) return;
         // Re-classified at click time: what the row showed may be stale.
         const c = classifyCapture(OUTDIR, stem);
-        if (c.state !== 'ready') {
+        if (c.state !== 'ready' || isTrashed(OUTDIR, stem)) {
             notify('Clipwise: nothing to save', `The capture ${stem} has no transcript to save yet.`);
             sendMeetingsData();
             return;
         }
         saveTranscript(c);
     });
+    ipcMain.on('meetings:trash', (_event, payload) => { changeTrash('trash', payload && payload.stems); });
+    ipcMain.on('meetings:restore', (_event, payload) => { changeTrash('restore', payload && payload.stems); });
+    ipcMain.on('meetings:delete', (_event, payload) => { changeTrash('delete', payload && payload.stems); });
     ipcMain.on('meetings:fix', (_event, payload) => {
         const stem = payload && payload.stem;
         if (typeof stem !== 'string' || !STEM_PATTERN.test(stem)) return;
+        if (isTrashed(OUTDIR, stem)) return; // in the trash: not acted on (SAA-154)
         // A rename only when names were already saved; otherwise it is the
         // first naming of this call's voices.
         reopenVoiceNaming(stem, { rename: readVoiceNamesAnswer(OUTDIR, stem) !== null });
