@@ -16,6 +16,11 @@
 --
 -- The flag is a prompt to listen, not a verdict: two real back-to-back calls in
 -- the same app also look like this (a known gap, see the open list).
+-- The grace window is 5s (autostop.js GRACE_MS, set 2026-10-07; it was 120s),
+-- so a call that drops and comes back after more than 5s is cut short by
+-- design and this detector is the check on how often that happens. Compare
+-- against stop_cause 'auto' rows whose block has grace_ms 5000; earlier blocks
+-- say 120000.
 --
 -- Section 3's expressions were validated on 20 literal rows (the file's own
 -- text between BEGIN/END detector, only the source CTE swapped for VALUES), in
