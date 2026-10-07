@@ -24,8 +24,19 @@
 //     releasing is not the call ending.
 //   - The last release opens a GRACE_MS window. A reacquire, a stop of any
 //     kind, a new capture, or micwatch exiting or restarting cancels it.
-//     The first release never stops anything: 722508a2 released at 14:16:50
-//     and the decision fell at 14:18:50.
+//     The first release never stops anything: it opens the window, and the
+//     stop can only come at expiry. GRACE_MS is 5s (Jon, 2026-10-07; it was
+//     120s). Muting and switching mic or headphones do not release the mic
+//     (tested), so the window only has to clear the timing floor, which is
+//     micwatch's poll: POLL_SECONDS = 1.0 (micwatch.swift:41; the daily log
+//     reads "poll 1000ms"). micwatch emits in_start/in_stop only when two
+//     consecutive polls differ, so a release or reacquire is stamped to within
+//     a second, and one shorter than a poll is never seen. 5s is five polls.
+//     The fresh micwatch --once read at expiry looks at the mic as it is then,
+//     so a reacquire the stream has not delivered yet is still caught.
+//     To be adjusted from what the logs show.
+//     722508a2 released at 14:16:50 and, under the old 120s window, the
+//     decision fell at 14:18:50; at 5s it would have fallen at 14:16:55.
 //   - At expiry a fresh holder check (micwatch --once) runs. Only if it shows
 //     the trigger no longer holding the microphone does step() ask for a stop.
 //     A failed check is not a pass.
@@ -38,7 +49,7 @@
 
 'use strict';
 
-const GRACE_MS = 120 * 1000;
+const GRACE_MS = 5 * 1000;
 
 function iso(ms) {
     return typeof ms === 'number' && Number.isFinite(ms) ? new Date(ms).toISOString() : null;
