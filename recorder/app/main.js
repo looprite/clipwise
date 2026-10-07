@@ -1424,8 +1424,10 @@ function renderTray() {
     if (recentPendingIdentity.length > 0) {
         items.push({ type: 'separator' });
         for (const stem of recentPendingIdentity) {
+            const marker = readLaterMarker(OUTDIR, stem);
+            const autoStopped = !!marker && marker.stopped_by === 'auto';
             items.push({
-                label: `Who was on the ${stemDateLabel(stem)} call…`,
+                label: `Who was on the ${stemDateLabel(stem)} call…${autoStopped ? ' (auto-stopped)' : ''}`,
                 click: () => reopenIdentityPrompt(stem),
             });
         }
@@ -1544,7 +1546,14 @@ function notifyFallback(title, body, why) {
     }
 }
 
-function notify(title, body) {
+// Notifications that have a click handler, held until they are clicked, closed
+// or fail: a Notification with no reference can be collected before the click
+// arrives, and the handler would never run.
+const clickableNotifications = new Set();
+
+// onClick is optional and only reachable through a real Electron notification;
+// the osascript fallback cannot report a click.
+function notify(title, body, onClick) {
     console.error(`notify: ${title} — ${body}`);
     if (!Notification.isSupported()) {
         notifyFallback(title, body, 'Notification.isSupported() is false');
@@ -1552,7 +1561,19 @@ function notify(title, body) {
     }
     try {
         const n = new Notification({ title, body });
-        n.once('failed', (_event, err) => notifyFallback(title, body, String(err)));
+        if (typeof onClick === 'function') {
+            clickableNotifications.add(n);
+            const release = () => clickableNotifications.delete(n);
+            n.once('click', () => {
+                release();
+                try { onClick(); } catch (err) { console.error(`notify: click handler threw ${String(err)}`); }
+            });
+            n.once('close', release);
+        }
+        n.once('failed', (_event, err) => {
+            clickableNotifications.delete(n);
+            notifyFallback(title, body, String(err));
+        });
         // The positive half of the same rule. No 'failed' line in the log is
         // absence of evidence — it reads identically to a notify() that was
         // never reached. 'show' is the event that says delivered, and once
@@ -1632,9 +1653,27 @@ function notifyStateChange(prev, next) {
         // of wrong answer, so this stays its own branch rather than folding
         // a zero into the same sentence.
         const kept = session && session.reachedRecording;
-        notify('Clipwise: recording stopped', kept
-            ? `Recorded ${formatDurationWords(Date.now() - session.startedAtMs)}. Processing now.`
-            : 'The capture never started — nothing was saved.');
+        if (kept && session.stopCause === 'auto') {
+            // The only notification for an auto-stop: it says why the capture
+            // ended and what is being asked, instead of two within a second.
+            // Clicking raises the question: the window opens behind everything
+            // else after an auto-stop (showInactive, and this is an accessory
+            // app), so the notification is how a person finds it.
+            const stem = session.stem;
+            notify('Auto-stopped — who was on this call?',
+                `Recorded ${formatDurationWords(Date.now() - session.startedAtMs)}. Processing now.`,
+                () => {
+                    if (identityWindow && identityWindow.capture && identityWindow.capture.stem === stem) {
+                        try { identityWindow.win.show(); app.focus({ steal: true }); } catch {}
+                    } else {
+                        reopenIdentityPrompt(stem);
+                    }
+                });
+        } else {
+            notify('Clipwise: recording stopped', kept
+                ? `Recorded ${formatDurationWords(Date.now() - session.startedAtMs)}. Processing now.`
+                : 'The capture never started — nothing was saved.');
+        }
     }
 }
 
@@ -2044,22 +2083,21 @@ function stopDetector() {
     if (detectProc) { try { detectProc.kill('SIGTERM'); } catch {} detectProc = null; }
 }
 
-// --- auto-stop, logging only (SAA-184) -------------------------------------
+// --- auto-stop (SAA-184) ---------------------------------------------------
 //
 // Carries out what autostop.step() asks for: append its log lines, run the
-// grace timer, run the fresh holder check. Those are the only three effects.
-// Nothing on this path calls stopRecording(); a would-stop is a log line and,
-// at stop, a field on the capture. The per-app table in autostop.js is all
-// off, and in this build switching an app on only changes what is recorded.
+// grace timer, run the fresh holder check, and — only after the grace period
+// and the expiry re-check, never at the first release — stop the capture.
+// Live for every app that triggered a capture; a hand-started capture has no
+// trigger and never auto-stops.
 //
 // Each capture gets its own tracker object, and callbacks (timer, holder
-// check) are bound to that object rather than read from `session`, so a late
-// callback can never land on the next capture.
+// check, stop) are bound to that object rather than read from `session`, so a
+// late callback can never land on the next capture.
 //
-// When an app is switched on later: stopRecording() ends by opening the
-// identity prompt (promptForIdentity, from teardown's callback). An auto-stop
-// through the same function would open that window with nobody at the
-// machine. Not changed here.
+// stopRecording('auto') ends the way every stop does, in the identity prompt,
+// but with nobody necessarily at the machine: see promptForIdentity (marker
+// written at queue time) and pumpIdentityQueue (no always-on-top, no focus).
 
 function autostopLogLine(a, entry) {
     try { fs.appendFileSync(a.logPath, JSON.stringify(entry) + '\n'); } catch (err) {
@@ -2083,6 +2121,17 @@ function autostopFeed(a, ev) {
             if (a.timer) { clearTimeout(a.timer); a.timer = null; }
         } else if (o.kind === 'check_holders') {
             autostopCheckHolders(a, o.token);
+        } else if (o.kind === 'stop') {
+            // Deferred a tick so the stop does not re-enter this loop, and
+            // checked against the tracker rather than `session` alone: a manual
+            // Stop in between nulls session.autostop, and a later capture has a
+            // different tracker, so neither can be stopped by this callback.
+            setImmediate(() => {
+                if (session && session.autostop === a && state !== 'stopped') {
+                    console.error(`[clipwise-recorder] auto-stop: ${a.logPath}`);
+                    stopRecording(o.cause);
+                }
+            });
         }
     }
 }
@@ -2096,15 +2145,9 @@ function autostopCheckHolders(a, token) {
         let error = null;
         if (err) error = String(err);
         else {
-            keys = [];
-            for (const line of String(stdout).split('\n')) {
-                if (!line.trim()) continue;
-                try {
-                    const ev = JSON.parse(line);
-                    const k = ev.event === 'in_now' ? detectKey(ev) : null;
-                    if (k && !keys.includes(k)) keys.push(k);
-                } catch { error = `unparsed line: ${line}`; keys = null; break; }
-            }
+            const r = autostop.parseHoldersOnce(stdout, detectKey);
+            keys = r.keys;
+            error = r.error;
         }
         autostopFeed(a, { type: 'holders', t: Date.now(), token, keys, error });
     });
@@ -2116,9 +2159,34 @@ function autostopBegin(stem, trigger) {
         state: autostop.initialState(),
         timer: null,
     };
-    const pids = trigger && detectActive.get(trigger.key)
-        ? [...detectActive.get(trigger.key).keys()] : [];
-    autostopFeed(a, { type: 'capture_start', t: Date.now(), trigger: trigger || null, pids });
+    const held = trigger && detectActive.get(trigger.key);
+    const pids = held ? [...held.keys()] : [];
+    // Which processes the trigger is, as micwatch reported them (SAA-184 item
+    // 4): the first real call in an untested app shows here whether it was
+    // recognised. exe is the path's last component, as micwatch derives it.
+    const pidInfo = held ? [...held.entries()].map(([pid, info]) => ({
+        pid, name: info.name || null, path: info.path || null,
+        exe: info.path ? path.basename(info.path) : null,
+    })) : [];
+    const first = pidInfo[0] || null;
+    const detail = trigger
+        ? { ...trigger, exe: first ? first.exe : null, path: first ? first.path : null }
+        : null;
+    autostopFeed(a, { type: 'capture_start', t: Date.now(), trigger: detail, pids, pidInfo });
+    // Everything else holding the microphone right now, as its own log line and
+    // asynchronous, so it can neither delay the start nor change a decision.
+    if (trigger) {
+        execFile(MICWATCH_BIN, ['--once'], { timeout: 5000 }, (err, stdout) => {
+            // Nothing here may throw inside the main process.
+            try {
+                const r = err ? { holders: [], error: String(err) } : autostop.parseHoldersOnce(stdout, detectKey);
+                autostopLogLine(a, { event: 'holders_at_start', t: new Date().toISOString(),
+                    holders: r.holders || [], error: r.error });
+            } catch (cbErr) {
+                console.error(`autostop: holders_at_start failed: ${String(cbErr)}`);
+            }
+        });
+    }
     return a;
 }
 
@@ -2468,18 +2536,30 @@ function writeSelfName(name) {
 
 function promptForIdentity(capture) {
     if (!capture || !capture.stem) return;
-    identityQueue.push({ ...capture, token: randomUUID() });
+    const queued = { ...capture, token: randomUUID() };
+    identityQueue.push(queued);
+    // The later-marker is written now, when the capture is queued, not when the
+    // window is closed. An unanswered window, a quit, a crash, or a window that
+    // could not be drawn at all then leaves the capture as a menu bar item
+    // instead of silently unidentified. Save and Skip delete it as before. This
+    // is what makes an auto-stop with nobody at the Mac safe, and it closes the
+    // same gap for a manual stop.
+    deferIdentityPrompt(queued);
     pumpIdentityQueue();
 }
 
-// Records that step 1 was closed without an answer (SAA-197). `capture`
+// Records that step 1 is unanswered (SAA-197; also written when the capture is
+// queued, see promptForIdentity). `capture`
 // carries exactly the fields promptForIdentity itself needs to reopen the
 // same prompt later — everything else (self, known names) is read fresh
 // from disk when it does. Failure just means the tray item won't appear;
 // the capture is unaffected either way, so this only logs.
 function deferIdentityPrompt(capture) {
     try {
-        writeLaterMarker(OUTDIR, capture);
+        // `auto` only shapes how the window is shown and must not outlive it;
+        // what is kept, as stopped_by, is the fact that explains the tray item.
+        const { auto, ...fields } = capture;
+        writeLaterMarker(OUTDIR, auto ? { ...fields, stopped_by: 'auto' } : fields);
         // Without this the tray item only appears at the next unrelated
         // refresh (SAA-197 fix, 2026-09-25) — observed live: it didn't show
         // until the pipeline's extract step happened to trigger one.
@@ -2584,7 +2664,9 @@ function pumpIdentityQueue() {
             minimizable: false,
             maximizable: false,
             fullscreenable: false,
-            alwaysOnTop: true,
+            // Not on top after an auto-stop: nobody asked for this window, and the
+            // person may be in the middle of something else.
+            alwaysOnTop: !capture.auto,
             title: 'Who was on this call?',
             webPreferences: { nodeIntegration: true, contextIsolation: false },
         });
@@ -2603,11 +2685,12 @@ function pumpIdentityQueue() {
     const reveal = () => {
         if (!identityWindow || identityWindow.win !== win || identityWindow.shown) return;
         identityWindow.shown = true;
-        win.show();
+        // After an auto-stop the window appears without taking focus.
+        if (capture.auto) win.showInactive(); else win.show();
         // An accessory app's window opens behind whatever is in front. The
         // question is about the call that just ended, so it is asked now or
         // not at all.
-        try { app.focus({ steal: true }); } catch {}
+        if (!capture.auto) { try { app.focus({ steal: true }); } catch {} }
     };
     identityWindow.reveal = reveal;
     win.once('ready-to-show', () => setTimeout(reveal, IDENTITY_REVEAL_GRACE_MS));
@@ -3051,11 +3134,14 @@ function teardown(cb) {
 }
 
 // `cause` is what stopped it, recorded on the capture's autostop block:
-// 'manual' (the tray), 'child_exit', 'start_timeout'. No auto-stop cause
-// exists in this build.
+// 'manual' (the tray), 'auto' (the trigger app released the mic and stayed
+// gone, SAA-184), 'child_exit', 'start_timeout'.
 function stopRecording(cause) {
     if (state === 'stopped') return;
-    autostopFinish(session, typeof cause === 'string' ? cause : 'manual');
+    const stopCause = typeof cause === 'string' ? cause : 'manual';
+    // Read by notifyStateChange, which runs inside setState('stopped') below.
+    if (session) session.stopCause = stopCause;
+    autostopFinish(session, stopCause);
     // Tray flips to Stopped up to KILL_GRACE_MS before children actually
     // exit. Accepted: Stop is user-initiated and nobody is watching the
     // gap. Record the gap here so it isn't rediscovered as a bug later.
@@ -3064,6 +3150,9 @@ function stopRecording(cause) {
             stem: session.stem,
             recordingId: session.recordingId,
             inferredScope: session.inferredScope,
+            // True only for an auto-stop: the identity window then opens
+            // without taking focus or sitting on top (see pumpIdentityQueue).
+            auto: stopCause === 'auto',
             // SAA-187: computed here, where startedAtMs already lives for the
             // stop notification, and carried through to the identity prompt
             // rather than having the page re-derive it — the page has no

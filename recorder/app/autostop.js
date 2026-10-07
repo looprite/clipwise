@@ -1,4 +1,4 @@
-// Auto-stop decision (SAA-184) — logging-only build.
+// Auto-stop decision (SAA-184) — live.
 //
 // Pulled out of main.js, like identity-answer.js and voice-naming-wait.js, so
 // the rule can be exercised against event sequences directly — no Electron,
@@ -6,51 +6,39 @@
 //
 // The signal is the trigger application releasing the microphone (micwatch's
 // in_stop), not silence. Measured 2026-09-28/29 on Chrome/Meet: the helper
-// releases at hang-up, and muting in Meet does not release it. FaceTime
-// (com.apple.avconferenced) is unmeasured on both counts; this build's logs
-// are how that gets measured.
+// releases at hang-up, and muting in Meet does not release it; the same holds
+// for FaceTime (1188a345, 2026-09-30). A long quiet stretch is not an event.
+//
+// Live for every app that triggers a capture (Jon, 2026-10-07), replacing the
+// per-app rollout of 5 real calls each. Which apps trigger a capture at all is
+// already the person's own per-app "record" decision; there is no second table
+// here.
 //
 // The rule, biased toward staying on because a capture cut short is not
 // recoverable and one that runs long is:
 //
 //   - Only the application that started the capture counts. A manually
-//     started capture has no trigger and never produces a would-stop.
+//     started capture has no trigger and never auto-stops.
 //   - A release counts only when the trigger's LAST process lets go. Chrome
 //     can run more than one helper pid under one bundle ID; one of two
 //     releasing is not the call ending.
 //   - The last release opens a GRACE_MS window. A reacquire, a stop of any
 //     kind, a new capture, or micwatch exiting or restarting cancels it.
+//     The first release never stops anything: 722508a2 released at 14:16:50
+//     and the decision fell at 14:18:50.
 //   - At expiry a fresh holder check (micwatch --once) runs. Only if it shows
-//     the trigger no longer holding the microphone is the decision
-//     "would stop". A failed check is not a pass.
-//   - The first would-stop is final for the capture: it is what a live build
-//     would have done.
+//     the trigger no longer holding the microphone does step() ask for a stop.
+//     A failed check is not a pass.
+//   - The first decision is final for the capture.
 //
-// Nothing here stops anything. step() returns records; main.js writes the log
-// lines, runs the timer and the holder check, and does nothing else with them.
-// There is deliberately no "stop" effect kind for main.js to act on.
+// step() returns records. The one effect that stops anything is
+// {kind:'stop', cause:'auto'}, emitted only from the expiry holder check;
+// main.js carries it out through stopRecording('auto'), after confirming the
+// capture it belongs to is still the running one.
 
 'use strict';
 
 const GRACE_MS = 120 * 1000;
-
-// Per-app enable table. Every app ships off, and in this build turning one on
-// changes nothing but the `enabled` field recorded on the capture: there is no
-// code path from a would-stop to stopping. Each app is switched on in its own
-// later commit, after 5 real calls where the would-stop landed after the call
-// ended and never during it (Jon's rollout, SAA-184 2026-09-29). Chrome/Meet
-// and FaceTime are counted in parallel; Slack and Zoom follow, each after its
-// own mute and end-of-call test. Their keys are not listed because they have
-// not been measured — an unlisted key is off.
-const AUTOSTOP_ENABLED = Object.freeze({
-    'com.google.Chrome.helper': false, // Chrome / Google Meet
-    'com.apple.avconferenced': false,  // FaceTime
-});
-
-function autostopEnabled(key) {
-    return Object.prototype.hasOwnProperty.call(AUTOSTOP_ENABLED, key)
-        && AUTOSTOP_ENABLED[key] === true;
-}
 
 function iso(ms) {
     return typeof ms === 'number' && Number.isFinite(ms) ? new Date(ms).toISOString() : null;
@@ -122,14 +110,21 @@ function step(prev, ev) {
         if (!ev.trigger || !ev.trigger.key) {
             fresh.phase = 'manual';
             out.push({ kind: 'log', entry: { event: 'capture_start', t: iso(t), trigger_key: null,
-                note: 'manual start: never produces a would-stop' } });
+                note: 'manual start: never auto-stops' } });
         } else {
             fresh.phase = 'watching';
-            fresh.trigger = { key: ev.trigger.key, name: ev.trigger.name || null };
+            fresh.trigger = {
+                key: ev.trigger.key, name: ev.trigger.name || null,
+                exe: ev.trigger.exe || null, path: ev.trigger.path || null,
+            };
             fresh.pids = [...new Set(ev.pids || [])];
+            // Which process triggered this, as micwatch saw it: the first real
+            // Slack or Zoom call shows here whether it was recognised and what
+            // it is called (SAA-184 item 4).
             out.push({ kind: 'log', entry: { event: 'capture_start', t: iso(t),
-                trigger_key: fresh.trigger.key, pids: fresh.pids,
-                enabled: autostopEnabled(fresh.trigger.key), grace_ms: GRACE_MS } });
+                trigger_key: fresh.trigger.key, trigger_name: fresh.trigger.name,
+                trigger_exe: fresh.trigger.exe, trigger_path: fresh.trigger.path,
+                pids: fresh.pids, pid_info: ev.pidInfo || [], grace_ms: GRACE_MS } });
         }
         return { state: fresh, out };
     }
@@ -200,10 +195,11 @@ function step(prev, ev) {
         s.wouldStop = { at: t, pendingSince: s.pending.since };
         out.push({ kind: 'cancel_timer', token: s.pending.token });
         s.pending = null;
-        out.push({ kind: 'log', entry: { event: 'would_stop', t: iso(t),
+        out.push({ kind: 'log', entry: { event: 'auto_stop', t: iso(t),
             pending_since: iso(s.wouldStop.pendingSince),
-            enabled: autostopEnabled(s.trigger.key),
-            note: 'logging only: nothing was stopped' } });
+            note: 'grace elapsed and the trigger no longer holds the mic: stopping' } });
+        // The only stop effect in this file, and only from here.
+        out.push({ kind: 'stop', cause: 'auto' });
         return { state: s, out };
     }
 
@@ -240,10 +236,11 @@ function autostopBlock(s) {
         else whyNull = 'no_release_seen';
     }
     return {
-        mode: 'log_only',
+        mode: 'live',
         trigger_key: key,
         trigger_name: s.trigger ? s.trigger.name : null,
-        enabled: key ? autostopEnabled(key) : false,
+        trigger_exe: s.trigger ? s.trigger.exe : null,
+        trigger_path: s.trigger ? s.trigger.path : null,
         grace_ms: GRACE_MS,
         would_stop_at: s.wouldStop ? iso(s.wouldStop.at) : null,
         would_stop_null_reason: whyNull,
@@ -271,6 +268,34 @@ function autostopBlock(s) {
     };
 }
 
+// Parses `micwatch --once` stdout: one JSON object per line, event "in_now",
+// one per process running input. The single reader for both the expiry check
+// and the holders_at_start log line, so the two cannot drift. keyOf is
+// main.js's detectKey (bundle ID, else exe:<name>). An unparseable line makes
+// the whole result unusable (holders/keys null) rather than partial: the
+// expiry check treats that as "do not stop".
+function parseHoldersOnce(stdout, keyOf) {
+    const holders = [];
+    const keys = [];
+    for (const line of String(stdout).split('\n')) {
+        if (!line.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(line); }
+        catch { return { holders: null, keys: null, error: `unparsed line: ${line}` }; }
+        // A line that parses to something other than an object (null, a number)
+        // is as unusable as one that does not parse; the pre-refactor code
+        // threw on it inside the same try and reported "unparsed line".
+        if (ev === null || typeof ev !== 'object') {
+            return { holders: null, keys: null, error: `unparsed line: ${line}` };
+        }
+        if (ev.event !== 'in_now') continue;
+        const key = keyOf(ev);
+        holders.push({ pid: ev.pid, key: key || null, exe: ev.exe || null, path: ev.path || null });
+        if (key && !keys.includes(key)) keys.push(key);
+    }
+    return { holders, keys, error: null };
+}
+
 // Holders at time t, as micwatch --once would have reported them: every key
 // with a pid that started input at or before t and has not stopped.
 function holdersFromEvents(events, t) {
@@ -294,6 +319,9 @@ function decide(events, opts = {}) {
     let state = initialState();
     const log = [];
     const timers = new Map();
+    // Every stop effect step() asked for, so a case can assert there was
+    // exactly one, or none.
+    const stopEffects = [];
 
     const feed = ev => {
         const r = step(state, ev);
@@ -305,6 +333,12 @@ function decide(events, opts = {}) {
             else if (o.kind === 'check_holders') {
                 timers.delete(o.token);
                 feed({ type: 'holders', t: ev.t, token: o.token, keys: holdersAt(ev.t) });
+            } else if (o.kind === 'stop') {
+                // What main.js does: stopRecording(cause), which feeds the
+                // tracker its own 'stop' event. Later events are then ignored,
+                // as they are on a stopped capture.
+                stopEffects.push({ t: ev.t, cause: o.cause });
+                feed({ type: 'stop', t: ev.t, cause: o.cause });
             }
         }
     };
@@ -319,10 +353,10 @@ function decide(events, opts = {}) {
     };
     for (const ev of sorted) { fireUpTo(ev.t); feed(ev); }
     fireUpTo(Infinity);
-    return { state, log, block: autostopBlock(state) };
+    return { state, log, stopEffects, block: autostopBlock(state) };
 }
 
 module.exports = {
-    GRACE_MS, AUTOSTOP_ENABLED, autostopEnabled,
-    initialState, step, autostopBlock, decide, holdersFromEvents,
+    GRACE_MS,
+    initialState, step, autostopBlock, decide, holdersFromEvents, parseHoldersOnce,
 };
