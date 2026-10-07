@@ -159,9 +159,15 @@ cp "$APP_SRC/meetings.html" "$C/Resources/app/meetings.html"
 # App -> scope inference (SAA-170). main.js requires this by relative path;
 # a bundle without it fails to launch at all, not just to infer scope.
 cp "$APP_SRC/app-scope.js" "$C/Resources/app/app-scope.js"
-# The auto-stop decision, logging only (SAA-184). main.js requires this by
-# relative path; a bundle without it fails to launch.
+# The auto-stop decision (SAA-184). main.js requires this by relative path; a
+# bundle without it fails to launch.
 cp "$APP_SRC/autostop.js" "$C/Resources/app/autostop.js"
+# The first-run acknowledgement (SAA-216). main.js requires consent.js by
+# relative path and loads consent.html by path relative to itself; a bundle
+# without the first fails to launch, and without the second the gate would
+# shut with nothing to open.
+cp "$APP_SRC/consent.js" "$C/Resources/app/consent.js"
+cp "$APP_SRC/consent.html" "$C/Resources/app/consent.html"
 install -m 755 "$SYSTEMTAP_BIN" "$C/Resources/bin/systemtap"
 install -m 755 "$MICCAP_BIN"    "$C/Resources/bin/miccap"
 install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"

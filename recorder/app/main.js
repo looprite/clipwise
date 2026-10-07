@@ -9,7 +9,7 @@
 // is a human. The recorder is the trigger; the manifest it wrote at capture
 // start is the record the pipeline keys on.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const zlib = require('zlib');
@@ -30,8 +30,12 @@ const { lastMeeting, classifyCapture, stemTimeMs, isTrashed } = require('./last-
 // The recent-meetings window's rows (SAA-217).
 const { listMeetings, listTrashed } = require('./meetings.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
-// Auto-stop decision, logging only (SAA-184). Pure; nothing it returns stops a capture.
+// The auto-stop decision (SAA-184). Pure: it returns what should happen, and
+// autostopFeed carries out the one effect that stops a capture.
 const autostop = require('./autostop.js');
+// The first-run acknowledgement and the notice line (SAA-216). Pure; the gate
+// that uses it is startRecording.
+const consent = require('./consent.js');
 
 // --- constants ------------------------------------------------------------
 // All measurements come from 5-second captures on 2026-08-09. A long
@@ -134,7 +138,16 @@ const MICWATCH_BIN = BUILD_INFO
     ? path.join(BUNDLED_BIN, 'micwatch')
     : path.join(RECORDER_DIR, 'micwatch');
 
-const SUPPORT_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'clipwise');
+// CLIPWISE_SUPPORT_DIR is for testing a fresh install without touching a real
+// one (SAA-216): everything that is state — the acknowledgement, detected apps,
+// the captures — hangs off this directory. Unset in normal use. When set, the
+// launch log says so, so a stray value in an environment cannot go unnoticed.
+const SUPPORT_DIR = process.env.CLIPWISE_SUPPORT_DIR
+    ? path.resolve(process.env.CLIPWISE_SUPPORT_DIR)
+    : path.join(os.homedir(), 'Library', 'Application Support', 'clipwise');
+if (process.env.CLIPWISE_SUPPORT_DIR) {
+    console.error(`[clipwise-recorder] SUPPORT_DIR overridden by CLIPWISE_SUPPORT_DIR: ${SUPPORT_DIR}`);
+}
 const OUTDIR = path.join(SUPPORT_DIR, 'recordings');
 
 // Which applications may start a capture, learned one answer at a time
@@ -238,6 +251,7 @@ const VOICE_NAMING_STOP_MESSAGE_MS = 5000;
 // what the OS knows and not what a person would type. Guessing it would put a
 // name nobody chose on every recording.
 const IDENTITY_HTML = path.join(__dirname, 'identity.html');
+const CONSENT_HTML = path.join(__dirname, 'consent.html');
 const MEETINGS_HTML = path.join(__dirname, 'meetings.html');
 // How long the prompt waits for the page to report its height before showing
 // itself anyway. Short enough not to be noticed after a capture, long enough
@@ -1386,11 +1400,24 @@ function renderTray() {
             { label: `Never ask about ${name}`, click: () => answerDetectPrompt(key, 'never') },
         );
     }
+    // Until the recording notice is agreed to, a menu item that opens it: the
+    // window can be closed with "Not now", and a menu bar item must never be a
+    // dead end (SAA-195's rule).
+    if (!consent.isAcknowledged(SUPPORT_DIR)) {
+        items.push(
+            { type: 'separator' },
+            { label: 'Recording notice\u2026',
+              click: () => showConsentWindow(blockedStartFresh() ? 'blocked' : 'launch') },
+        );
+    }
     items.push(
         { type: 'separator' },
         { label: 'Start', enabled: !active, click: startRecording },
         { label: 'Stop',  enabled:  active, click: () => stopRecording('manual') },
     );
+    // During a capture only: a line to paste into the meeting chat, since
+    // nothing in the meeting shows that Clipwise is recording (SAA-216).
+    if (active) items.push({ label: 'Copy recording notice', click: copyRecordingNotice });
     items.push({ type: 'separator' }, detectedAppsMenu());
     if (permissionIssue) {
         items.push({ type: 'separator' });
@@ -1626,9 +1653,15 @@ function notifyStateChange(prev, next) {
         // only ever one mixed far-side stream, not per-person audio
         // (SAA-94), and it only covers from this moment on (SAA-105) — both
         // would be over-claims in a notification the user is trusting.
-        notify('Clipwise: recording started', session && session.trigger
-            ? `Detected ${displayNameForDetectedKey(session.trigger.key, session.trigger)}. Capturing your mic and the call audio.`
-            : 'Capturing your mic and the call audio.');
+        //
+        // SAA-216: nothing in the meeting shows that Clipwise is recording, so
+        // this is also where the host is handed the line to say aloud (Jon,
+        // 2026-10-07). The body is the notice itself, the same line "Copy
+        // recording notice" puts on the clipboard. What this used to say — which
+        // app triggered the capture and that both tracks are going — is no longer
+        // in this notification; the triggering app is recorded in the capture's
+        // autostop-<stem>.log (capture_start).
+        notify('Recording \u2014 let everyone know', consent.NOTICE_LINE);
         return;
     }
     // The flapping pair.
@@ -2897,6 +2930,138 @@ function registerIdentityIpc() {
     });
 }
 
+// --- first-run acknowledgement (SAA-216) -----------------------------------
+//
+// consent.js holds the rules; this is the window, the gate's memory and the
+// clipboard. The gate itself is at the top of startRecording.
+
+// What the gate last turned away: { trigger, at }, trigger null for a manual
+// start. Kept for a while, not forever: a start refused long ago is not
+// something agreeing now should quietly carry out.
+let blockedStart = null;
+const BLOCKED_START_TTL_MS = 10 * 60 * 1000;
+let consentWindow = null; // { win, token, mode }
+
+function blockedStartFresh() {
+    if (blockedStart && Date.now() - blockedStart.at > BLOCKED_START_TTL_MS) blockedStart = null;
+    return blockedStart;
+}
+
+function showConsentWindow(mode) {
+    // Already open: bring it forward, and if a start has been blocked since it
+    // opened by itself, say so on the button.
+    if (consentWindow) {
+        if (mode === 'blocked') consentWindow.mode = 'blocked';
+        try {
+            consentWindow.win.webContents.send('consent:set-label', consent.buttonLabel(consentWindow.mode));
+            consentWindow.win.show();
+            app.focus({ steal: true });
+        } catch {}
+        return;
+    }
+    const token = randomUUID();
+    let win;
+    try {
+        win = new BrowserWindow({
+            useContentSize: true,
+            width: 460,
+            height: 330,
+            show: false,
+            resizable: false,
+            minimizable: false,
+            maximizable: false,
+            fullscreenable: false,
+            alwaysOnTop: true,
+            title: 'Before you record',
+            webPreferences: { nodeIntegration: true, contextIsolation: false },
+        });
+    } catch (err) {
+        // Nothing records while the gate is shut, so a window that cannot be
+        // drawn has to be said out loud rather than leave a button that does nothing.
+        console.error(`consent: could not open the window: ${String(err)}`);
+        notify('Clipwise: could not show the recording notice',
+            'Recording stays off until it is agreed to. Try "Recording notice" in the menu bar.');
+        return;
+    }
+    consentWindow = { win, token, mode };
+    win.once('ready-to-show', () => {
+        win.show();
+        // An accessory app's window opens behind whatever is in front.
+        try { app.focus({ steal: true }); } catch {}
+    });
+    // Closing the window is "Not now": nothing is written and the gate stays shut.
+    win.once('closed', () => {
+        if (consentWindow && consentWindow.win === win) consentWindow = null;
+        renderTray();
+    });
+    win.loadFile(CONSENT_HTML, { query: { token, label: consent.buttonLabel(mode) } }).catch((err) => {
+        console.error(`consent: window failed to load: ${String(err)}`);
+        try { win.close(); } catch {}
+    });
+}
+
+function closeConsentWindow() {
+    if (!consentWindow) return;
+    const { win } = consentWindow;
+    consentWindow = null;
+    try { win.close(); } catch {}
+}
+
+// After "I understand" has been saved. Whether a capture starts is
+// consent.shouldStartAfterAcknowledgement's decision; this carries it out.
+function resumeBlockedStart(mode) {
+    const blocked = blockedStartFresh();
+    blockedStart = null;
+    const holds = (key) => detectActive.has(key);
+    if (!consent.shouldStartAfterAcknowledgement(mode, blocked, holds)) {
+        // The call that asked for a capture is over: the one thing that must
+        // not happen is silence about it.
+        if (mode === 'blocked' && blocked && blocked.trigger) {
+            notify('Clipwise: nothing to record',
+                'The call that tried to start recording has ended.');
+        }
+        return;
+    }
+    // Restores what startRecording consumed when it was turned away, so the
+    // capture is attributed to its trigger app exactly as it would have been.
+    pendingStartTrigger = blocked.trigger || null;
+    startRecording();
+}
+
+function registerConsentIpc() {
+    ipcMain.on('consent:acknowledge', (_event, payload) => {
+        if (!consentWindow || !payload || payload.token !== consentWindow.token) return;
+        try {
+            consent.recordAcknowledgement(SUPPORT_DIR);
+        } catch (err) {
+            // Not saved means not agreed to, as far as the gate is concerned. Say
+            // so, and give the person their button back.
+            console.error(`consent: could not save the acknowledgement: ${String(err)}`);
+            notify('Clipwise: could not save your answer',
+                'Nothing was recorded. Try again.');
+            try { consentWindow.win.webContents.send('consent:not-saved'); } catch {}
+            return;
+        }
+        const mode = consentWindow.mode;
+        console.error(`[clipwise-recorder] consent: recording notice agreed to (opened as "${mode}")`);
+        closeConsentWindow();
+        renderTray();
+        resumeBlockedStart(mode);
+    });
+    ipcMain.on('consent:later', (_event, payload) => {
+        if (!consentWindow || !payload || payload.token !== consentWindow.token) return;
+        console.error('[clipwise-recorder] consent: "Not now" — gate stays shut');
+        closeConsentWindow();
+        renderTray();
+    });
+}
+
+function copyRecordingNotice() {
+    clipboard.writeText(consent.NOTICE_LINE);
+    console.error('[clipwise-recorder] consent: recording notice copied to the clipboard');
+    notify('Recording notice copied', 'Paste it into the meeting chat.');
+}
+
 // --- lifecycle ------------------------------------------------------------
 
 function startRecording() {
@@ -2911,6 +3076,22 @@ function startRecording() {
     // the same reason `trigger` itself is consumed immediately above.
     const inferredScope = trigger ? scopeForDetectedKey(trigger.key) : null;
     if (state !== 'stopped' || session) return;
+    // SAA-216: nothing records until the person has agreed to the recording
+    // notice. Every way of starting a capture comes through here, so this is the
+    // only place the gate needs to be. What was turned away is remembered so
+    // that agreeing can start it (resumeBlockedStart).
+    if (!consent.isAcknowledged(SUPPORT_DIR)) {
+        blockedStart = { trigger, at: Date.now() };
+        console.error(`[clipwise-recorder] consent: start blocked until the recording notice is agreed to `
+            + `(${trigger ? `triggered by ${trigger.key}` : 'manual start'})`);
+        showConsentWindow('blocked');
+        // A capture an app asked for would otherwise just not happen, silently.
+        if (trigger) {
+            notify('Clipwise: agree to the recording notice',
+                'Recording starts when you do, if the call is still going.');
+        }
+        return;
+    }
     fs.mkdirSync(OUTDIR, { recursive: true });
     const stamp = utcStamp();
     const startedAt = new Date().toISOString();
@@ -3283,6 +3464,10 @@ app.whenReady().then(() => {
     setState('stopped');
     registerIdentityIpc();
     registerMeetingsIpc();
+    registerConsentIpc();
+    // Before any call can start a capture, so that a new person has read it by
+    // the time their first one is turned away (SAA-216).
+    if (!consent.isAcknowledged(SUPPORT_DIR)) showConsentWindow('launch');
     // Before anything spawns its own children (SAA-152) — see
     // sweepStrayChildren's comment for why that ordering matters.
     sweepStrayChildren();
@@ -3290,6 +3475,13 @@ app.whenReady().then(() => {
     // should still show a working menu bar immediately. Spawning is cheap —
     // the pass itself runs in another process — but ordering it here means a
     // throw from it can never cost the user their tray icon.
+    // A fresh install has no recordings directory yet, and the recovery log
+    // lives in it: without this the pass was skipped with an ENOENT line (seen
+    // 2026-10-07 on a fresh CLIPWISE_SUPPORT_DIR). A packaged app only escaped
+    // by accident, because its log file writer creates the directory first.
+    try { fs.mkdirSync(OUTDIR, { recursive: true }); } catch (err) {
+        console.error(`launch: could not create ${OUTDIR}: ${String(err)}`);
+    }
     startRecovery('app launch');
     // After the tray, for the same reason: call detection must never be able
     // to cost someone their menu bar icon. A missing or crashing micwatch
