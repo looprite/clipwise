@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- The first-run acknowledgement (SAA-216). Shown once, at launch and whenever
+     a start is blocked until it is agreed to; see consent.js for the rules and
+     main.js's startRecording for the gate.
+
+     The primary button's label comes from main.js (consent.js buttonLabel),
+     in the URL and again by message if the window is already open when a
+     blocked start arrives: "I understand" when it opened by itself,
+     "I understand — start recording" when something tried to start a capture.
+     "Not now" and closing the window are the same thing: nothing is written
+     and the gate stays shut.
+
+     Loaded from file:// with nodeIntegration on, same reasoning as
+     identity.html: ships inside the bundle, loads no remote content. -->
+<title>Before you record</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1d1d1f;
+    --muted: #6e6e73;
+    --bg: #ececee;
+    --accent: #0a68d8;
+    --accent-fg: #ffffff;
+    --secondary-bg: #ffffff;
+    --secondary-border: #c6c6c8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #f5f5f7;
+      --muted: #98989d;
+      --bg: #2a2a2c;
+      --accent: #4a9dff;
+      --accent-fg: #0b0b0c;
+      --secondary-bg: #1e1e20;
+      --secondary-border: #48484a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    padding: 20px 22px 18px;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    user-select: none;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #text { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 10px; }
+  p { margin: 0 0 10px; }
+  #actions { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; }
+  button {
+    font: inherit;
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--secondary-border);
+    background: var(--secondary-bg);
+    color: var(--fg);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+  <div id="text">
+    <h1>Before you record</h1>
+    <p>Clipwise records calls on this Mac without joining them. No bot appears in the meeting, so nobody else on the call can see that it is recording.</p>
+    <p>You are responsible for telling the people you record, and for following the laws and workplace rules that apply to you. In many places everyone on a call has to agree to be recorded.</p>
+    <p>When you start recording, Clipwise shows a short line you can say to let everyone know. On calls with a chat, &ldquo;Copy recording notice&rdquo; in the menu bar copies it for you.</p>
+  </div>
+  <div id="actions">
+    <button id="later" type="button">Not now</button>
+    <button id="agree" class="primary" type="button" autofocus>I understand</button>
+  </div>
+<script>
+  const { ipcRenderer } = require('electron');
+  const params = new URLSearchParams(location.search);
+  const token = params.get('token');
+  const agree = document.getElementById('agree');
+  if (params.get('label')) agree.textContent = params.get('label');
+
+  // A blocked start arrived while the window was already open from launch.
+  ipcRenderer.on('consent:set-label', (_event, label) => { if (label) agree.textContent = label; });
+
+  // One click, one answer: a second click while the first is being written
+  // must not send it twice.
+  let answered = false;
+  function answer(channel) {
+    if (answered) return;
+    answered = true;
+    agree.disabled = true;
+    ipcRenderer.send(channel, { token });
+  }
+  // main.js re-enables the page if the acknowledgement could not be saved, so
+  // the person can try again instead of being stuck behind a dead button.
+  ipcRenderer.on('consent:not-saved', () => { answered = false; agree.disabled = false; });
+
+  agree.addEventListener('click', () => answer('consent:acknowledge'));
+  document.getElementById('later').addEventListener('click', () => answer('consent:later'));
+</script>
+</body>
+</html>
