@@ -17,7 +17,7 @@
 // unresolved as it is today.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
@@ -72,6 +72,9 @@ type DiarizeSidecar = {
   hostEchoSourceLabel: string | null;
   hostEchoSimilarity: number | null;
   error: string | null;
+  // Added by recorder/transcribe.py when it ran the binary itself (SAA-239);
+  // never written by the binary. See readEarlySidecar.
+  early_run?: unknown;
 };
 
 export type DiarizationStepResult = {
@@ -82,6 +85,64 @@ export type DiarizationStepResult = {
   processingTimeSeconds: number | null;
   hostEcho: { similarity: number; threshold: number } | null;
 };
+
+// The sidecar recorder/transcribe.py leaves when it started the binary early
+// (SAA-239), or why it can't be used. It is used only if it says the binary
+// exited 0 AND the two wavs it was made from still have the size and mtime it
+// recorded; anything else (an older sidecar with no such block, a different
+// run's wavs, a wav rewritten since, a garbled file) means the caller runs the
+// binary itself, exactly as before. mtime is nanoseconds as a string on both
+// sides: a JSON number would lose digits here.
+export type EarlySidecar = { sidecar: DiarizeSidecar | null; reason: string };
+
+export function readEarlySidecar(sidecarPath: string, tapWav: string, micWav: string): EarlySidecar {
+  let doc: DiarizeSidecar & { early_run?: unknown };
+  try {
+    doc = JSON.parse(readFileSync(sidecarPath, "utf8"));
+  } catch {
+    return { sidecar: null, reason: "no readable sidecar" };
+  }
+  const er = (doc as { early_run?: unknown } | null)?.early_run as
+    | { exit_code?: unknown; tap_wav?: unknown; mic_wav?: unknown }
+    | undefined;
+  if (!er || typeof er !== "object") return { sidecar: null, reason: "sidecar has no early_run block" };
+  if (er.exit_code !== 0) return { sidecar: null, reason: `early run exit status was ${String(er.exit_code)}` };
+  for (const [name, path, recorded] of [
+    ["tap", tapWav, er.tap_wav],
+    ["mic", micWav, er.mic_wav],
+  ] as const) {
+    const rec = recorded as { size?: unknown; mtime_ns?: unknown } | undefined;
+    if (!rec || typeof rec.size !== "number" || typeof rec.mtime_ns !== "string") {
+      return { sidecar: null, reason: `early_run has no usable ${name} wav record` };
+    }
+    let st;
+    try {
+      st = statSync(path, { bigint: true });
+    } catch {
+      return { sidecar: null, reason: `${name} wav not readable` };
+    }
+    if (Number(st.size) !== rec.size || String(st.mtimeNs) !== rec.mtime_ns) {
+      return { sidecar: null, reason: `${name} wav differs from the one the early run used` };
+    }
+  }
+  return { sidecar: doc, reason: "early run's wavs unchanged" };
+}
+
+// Where the sidecar for this capture comes from: transcribe.py's early run if
+// it provably matches these wavs, otherwise `runBinary` (which the caller
+// supplies, and which is NOT called when the early sidecar is used). Whatever
+// runBinary throws propagates, so the caller's skip-on-failure handling is
+// the one it always had.
+export function sidecarForCapture(
+  sidecarPath: string,
+  tapWav: string,
+  micWav: string,
+  runBinary: () => DiarizeSidecar,
+): { sidecar: DiarizeSidecar; usedEarly: boolean; reason: string } {
+  const early = readEarlySidecar(sidecarPath, tapWav, micWav);
+  if (early.sidecar) return { sidecar: early.sidecar, usedEarly: true, reason: early.reason };
+  return { sidecar: runBinary(), usedEarly: false, reason: early.reason };
+}
 
 function diarizePathFor(dir: string, stem: string): string {
   return join(dir, `diarize-${stem}.json`);
@@ -206,23 +267,35 @@ export async function runDiarizationForCapture(
   const sidecarPath = diarizePathFor(dir, stem);
   let sidecar: DiarizeSidecar;
   try {
-    // Experiment C ran in single-digit seconds on 19-30 minute calls
-    // (~400x real time) — 120s is a wide margin over that, not a tuned
-    // budget, so a genuinely hung process still gets killed within one
-    // capture's processing window rather than blocking recovery forever.
-    // A timeout throws (Node sets err.killed/err.signal on it), which the
-    // catch below treats the same as any other tool failure: a skip, never
-    // a pipeline failure.
-    execFileSync(diarizeBin, [tapWav, micWav, modelsParentDir, sidecarPath], {
-      stdio: "inherit",
-      timeout: 120_000,
+    // transcribe.py starts the binary right after downsampling and leaves its
+    // sidecar here (SAA-239); it is used only if it provably came from these
+    // wavs, otherwise the binary runs as it always did.
+    const got = sidecarForCapture(sidecarPath, tapWav, micWav, () => {
+      // Experiment C ran in single-digit seconds on 19-30 minute calls
+      // (~400x real time) — 120s is a wide margin over that, not a tuned
+      // budget, so a genuinely hung process still gets killed within one
+      // capture's processing window rather than blocking recovery forever.
+      // A timeout throws (Node sets err.killed/err.signal on it), which the
+      // catch below treats the same as any other tool failure: a skip, never
+      // a pipeline failure.
+      execFileSync(diarizeBin, [tapWav, micWav, modelsParentDir, sidecarPath], {
+        stdio: "inherit",
+        timeout: 120_000,
+      });
+      return JSON.parse(readFileSync(sidecarPath, "utf8")) as DiarizeSidecar;
     });
-    sidecar = JSON.parse(readFileSync(sidecarPath, "utf8")) as DiarizeSidecar;
+    sidecar = got.sidecar;
+    console.log(
+      got.usedEarly
+        ? `diarize: using the sidecar from transcribe.py's early run (${got.reason})`
+        : `diarize: ran the binary (${got.reason})`,
+    );
   } catch (err) {
     const timedOut = Boolean(err && typeof err === "object" && "killed" in err && (err as { killed?: boolean }).killed);
     const message = err instanceof Error ? err.message : String(err);
     return skip(timedOut ? "diarize tool timed out after 120s" : `diarize tool failed: ${message}`);
   }
+
   if (sidecar.error) {
     return skip(`diarize tool reported an error: ${sidecar.error}`);
   }
