@@ -19,6 +19,15 @@ import { randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
 import { runCollapse, type CollapseInput, type CollapseResult } from "./collapse.js";
 import { embedMomentsByIds } from "./embeddings.js";
+import { isApiPushback, runBoundedPool } from "./pass2-pool.js";
+
+// Pass 2's per-topic calls in flight at once (SAA-239). The first call runs
+// alone to write the prompt cache; see pass2-pool.ts.
+const PASS2_CONCURRENCY = 6;
+// Requeues per topic when a 429/5xx still reaches us after the SDK's own two
+// retries, each at half the previous ceiling. Separate from runPass2's
+// MAX_ATTEMPTS, which counts only unusable replies.
+const PASS2_MAX_REQUEUES = 3;
 
 // Sonnet 4.6 — matches prior extraction cost profile (~$0.30-0.50/call).
 const MODEL = "claude-sonnet-4-6";
@@ -309,6 +318,7 @@ async function runPass2(
   segs: Segment[],
   identityResolved: boolean,
   attendeeNames: string[],
+  signal?: AbortSignal,
 ): Promise<ExtractedMoment[]> {
   const spanSegs = segs.filter(
     (s) =>
@@ -403,7 +413,7 @@ async function runPass2(
           ],
         },
       ],
-    });
+    }, { signal });
     const use = resp.content.find((b) => b.type === "tool_use");
     if (use && use.type === "tool_use") {
       const out = (use.input as { moments?: unknown }).moments;
@@ -712,9 +722,37 @@ export async function runExtraction(
   // record — this array is only for building the collapse plan.
   const buffered: BufferedMoment[] = [];
   let outOfRange = 0;
+  // Fetch every span's moments first, up to PASS2_CONCURRENCY at a time, and
+  // only then write. Two things follow from that split (SAA-239, SAA-82):
+  //   - results are indexed by span, so the insert order below and the order
+  //     of `buffered` (whose positions are the #i the collapse prompt shows)
+  //     are the same as the sequential loop's, however the calls finish;
+  //   - if any span fails after its retries nothing from this run has been
+  //     written yet. Previously the spans before the failing one were already
+  //     committed and left behind.
+  const pass2Start = Date.now();
+  console.log(`extract: pass 2 starting — ${spans.length} spans, up to ${PASS2_CONCURRENCY} at a time`);
+  const pass2Moments = await runBoundedPool(
+    spans,
+    (span, _i, signal) =>
+      runPass2(client, rendered, span, segs, identityResolved, attendeeNames, signal),
+    {
+      cap: PASS2_CONCURRENCY,
+      maxRequeues: PASS2_MAX_REQUEUES,
+      backoffMs: (n) => 2000 * n,
+      isPushback: isApiPushback,
+      onRequeue: ({ index, requeue, ceiling, err }) =>
+        console.warn(
+          `extract: pass2 span ${index} hit ${(err as { status?: number }).status} after the SDK's retries — ` +
+            `requeue ${requeue}/${PASS2_MAX_REQUEUES}, concurrency now at most ${ceiling}`,
+        ),
+    },
+  );
+  console.log(`extract: pass 2 fetched ${spans.length} spans in ${((Date.now() - pass2Start) / 1000).toFixed(1)}s`);
+
   for (let i = 0; i < spans.length; i++) {
     const span = spans[i];
-    const moments = await runPass2(client, rendered, span, segs, identityResolved, attendeeNames);
+    const moments = pass2Moments[i];
 
     // Validate offsets in code (see schema comment on start_sec/end_sec).
     const spanSegs = segs.filter(
