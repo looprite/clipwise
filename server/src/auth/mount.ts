@@ -19,6 +19,7 @@
 
 import type { Express, Request, Response, NextFunction } from "express";
 import { toNodeHandler } from "better-auth/node";
+import { logError } from "../lib/safe-error.js";
 import { authConfigFromEnv, getAuth, type Auth } from "./auth.js";
 
 // An explicit `auth` (the check scripts pass one) is used as is. Without one,
@@ -55,8 +56,7 @@ export function mountAuth(
     try {
       await handlerFor(auth ?? getAuth())(req, res);
     } catch (err) {
-      const e = err as { name?: string; code?: string; message?: string };
-      console.error(`auth: request failed: ${e?.name ?? "Error"} ${e?.code ?? ""} ${e?.message ?? ""}`.trim());
+      logError("auth: request failed", err);
       if (!res.headersSent) res.status(503).json({ error: "auth_unavailable" });
     }
   });

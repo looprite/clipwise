@@ -14,6 +14,7 @@
 
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { describeErrorLine } from "../lib/safe-error.js";
 import {
   currentEmbeddingModel,
   embed,
@@ -81,7 +82,7 @@ export async function embedMomentsByIds(ids: string[]): Promise<EmbedResult> {
     try {
       vectors = await embed(pairs.map((p) => p.text), "document");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = describeErrorLine(err);
       console.warn(
         `embeddings: batch of ${pairs.length} failed at Voyage — leaving embedding null for sweep to retry (${msg})`,
       );
@@ -102,7 +103,7 @@ export async function embedMomentsByIds(ids: string[]): Promise<EmbedResult> {
       );
       embedded += pairs.length;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = describeErrorLine(err);
       console.warn(
         `embeddings: batch of ${pairs.length} failed at DB write — leaving embedding null for sweep to retry (${msg})`,
       );

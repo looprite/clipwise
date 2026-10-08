@@ -21,6 +21,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { describeErrorLine } from "../lib/safe-error.js";
 import { generateVoiceNamingData, type ClipRange } from "./voice-clips.js";
 
 // Not imported from ingest/identity.ts, which declares the same two
@@ -407,7 +408,7 @@ export async function runDiarizationForCapture(
       speakerIdByVoiceOut,
     );
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = describeErrorLine(err);
     console.log(`diarize: naming data generation failed (split still applied): ${message}`);
   }
 

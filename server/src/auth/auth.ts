@@ -21,6 +21,7 @@ import { APIError } from "better-auth/api";
 import { jwt } from "better-auth/plugins";
 import { mcp } from "@better-auth/mcp";
 import { pool } from "../db/index.js";
+import { logError } from "../lib/safe-error.js";
 import {
   decideSignIn,
   findMemberByAuthUserId,
@@ -174,9 +175,7 @@ export function getAuth(): Auth {
     const auth = createAuth(authConfigFromEnv());
     cached = auth;
     auth.$context.catch((err: unknown) => {
-      // Class, code and message only; never anything a query carried.
-      const e = err as { name?: string; code?: string; message?: string };
-      console.error(`auth: initialisation failed, will retry on the next request: ${e?.name ?? "Error"} ${e?.code ?? ""} ${e?.message ?? ""}`.trim());
+      logError("auth: initialisation failed, will retry on the next request", err);
       if (cached === auth) cached = null;
     });
   }

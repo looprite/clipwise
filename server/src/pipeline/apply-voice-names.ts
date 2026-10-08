@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import { eq } from "drizzle-orm";
 
 import { db, pool, schema } from "../db/index.js";
+import { describeError } from "../lib/safe-error.js";
 import { CLIPWISE_SOURCE } from "../ingest/clipwise.js";
 import { findRecordingForCapture } from "../ingest/identity.js";
 import {
@@ -194,9 +195,7 @@ async function main(): Promise<void> {
 if (process.argv[1] && process.argv[1].endsWith("apply-voice-names.ts")) {
   main()
     .catch((err) => {
-      process.stderr.write(
-        `apply-voice-names: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
-      );
+      process.stderr.write(`apply-voice-names: ${describeError(err)}\n`);
       process.exitCode = 1;
     })
     .finally(async () => {

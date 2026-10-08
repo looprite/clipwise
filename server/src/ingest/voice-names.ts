@@ -9,6 +9,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { eq, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { describeErrorLine } from "../lib/safe-error.js";
 import { voiceLabel } from "../pipeline/diarize.js";
 
 export const VOICE_NAMES_VERSION = 1;
@@ -55,7 +56,7 @@ export function readVoiceNamesAnswer(dir: string, stem: string): VoiceNamesAnswe
     if (!doc || typeof doc !== "object") return null;
     return doc;
   } catch (err) {
-    process.stdout.write(`voice-names: ${path} unreadable (${String(err)}) — voices left unnamed\n`);
+    process.stdout.write(`voice-names: ${path} unreadable (${describeErrorLine(err)}) — voices left unnamed\n`);
     return null;
   }
 }

@@ -29,6 +29,7 @@
 
 import { and, isNotNull, ne, sql } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
+import { describeError } from "../lib/safe-error.js";
 import { CAPTURE_DURATION_SEC } from "../extract/extract.js";
 
 const TERMINAL = "ready";
@@ -137,7 +138,7 @@ async function main(): Promise<void> {
 
 main()
   .catch((err) => {
-    console.error(`backfill: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    console.error(`backfill: ${describeError(err)}`);
     process.exitCode = 1;
   })
   .finally(async () => {

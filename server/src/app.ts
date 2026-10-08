@@ -19,6 +19,7 @@ import { authorizationServerMetadata, protectedResourceMetadata } from "./auth/d
 import { consentPage, loginPage } from "./auth/pages.js";
 import { db } from "./db/index.js";
 import { errorHandler } from "./lib/http.js";
+import { logError } from "./lib/safe-error.js";
 import { mcpMethodNotAllowed, mcpPost } from "./mcp/server.js";
 import { accountsRouter } from "./routes/accounts.js";
 import { momentsRouter } from "./routes/moments.js";
@@ -60,7 +61,7 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
       await db.execute(sql`select 1`);
       res.status(200).json({ status: "ok", db: "ok" });
     } catch (err) {
-      console.error("health check: database unreachable:", err);
+      logError("health check: database unreachable", err);
       res.status(503).json({ status: "error", db: "unreachable" });
     }
   });

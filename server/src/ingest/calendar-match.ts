@@ -9,6 +9,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { describeErrorLine } from "../lib/safe-error.js";
 import { titlePlaceholderFor } from "./clipwise.js";
 
 export type CalendarMatchInvitee = {
@@ -53,7 +54,7 @@ export function readCalendarMatch(dir: string, stem: string): CalendarMatch | nu
     return doc;
   } catch (err) {
     process.stdout.write(
-      `calendar-match: ${path} unreadable (${String(err)}) — recording left unmatched\n`,
+      `calendar-match: ${path} unreadable (${describeErrorLine(err)}) — recording left unmatched\n`,
     );
     return null;
   }

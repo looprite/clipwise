@@ -11,6 +11,7 @@
 // capture, non-zero means a step failed and pipeline-<stem>.json says which.
 
 import { pool } from "../db/index.js";
+import { describeError } from "../lib/safe-error.js";
 import { runCapturePipeline } from "./run-capture.js";
 
 function usage(): never {
@@ -58,9 +59,7 @@ async function main(): Promise<void> {
 
 main()
   .catch((err) => {
-    process.stderr.write(
-      `pipeline: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
-    );
+    process.stderr.write(`pipeline: ${describeError(err)}\n`);
     process.exitCode = 1;
   })
   .finally(async () => {
