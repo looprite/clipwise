@@ -69,9 +69,25 @@ other device, or no answer, leaves the mic untouched and says why in the
 transcript's `aec` block. If the rule says run and recorder/aec is missing or
 fails, this dies rather than transcribe the echo — same reasoning as the engines.
 
+Voice separation head start (SAA-239). The voice-separation binary (recorder/
+diarize) reads only the two 16k wavs and writes a sidecar; it touches no database.
+So it is started right after downsampling, runs while echo removal and
+transcription do, and is waited for before this script exits. The sidecar gets an
+`early_run` block saying which wavs it was made from (size and mtime) and that the
+binary exited 0; server/src/pipeline/diarize.ts uses the sidecar only when those
+still match the wavs on disk, and otherwise runs the binary itself as it always
+did. A failed, timed-out or unavailable early run leaves no sidecar and changes
+nothing else: voice separation is an enhancement, never a reason to fail a
+transcript.
+
 Environment:
     CLIPWISE_AEC        auto | off. Default: auto (the rule above). off skips the step.
     AEC_BIN             aec binary. Default: recorder/aec/.build/release/aec
+    CLIPWISE_EARLY_DIARIZE
+                        auto | off. Default: auto (Apple Silicon with the binary and
+                        models present). off leaves voice separation to diarize.ts.
+    DIARIZE_BIN         voice-separation binary. Default: recorder/diarize/.build/release/diarize
+    DIARIZE_MODELS      Its models directory. Default: recorder/diarize/models
     CLIPWISE_TRANSCRIBER  whisper | parakeet. Default: parakeet.
     PARAKEET_BIN        parakeet binary. Default: recorder/parakeet/.build/release/parakeet
     PARAKEET_MODELS     Directory holding parakeet-tdt-0.6b-v2/. Default:
@@ -89,13 +105,16 @@ Environment:
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import os
+import platform
 import shutil
 import struct
 import subprocess
 import sys
+import time
 from array import array
 from operator import mul
 from pathlib import Path
@@ -121,6 +140,13 @@ PARAKEET_MODEL_NAME = "parakeet-tdt-0.6b-v2"
 
 AEC_DIR = Path(__file__).resolve().parent / "aec"
 DEFAULT_AEC_BIN = str(AEC_DIR / ".build" / "release" / "aec")
+
+DIARIZE_DIR = Path(__file__).resolve().parent / "diarize"
+DEFAULT_DIARIZE_BIN = str(DIARIZE_DIR / ".build" / "release" / "diarize")
+DEFAULT_DIARIZE_MODELS = str(DIARIZE_DIR / "models")
+# The same budget diarize.ts gives the binary (its execFileSync timeout), counted
+# from when the early run started.
+DIARIZE_BUDGET_S = 120.0
 # Core Audio's UID for the built-in speakers, as the manifest's system track
 # records it (`device_source: coreaudio_default_output_at_start`).
 AEC_BUILTIN_SPEAKER_UID = "BuiltInSpeakerDevice"
@@ -696,6 +722,146 @@ def run_aec(tap_16k: Path, mic_16k: Path, aec_bin: str) -> tuple[Path, dict]:
     return cleaned, json.loads(r.stdout.strip().splitlines()[-1])
 
 
+def wav_signature(p: Path) -> dict:
+    """Size and mtime of a file, as server/src/pipeline/diarize.ts compares them.
+
+    The mtime is nanoseconds as a string: as a JSON number it would lose digits
+    in JavaScript.
+    """
+    st = p.stat()
+    return {"size": st.st_size, "mtime_ns": str(st.st_mtime_ns)}
+
+
+def start_early_diarize(tap_16k: Path, mic_16k: Path, budget_s: float = DIARIZE_BUDGET_S):
+    """Start the voice-separation binary on the two 16k wavs; return a handle for
+    finish_early_diarize, or None if it was not started. Never raises.
+
+    The binary writes to `diarize-<stem>.json.early`; the sidecar proper is only
+    ever replaced by finish_early_diarize, after a clean exit, so a failed run
+    leaves nothing half-written and an existing sidecar is never deleted.
+    """
+    try:
+        mode = os.environ.get("CLIPWISE_EARLY_DIARIZE", "auto")
+        if mode not in ("auto", "off"):
+            print(f"diarize head start: CLIPWISE_EARLY_DIARIZE={mode!r} is not auto or off — not started", file=sys.stderr)
+            return None
+        if mode == "off":
+            print("diarize head start: off (CLIPWISE_EARLY_DIARIZE=off)")
+            return None
+        if platform.machine() != "arm64":
+            print(f"diarize head start: not started — Apple Silicon only (this is {platform.machine()})")
+            return None
+        name = tap_16k.name
+        if not (name.startswith("system-") and name.endswith(".16k.wav")):
+            print(f"diarize head start: not started — cannot derive a capture stem from {name}")
+            return None
+        stem = name[len("system-"): -len(".16k.wav")]
+        binary = os.environ.get("DIARIZE_BIN", DEFAULT_DIARIZE_BIN)
+        models = Path(os.environ.get("DIARIZE_MODELS", DEFAULT_DIARIZE_MODELS))
+        if not os.access(binary, os.X_OK):
+            print(f"diarize head start: not started — no binary at {binary}")
+            return None
+        if not models.is_dir():
+            print(f"diarize head start: not started — no models at {models}")
+            return None
+        final = tap_16k.with_name(f"diarize-{stem}.json")
+        tmp = tap_16k.with_name(f"diarize-{stem}.json.early")
+        tmp.unlink(missing_ok=True)
+        sig = {"tap_wav": wav_signature(tap_16k), "mic_wav": wav_signature(mic_16k)}
+        proc = subprocess.Popen(
+            [binary, str(tap_16k), str(mic_16k), str(models), str(tmp)],
+            stdout=sys.stderr, stderr=sys.stderr,
+        )
+    except Exception as e:  # an enhancement: never a reason to fail the transcript
+        print(f"diarize head start: not started — {type(e).__name__}: {e}")
+        return None
+    handle = {
+        "proc": proc, "tmp": tmp, "final": final, "tap": tap_16k, "mic": mic_16k,
+        "sig": sig, "t0": time.monotonic(), "budget_s": budget_s, "done": False,
+    }
+    atexit.register(abort_early_diarize, handle)
+    print(f"diarize head start: started (pid {proc.pid}) → {final.name}")
+    return handle
+
+
+def abort_early_diarize(h) -> None:
+    """Stop a still-running early run and drop its partial output. Runs at exit,
+    so a transcript that fails (die, an exception) never leaves it orphaned."""
+    if h["done"]:
+        return
+    h["done"] = True
+    try:
+        if h["proc"].poll() is None:
+            h["proc"].kill()
+            h["proc"].wait(timeout=10)
+    except Exception:
+        pass
+    try:
+        h["tmp"].unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def finish_early_diarize(h) -> bool:
+    """Wait for the early run, then publish its sidecar with the `early_run`
+    block. True if a sidecar was published. Never raises: on any failure the
+    partial output is removed and diarize.ts runs the binary itself.
+    """
+    if h is None or h["done"]:
+        return False
+    staged = h["tmp"].with_name(h["tmp"].name + ".annotated")
+    why = None
+    try:
+        try:
+            remaining = max(1.0, h["budget_s"] - (time.monotonic() - h["t0"]))
+            rc = None
+            try:
+                rc = h["proc"].wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                h["proc"].kill()
+                h["proc"].wait(timeout=10)
+                why = f"timed out after {h['budget_s']:.0f}s"
+            if why is None and rc != 0:
+                why = f"exited {rc}"
+            if why is None and not h["tmp"].is_file():
+                why = "no sidecar written"
+            if why is None:
+                now = {"tap_wav": wav_signature(h["tap"]), "mic_wav": wav_signature(h["mic"])}
+                if now != h["sig"]:
+                    why = "the wavs changed while it ran"
+            if why is None:
+                doc = json.loads(h["tmp"].read_text())
+                if not isinstance(doc, dict):
+                    why = "sidecar is not a JSON object"
+            if why is None:
+                doc["early_run"] = {"exit_code": 0, **h["sig"], "started_by": "transcribe.py"}
+                staged.write_text(json.dumps(doc, indent=2) + "\n")
+                os.replace(staged, h["final"])
+                h["tmp"].unlink(missing_ok=True)
+                print(f"diarize head start: done in {time.monotonic() - h['t0']:.1f}s → {h['final'].name}")
+                return True
+        except Exception as e:
+            why = f"{type(e).__name__}: {e}"
+    finally:
+        # However this ends, including an interrupt while waiting: the child is
+        # not left running, and the exit hook has nothing more to do.
+        h["done"] = True
+        atexit.unregister(abort_early_diarize)
+        try:
+            if h["proc"].poll() is None:
+                h["proc"].kill()
+                h["proc"].wait(timeout=10)
+        except Exception:
+            pass
+    for p in (h["tmp"], staged):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+    print(f"diarize head start: not used — {why}; diarize.ts will run the binary itself")
+    return False
+
+
 def build_lines(words: list[dict], gap_ms: int = LINE_GAP_MS) -> list[dict]:
     """Words → segments. A gap of gap_ms or more between one word's end and the
     next word's start begins a new line; a line ends at its last word's end."""
@@ -882,6 +1048,11 @@ def main() -> int:
     ffmpeg_downsample_pcm(tap_src, tap_16k)
     print(f"downsampling mic → {mic_16k}")
     ffmpeg_downsample_wav(mic_src, mic_16k)
+
+    # Both wavs are complete and nothing below rewrites them, so voice
+    # separation can start now and overlap echo removal and transcription. It
+    # is waited for at the end, before this script exits.
+    early_diarize = start_early_diarize(tap_16k, mic_16k)
 
     # The mic every transcription step reads: the cleaned copy when AEC ran.
     mic_asr_16k = mic_16k
@@ -1079,6 +1250,7 @@ def main() -> int:
     }
     out_path.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"wrote merged transcript → {out_path}")
+    finish_early_diarize(early_diarize)
     return 0
 
 
