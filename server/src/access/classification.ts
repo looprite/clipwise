@@ -19,6 +19,14 @@ export const ROUTES: Record<string, { access: Access; note: string }> = {
     access: "public",
     note: "Better Auth: sign-in, OAuth and token endpoints, with their own checks and rate limits",
   },
+  "GET /.well-known/oauth-protected-resource": { access: "public", note: "discovery document: names the MCP resource and its authorization server" },
+  "GET /.well-known/oauth-protected-resource/mcp": { access: "public", note: "same document at the path-inserted location" },
+  "GET /.well-known/oauth-authorization-server/api/auth": { access: "public", note: "Better Auth's server metadata at the RFC 8414 location" },
+  "GET /login": { access: "public", note: "sign-in page for the OAuth flow; strict CSP, posts to Better Auth" },
+  "GET /consent": { access: "public", note: "consent page for the OAuth flow; needs a session to do anything" },
+  "POST /mcp": { access: "member", note: "the MCP endpoint; tools below run as the caller" },
+  "GET /mcp": { access: "member", note: "405 after authentication (stateless server: no stream, no session)" },
+  "DELETE /mcp": { access: "member", note: "405 after authentication (no session to end)" },
   "GET /oauth/google/callback": {
     access: "public",
     note: "Google's redirect carries no token; gated by the single-use state an admin's /connect issued",
@@ -44,10 +52,10 @@ export const ROUTES: Record<string, { access: Access; note: string }> = {
   "POST /recordings/:id/transcript": { access: "owner", note: "only the recording's owner" },
 };
 
-// The tools Claude calls. Served by /mcp from the next change; the table is
-// here now so the decision is made before the endpoint exists. Both are
+// The tools Claude calls, served at /mcp. check-access.ts asks the running server
+// for its actual tool list and fails if it differs from this table. Both are
 // read-only and go through the same services as the routes above.
 export const MCP_TOOLS: Record<string, { access: Access; note: string }> = {
   search_moments: { access: "member", note: "services/search-moments.ts, filtered like GET .../moments" },
-  get_transcript: { access: "member", note: "services/transcript.ts, 404 unless the caller can see the recording" },
+  get_transcript: { access: "member", note: "services/transcript.ts getTranscriptPage: paged text; not found unless the caller can see the recording" },
 };

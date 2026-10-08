@@ -15,8 +15,11 @@
 import express, { type Express, type RequestHandler, type Router } from "express";
 import { sql } from "drizzle-orm";
 import { requireAdmin, requireMember, sameAccountOnly } from "./access/authenticate.js";
+import { authorizationServerMetadata, protectedResourceMetadata } from "./auth/discovery.js";
+import { consentPage, loginPage } from "./auth/pages.js";
 import { db } from "./db/index.js";
 import { errorHandler } from "./lib/http.js";
+import { mcpMethodNotAllowed, mcpPost } from "./mcp/server.js";
 import { accountsRouter } from "./routes/accounts.js";
 import { momentsRouter } from "./routes/moments.js";
 import { oauthRouter } from "./routes/oauth.js";
@@ -53,6 +56,22 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
       res.status(503).json({ status: "error", db: "unreachable" });
     }
   });
+
+  // What a client reads and shows to sign someone in for Claude: the discovery
+  // documents (/mcp's 401 points at the first) and the login and consent pages
+  // Better Auth redirects to. Public by design; none carries account data.
+  app.get("/.well-known/oauth-protected-resource", protectedResourceMetadata);
+  app.get("/.well-known/oauth-protected-resource/mcp", protectedResourceMetadata);
+  app.get("/.well-known/oauth-authorization-server/api/auth", authorizationServerMetadata);
+  app.get("/login", loginPage);
+  app.get("/consent", consentPage);
+
+  // The MCP endpoint. Stateless Streamable HTTP, so POST only; GET and DELETE
+  // are refused after authentication. A missing, bad or revoked login is a 401
+  // that points at the metadata above, which is what starts Claude's sign-in.
+  app.post("/mcp", requireMember, mcpPost);
+  app.get("/mcp", requireMember, mcpMethodNotAllowed);
+  app.delete("/mcp", requireMember, mcpMethodNotAllowed);
 
   // Guards for routes that live in routers mounted at "/" with fully
   // qualified paths.

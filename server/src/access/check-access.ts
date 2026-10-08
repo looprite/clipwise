@@ -90,7 +90,8 @@ async function http(
 // The real flow claude.ai and Claude Code run: register, sign in, authorize,
 // consent, exchange the code. Returns an access token for the MCP resource.
 let clientId = "";
-async function tokenFor(email: string): Promise<string> {
+type Tokens = { access: string; refresh: string | null; clientId: string };
+async function tokensFor(email: string, scope = "openid offline_access"): Promise<Tokens> {
   if (!clientId) {
     const reg = await http("POST", "/api/auth/oauth2/register", {
       json: {
@@ -111,19 +112,24 @@ async function tokenFor(email: string): Promise<string> {
     response_type: "code",
     client_id: clientId,
     redirect_uri: "https://claude.ai/api/mcp/auth_callback",
-    scope: "openid offline_access",
+    ...(scope ? { scope } : {}),
     state: "s",
     code_challenge: challenge,
     code_challenge_method: "S256",
     resource: cfg.mcpResource,
   });
   const authorize = await http("GET", `/api/auth/oauth2/authorize?${query}`, { cookie: signIn.cookie });
-  const consentQuery = String(authorize.json?.url ?? "").split("?")[1];
-  const consent = await http("POST", "/api/auth/oauth2/consent", {
-    json: { accept: true, oauth_query: consentQuery },
-    cookie: signIn.cookie,
-  });
-  const code = new URL(consent.json.url).searchParams.get("code")!;
+  let codeUrl = String(authorize.json?.url ?? "");
+  // First time for this person and client: the consent page. After that Better
+  // Auth remembers the consent and goes straight back with a code.
+  if (codeUrl.startsWith("/consent")) {
+    const consent = await http("POST", "/api/auth/oauth2/consent", {
+      json: { accept: true, oauth_query: codeUrl.split("?")[1] },
+      cookie: signIn.cookie,
+    });
+    codeUrl = String(consent.json?.url ?? "");
+  }
+  const code = new URL(codeUrl).searchParams.get("code")!;
   const token = await http("POST", "/api/auth/oauth2/token", {
     form: {
       grant_type: "authorization_code",
@@ -134,15 +140,17 @@ async function tokenFor(email: string): Promise<string> {
       resource: cfg.mcpResource,
     },
   });
-  return token.json.access_token as string;
+  return { access: token.json?.access_token as string, refresh: (token.json?.refresh_token as string) ?? null, clientId };
 }
+const tokenFor = async (email: string, scope?: string): Promise<string> => (await tokensFor(email, scope)).access;
 
-type Who = { email: string; memberId: string; token: string };
+type Who = { email: string; memberId: string; token: string; refresh: string | null };
 async function makeUser(label: string, role: "admin" | "member"): Promise<Who> {
   const email = `${label}-${tag}@clipwise.test`;
   const member = await addMember({ email, role, name: `Check ${label}` });
   await createPasswordLogin(email, `Check ${label}`, PASSWORD);
-  return { email, memberId: member.id, token: await tokenFor(email) };
+  const t = await tokensFor(email);
+  return { email, memberId: member.id, token: t.access, refresh: t.refresh };
 }
 
 async function cleanup(accountId: string | null): Promise<void> {
@@ -187,7 +195,7 @@ async function main(): Promise<void> {
     record(stale.length === 0, "every classified route exists on the app", `missing: ${stale.join("; ")}`);
     record(
       Object.values(MCP_TOOLS).every((t) => t.access === "member"),
-      `MCP tools classified (${Object.keys(MCP_TOOLS).join(", ")}); enumerated against the server's tool list when /mcp lands`,
+      `every MCP tool in the table is classified (${Object.keys(MCP_TOOLS).join(", ")}); the server's actual tool list is compared with it further down`,
     );
 
     // ---- 2. no token -------------------------------------------------------
@@ -341,6 +349,202 @@ async function main(): Promise<void> {
     const connectC = await http("GET", `/oauth/google/connect?account_id=${acc}`, { token: C.token });
     record(connectB.status === 403 && connectC.status !== 401 && connectC.status !== 403, "calendar connect: a member is refused (403); an admin gets past the gate", `${connectB.status}/${connectC.status}`);
 
+    // ---- the MCP endpoint ---------------------------------------------------
+    let rpcId = 0;
+    const rpc = async (token: string | undefined, method: string, params?: unknown) => {
+      const res = await fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
+      });
+      const text = await res.text();
+      let json: any = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = null;
+      }
+      return { status: res.status, json, headers: res.headers };
+    };
+    const call = async (who: Who, name: string, args: Record<string, unknown>) => {
+      const r = await rpc(who.token, "tools/call", { name, arguments: args });
+      const result = r.json?.result;
+      return { status: r.status, isError: result?.isError === true, text: String(result?.content?.[0]?.text ?? "") };
+    };
+
+    // What Claude does first: ask with no token, read the 401, follow it.
+    const first = await rpc(undefined, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "check", version: "1" } });
+    const challenge = first.headers.get("www-authenticate") ?? "";
+    const metadataUrl = /resource_metadata="([^"]+)"/.exec(challenge)?.[1] ?? "";
+    record(first.status === 401 && metadataUrl === `${cfg.baseURL}/.well-known/oauth-protected-resource`, "mcp: with no token /mcp answers 401 and points at the protected-resource metadata", `${first.status} ${challenge}`);
+    const prm = await http("GET", new URL(metadataUrl || "/x", cfg.baseURL).pathname);
+    record(prm.status === 200 && prm.json?.resource === cfg.mcpResource && prm.json?.authorization_servers?.[0] === `${cfg.baseURL}/api/auth`, "discovery: that document names this MCP URL exactly and the issuer first", JSON.stringify(prm.json));
+    const prm2 = await http("GET", "/.well-known/oauth-protected-resource/mcp");
+    record(JSON.stringify(prm2.json) === JSON.stringify(prm.json), "discovery: the path-inserted location serves the same document");
+    const asAlias = await http("GET", "/.well-known/oauth-authorization-server/api/auth");
+    const asNative = await http("GET", "/api/auth/.well-known/oauth-authorization-server");
+    record(
+      asAlias.status === 200 && asAlias.json?.issuer === `${cfg.baseURL}/api/auth` && JSON.stringify(asAlias.json) === JSON.stringify(asNative.json) && asAlias.json?.code_challenge_methods_supported?.includes("S256") && !!asAlias.json?.registration_endpoint,
+      "discovery: the RFC 8414 location serves Better Auth's server metadata (issuer, S256, registration)",
+      `${asAlias.status} ${asAlias.json?.issuer}`,
+    );
+    const loginPageRes = await fetch(`${base}/login?x=1`);
+    const consentPageRes = await fetch(`${base}/consent?x=1`);
+    const loginHtml = await loginPageRes.text();
+    const csp = loginPageRes.headers.get("content-security-policy") ?? "";
+    record(
+      loginPageRes.status === 200 && consentPageRes.status === 200 && /script-src 'nonce-[^']+'/.test(csp) && !/unsafe-inline|unsafe-eval/.test(csp) && /frame-ancestors 'none'/.test(csp) && (loginPageRes.headers.get("cache-control") ?? "").includes("no-store") && loginHtml.includes(csp.match(/nonce-([^']+)/)![1]),
+      "pages: /login and /consent are served with a nonce-only CSP, no framing, no caching",
+      csp.slice(0, 120),
+    );
+    const consentHtml = await consentPageRes.text();
+    record(/protocol === 'https:'/.test(consentHtml) && /hostname === 'localhost'/.test(consentHtml) && /location\.assign\(url\)/.test(consentHtml) && !/javascript:/.test(consentHtml.replace(/'[^']*'/g, "")), "pages: the consent page only navigates to an https (or loopback http) address — the redirect-URI script-injection advisory");
+
+    // The hand-off the login page performs: an unauthenticated authorize goes to /login, and after
+    // sign-in the same query goes back to authorize and on to /consent.
+    {
+      const email = C.email;
+      const verifier = randomBytes(32).toString("base64url");
+      const q = new URLSearchParams({
+        response_type: "code",
+        client_id: clientId,
+        redirect_uri: "https://claude.ai/api/mcp/auth_callback",
+        scope: "offline_access",
+        state: "s",
+        code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+        code_challenge_method: "S256",
+        resource: cfg.mcpResource,
+      });
+      const noSession = await http("GET", `/api/auth/oauth2/authorize?${q}`);
+      const toLogin = String(noSession.json?.url ?? noSession.headers.get("location") ?? "");
+      const signIn = await http("POST", "/api/auth/sign-in/email", { json: { email, password: PASSWORD } });
+      const again = await http("GET", `/api/auth/oauth2/authorize${toLogin.slice(toLogin.indexOf("?"))}`, { cookie: signIn.cookie });
+      const toConsent = String(again.json?.url ?? again.headers.get("location") ?? "");
+      // /consent the first time; the callback with a code once consent is remembered (C has connected before).
+      record(toLogin.startsWith("/login?") && (toConsent.startsWith("/consent?") || toConsent.startsWith("https://claude.ai/api/mcp/auth_callback?code=")), "login hand-off: no session → /login; sign in and return the same query → on to consent or straight to the callback with a code", `${toLogin.slice(0, 20)} → ${toConsent.slice(0, 40)}`);
+    }
+
+    // Scope variants a client may ask for: the connection must work whatever Claude requests.
+    for (const scope of ["offline_access", "openid offline_access", ""]) {
+      const t = await tokensFor(C.email, scope);
+      const ok = (await rpc(t.access, "tools/list")).status === 200;
+      record(ok && !!t.access, `oauth: a token obtained asking for scope "${scope}" works on /mcp${scope.includes("offline_access") ? ` (refresh token ${t.refresh ? "issued" : "NOT issued"})` : ""}`, "no token");
+    }
+
+    // The MCP handshake and the tool list, against the classification table.
+    const init = await rpc(A.token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "check", version: "1" } });
+    record(init.status === 200 && init.json?.result?.serverInfo?.name === "clipwise" && !!init.json?.result?.capabilities?.tools && typeof init.json?.result?.instructions === "string", "mcp: initialize answers with the server's name, tools capability and instructions", JSON.stringify(init.json)?.slice(0, 160));
+    const listA = await rpc(A.token, "tools/list");
+    const tools: any[] = listA.json?.result?.tools ?? [];
+    const actualNames = tools.map((t) => t.name);
+    const classified = Object.keys(MCP_TOOLS);
+    record(
+      sameSet(actualNames, classified),
+      `mcp tools: the server's actual tool list (${actualNames.join(", ")}) is exactly the classified list (${classified.join(", ")})`,
+      `unclassified: ${actualNames.filter((n) => !classified.includes(n)).join(",") || "-"}; missing: ${classified.filter((n) => !actualNames.includes(n)).join(",") || "-"}`,
+    );
+    record(tools.every((t) => t.annotations?.readOnlyHint === true && t.inputSchema?.type === "object" && typeof t.description === "string" && t.description.length > 100), "mcp tools: every tool is declared read-only, with an object input schema and a real description");
+    const toolsB = await rpc(B.token, "tools/list");
+    record(sameSet((toolsB.json?.result?.tools ?? []).map((t: any) => t.name), classified), "mcp tools: the same list for another member");
+
+    // Tools run as the caller: same visibility as the REST routes.
+    const searchVia = async (who: Who) => {
+      const r = await call(who, "search_moments", { query: WORD, scope: "all", limit: 200 });
+      let body: any = {};
+      try {
+        body = JSON.parse(r.text);
+      } catch {
+        body = {};
+      }
+      return { r, set: new Set<string>((body.moments ?? []).map((m: any) => String(m.title).replace(`${WORD} `, ""))), body };
+    };
+    const mA = await searchVia(A);
+    const mB = await searchVia(B);
+    const mC = await searchVia(C);
+    record(sameSet(mA.set, [...sa.set]) && sameSet(mB.set, [...sb.set]) && sameSet(mC.set, [...sc.set]), "mcp search_moments: each caller gets exactly what the REST search gives them (owner, member, admin)", `${[...mB.set].join(",")}`);
+    record(!mB.set.has("a1") && !mB.set.has("a3") && !mB.set.has("a2 personnel") && mB.body.totalMatches === 4, "mcp search_moments: another member's search leaves out the private call, the personal call and the personnel moment; the count agrees");
+
+    const trB1 = await call(B, "get_transcript", { recordingId: rec.a1.id });
+    const trB2 = await call(B, "get_transcript", { recordingId: rec.a2.id });
+    const trA1 = await call(A, "get_transcript", { recordingId: rec.a1.id });
+    record(trB1.isError && trB1.text.includes("recording_not_found") && !trB1.text.includes("words a1"), "mcp get_transcript: a private call is 'not found' to another member, as a tool error");
+    record(!trB2.isError && trB2.text.includes("words a2") && trB2.text.includes("last page") && trB2.text.includes("[#0 0:00]"), "mcp get_transcript: a shared call reads as numbered, timed lines and says it is the last page", trB2.text.slice(0, 200));
+    record(!trA1.isError && trA1.text.includes("words a1"), "mcp get_transcript: the owner reads their own private call");
+
+    // SAA-226: a long transcript comes back a page at a time, every segment exactly once.
+    const SEGS = 120;
+    const [pr] = await db
+      .insert(schema.recordings)
+      .values({ accountId: acc, ownerMemberId: A.memberId, visibility: "shared", scope: "work", slug: `check-access-${tag}-long`, title: `long ${tag}`, source: "check-access", sourceId: `${tag}-long`, startedAt: new Date(), durationSec: SEGS * 3 })
+      .returning({ id: schema.recordings.id });
+    const [ptr] = await db.insert(schema.transcripts).values({ recordingId: pr.id, provider: "check", status: "ready" }).returning({ id: schema.transcripts.id });
+    const filler = "lorem ipsum dolor sit amet ".repeat(11).trim();
+    await db.insert(schema.segments).values(
+      Array.from({ length: SEGS }, (_, i) => ({ accountId: acc, recordingId: pr.id, transcriptId: ptr.id, startSec: i * 3, endSec: i * 3 + 2.5, text: `${filler} #${i}`, orderIndex: i })),
+    );
+    const seen: number[] = [];
+    let cursor: number | null = 0;
+    let pages = 0;
+    let longestPage = 0;
+    let walked = true;
+    while (cursor !== null && pages < 400) {
+      const r = await call(B, "get_transcript", { recordingId: pr.id, fromSegment: cursor, maxChars: 5000 });
+      if (r.isError) {
+        walked = false;
+        break;
+      }
+      pages++;
+      longestPage = Math.max(longestPage, r.text.length);
+      for (const m of r.text.matchAll(/^\[#(\d+) /gm)) seen.push(Number(m[1]));
+      const next = /fromSegment=(\d+)/.exec(r.text);
+      cursor = /NOT THE LAST PAGE/.test(r.text) && next ? Number(next[1]) : null;
+    }
+    record(walked && seen.length === SEGS && seen.every((v, i) => v === i) && pages > 1, `mcp get_transcript: a ${SEGS}-segment transcript read in ${pages} pages of 5,000 characters returns every segment exactly once`, `walked ${walked}; saw ${seen.length}; ${pages} pages`);
+    record(longestPage < 5000 + 700, "mcp get_transcript: no page is longer than its budget plus the notice", `longest ${longestPage}`);
+    const fromSec = await call(B, "get_transcript", { recordingId: pr.id, fromSec: 30, maxChars: 2000 });
+    record(fromSec.text.includes("[#10 0:30]") && !fromSec.text.includes("[#9 "), "mcp get_transcript: fromSec jumps to the segment running at that second");
+    const badId = await call(B, "get_transcript", { recordingId: "not-a-uuid" });
+    record(badId.isError && badId.text.startsWith("invalid_arguments"), "mcp get_transcript: a bad argument is a tool error naming the problem");
+    const unknownTool = await call(B, "delete_everything", {});
+    record(unknownTool.isError && unknownTool.text.startsWith("unknown_tool"), "mcp: an unknown tool is a tool error");
+
+    // Search results are cut to a size a client can take, and say so.
+    const bulkRows = Array.from({ length: 150 }, (_, i) => ({
+      accountId: acc,
+      recordingId: pr.id,
+      kind: "observation",
+      title: `bulk${tag} ${i}`,
+      summary: `bulk${tag} ${"filler text for size ".repeat(40)}${i}`,
+      startSec: i,
+      endSec: i + 1,
+      metadata: { source: "hand_curated" },
+    }));
+    await db.insert(schema.moments).values(bulkRows);
+    const bulk = await call(B, "search_moments", { query: `bulk${tag}`, scope: "all", limit: 200 });
+    let bulkBody: any = {};
+    try {
+      bulkBody = JSON.parse(bulk.text);
+    } catch {
+      bulkBody = {};
+    }
+    record(
+      bulk.text.length <= 60_000 && bulkBody.trimmedForSize === true && bulkBody.truncated === true && bulkBody.totalMatches === 150 && bulkBody.moments.length === bulkBody.returned && bulkBody.returned < 150 && bulkBody.returned > 10 && typeof bulkBody.note === "string",
+      "mcp search_moments: a result over ~60,000 characters is cut from the end to fit, and says so (trimmedForSize, truncated, returned, totalMatches)",
+      `${bulk.text.length} chars; returned ${bulkBody.returned} of ${bulkBody.totalMatches}`,
+    );
+    const small = await call(B, "search_moments", { query: `bulk${tag}`, scope: "all", limit: 5 });
+    record(JSON.parse(small.text).trimmedForSize === undefined && JSON.parse(small.text).moments.length === 5, "mcp search_moments: a result that fits is not touched");
+
+    // No token, a junk token, and the methods that are refused.
+    record((await rpc(undefined, "tools/list")).status === 401 && (await rpc("junk.junk.junk", "tools/call", { name: "get_transcript", arguments: { recordingId: rec.a2.id } })).status === 401, "mcp: tools/list and tools/call without a valid token are 401, not tool results");
+    const getMcp = await http("GET", "/mcp", { token: A.token });
+    const delMcp = await http("DELETE", "/mcp", { token: A.token });
+    record(getMcp.status === 405 && delMcp.status === 405 && (await http("GET", "/mcp")).status === 401, "mcp: GET and DELETE are 405 once authenticated, 401 before");
+
     // ---- fail closed -------------------------------------------------------
     const saved = process.env.BETTER_AUTH_SECRET;
     delete process.env.BETTER_AUTH_SECRET;
@@ -354,7 +558,14 @@ async function main(): Promise<void> {
     const after = await http("GET", `/accounts/${acc}/moments?q=${WORD}&scope=all`, { token: B.token });
     const afterMe = await http("GET", "/accounts/me", { token: B.token });
     const afterTr = await http("GET", `/recordings/${rec.a2.id}/transcript`, { token: B.token });
-    record(before.status === 200 && after.status === 401 && afterMe.status === 401 && afterTr.status === 401, "revocation: removing a member makes their still-valid token 401 on the very next call, on every route", `before ${before.status}; after ${after.status}/${afterMe.status}/${afterTr.status}`);
+    const afterMcp = await rpc(B.token, "tools/list");
+    record(before.status === 200 && after.status === 401 && afterMe.status === 401 && afterTr.status === 401 && afterMcp.status === 401, "revocation: removing a member makes their still-valid token 401 on the very next call, on every route and on /mcp", `before ${before.status}; after ${after.status}/${afterMe.status}/${afterTr.status}/mcp ${afterMcp.status}`);
+    if (B.refresh) {
+      const refreshed = await http("POST", "/api/auth/oauth2/token", { form: { grant_type: "refresh_token", refresh_token: B.refresh, client_id: clientId, resource: cfg.mcpResource } });
+      record(refreshed.status >= 400 && !refreshed.json?.access_token, "revocation: a removed member's refresh token no longer yields a new access token", `status ${refreshed.status}`);
+    } else {
+      record(false, "revocation: a refresh token was issued to test with", "none issued");
+    }
     record((await http("GET", `/accounts/${acc}/moments?q=${WORD}&scope=all`, { token: A.token })).status === 200, "revocation: other members are unaffected");
   } finally {
     server.close();
