@@ -121,6 +121,52 @@ export const calendarConnections = pgTable(
   }),
 );
 
+// Who belongs to the account — the instance's team — and in what role. This is
+// the authorization side of sign-in; Better Auth's own tables (auth_user and
+// friends, created by src/auth/migrate.ts, not by drizzle-kit) are only the
+// authentication side.
+//
+// Keyed by this table's own uuid rather than by Better Auth's user id, for
+// two reasons. A member can exist before they have ever signed in: an admin
+// adds them by email (src/auth/cli.ts add-member) and the first verified
+// sign-in fills auth_user_id and joined_at, so recordings.owner_member_id
+// never has to change when that happens. And ownership does not depend on
+// the auth library's id type or on its user row surviving.
+//
+// Removal sets removed_at and keeps the row, so a removed member's recordings
+// stay owned by them rather than being orphaned or reassigned.
+//
+// email is stored lowercased (account_members_email_lower) so the unique
+// index means what it says; auth_user_id is a soft link with no foreign key,
+// because Better Auth's tables are outside this schema.
+export const accountMembers = pgTable(
+  "account_members",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    email: varchar("email", { length: 320 }).notNull(),
+    displayName: varchar("display_name", { length: 256 }),
+    role: varchar("role", { length: 16 }).notNull(),
+    authUserId: text("auth_user_id"),
+    joinedAt: timestamp("joined_at", { withTimezone: true }),
+    removedAt: timestamp("removed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    accountEmailIdx: uniqueIndex("account_members_account_email_idx").on(t.accountId, t.email),
+    authUserIdx: uniqueIndex("account_members_auth_user_idx").on(t.authUserId),
+    roleValid: check("account_members_role_valid", sql`${t.role} IN ('admin', 'member')`),
+    emailLower: check("account_members_email_lower", sql`${t.email} = lower(${t.email})`),
+  }),
+);
+
 export const recordings = pgTable(
   "recordings",
   {
@@ -160,6 +206,22 @@ export const recordings = pgTable(
     // capture's files; the marker is the intent and recovery reconciles this
     // column to it (see pipeline/trash.ts).
     trashedAt: timestamp("trashed_at", { withTimezone: true }),
+    // Who recorded it, and who may see it. A third axis, deliberately separate
+    // from both scope above (personal vs work) and meeting_kind: a work call can
+    // be private (a performance conversation), and a personal call must never
+    // be shared whatever this says — that rule lives in the one access function
+    // that decides visibility, not in a column.
+    //
+    // 'private' is the owner only; 'shared' is every active member of the
+    // account. Private is the default so that nothing becomes visible to the
+    // team by omission. owner_member_id is nullable until ingest sets it
+    // (ingest/clipwise.ts) — a recording with no owner is visible to no one
+    // but is never lost, and the bootstrap CLI's --claim-existing assigns the
+    // ones that predate this column.
+    ownerMemberId: uuid("owner_member_id").references(() => accountMembers.id, {
+      onDelete: "restrict",
+    }),
+    visibility: varchar("visibility", { length: 16 }).notNull().default("private"),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -170,9 +232,14 @@ export const recordings = pgTable(
   },
   (t) => ({
     accountIdx: index("recordings_account_idx").on(t.accountId),
+    ownerIdx: index("recordings_owner_idx").on(t.ownerMemberId),
     sourceIdx: index("recordings_source_idx").on(t.source, t.sourceId),
     slugIdx: uniqueIndex("recordings_slug_idx").on(t.slug),
     scopeValid: check("recordings_scope_valid", sql`${t.scope} IN ('work', 'personal')`),
+    visibilityValid: check(
+      "recordings_visibility_valid",
+      sql`${t.visibility} IN ('private', 'shared')`,
+    ),
   }),
 );
 
@@ -465,6 +532,15 @@ export const accountsRelations = relations(accounts, ({ many }) => ({
   clips: many(clips),
   shares: many(shares),
   calendarConnections: many(calendarConnections),
+  members: many(accountMembers),
+}));
+
+export const accountMembersRelations = relations(accountMembers, ({ one, many }) => ({
+  account: one(accounts, {
+    fields: [accountMembers.accountId],
+    references: [accounts.id],
+  }),
+  recordings: many(recordings),
 }));
 
 export const calendarConnectionsRelations = relations(calendarConnections, ({ one }) => ({
@@ -488,6 +564,10 @@ export const recordingsRelations = relations(recordings, ({ one, many }) => ({
   account: one(accounts, {
     fields: [recordings.accountId],
     references: [accounts.id],
+  }),
+  owner: one(accountMembers, {
+    fields: [recordings.ownerMemberId],
+    references: [accountMembers.id],
   }),
   transcripts: many(transcripts),
   speakers: many(speakers),

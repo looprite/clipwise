@@ -12,6 +12,15 @@ import { errorHandler } from "./lib/http.js";
 
 const app = express();
 
+// Sign-in (src/auth). Mounted only when configured, so a server that has not
+// been set up for it behaves exactly as before. Ahead of express.json(), which
+// would consume the body Better Auth reads itself (see auth/mount.ts). This
+// does not protect the routes below; closing them is the next change.
+if (process.env.BETTER_AUTH_SECRET) {
+  const { mountAuth } = await import("./auth/mount.js");
+  mountAuth(app);
+}
+
 app.use(express.json({ limit: "16mb" }));
 
 app.get("/health", async (_req: Request, res: Response) => {

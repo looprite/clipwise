@@ -12,16 +12,23 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
-    "db:studio": "drizzle-kit studio"
+    "db:checks": "tsx src/db/checks.ts",
+    "db:sync": "drizzle-kit push && tsx src/db/checks.ts && tsx src/auth/migrate.ts",
+    "db:provision": "tsx src/db/provision.ts",
+    "db:studio": "drizzle-kit studio",
+    "auth": "tsx src/auth/cli.ts",
+    "auth:migrate": "tsx src/auth/migrate.ts",
+    "audit": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
+    "@better-auth/mcp": "1.7.7",
+    "better-auth": "1.7.7",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.33.0",
     "express": "^4.19.2",
+    "jose": "6.2.12",
     "pg": "^8.12.0",
     "zod": "^3.23.8"
   },
@@ -32,5 +39,16 @@
     "drizzle-kit": "^0.24.0",
     "tsx": "^4.16.2",
     "typescript": "^5.5.3"
+  },
+  "overrides": {
+    "better-auth": {
+      "drizzle-kit": "$drizzle-kit",
+      "drizzle-orm": "$drizzle-orm",
+      "prisma": "*",
+      "@prisma/client": "*"
+    },
+    "better-call": {
+      "zod": "$zod"
+    }
   }
 }
