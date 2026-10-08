@@ -1,12 +1,15 @@
 // Applies the CHECK constraints that src/db/schema.ts declares.
 //
-// Why this exists: drizzle-kit 0.24 `push` neither creates CHECK constraints
-// nor notices that they are missing — with recordings_scope_valid and
-// shares_target_exactly_one absent from a database it reports "No changes
-// detected". Main has them only because an older migration ran there once. A
-// database built by `db:push` alone therefore lacks every check the schema
-// declares, so this runs after push, reads the checks off the schema itself
-// (nothing is listed by hand), and adds the ones that are missing.
+// Why this exists: drizzle-kit 0.24 `push` neither created CHECK constraints
+// nor noticed that they were missing — with recordings_scope_valid and
+// shares_target_exactly_one absent from a database it reported "No changes
+// detected". Main has them only because an older migration ran there once, so
+// a database built by `db:push` alone lacked every check the schema declares.
+// drizzle-kit 0.31 push creates them itself, so on a current kit this normally
+// finds nothing to add ("N present, 0 added"). It stays as a guard: it reads
+// the checks off the schema (nothing is listed by hand) and adds any that are
+// missing, so a kit that stopped creating them again would show up here
+// instead of as a database that quietly accepts bad values.
 //
 // Idempotent: a check that already exists by name is left alone. Adding one
 // validates existing rows, so a row that violates it makes this fail loudly

@@ -1,7 +1,7 @@
 // Builds a new instance's database from nothing:
 //   1. CREATE EXTENSION vector      (schema.ts needs pgvector before any table)
 //   2. drizzle-kit push             (the tables schema.ts declares)
-//   3. the CHECK constraints        (push does not create them — see checks.ts)
+//   3. the CHECK constraints        (a guard: push creates them, see checks.ts)
 //   4. Better Auth's tables         (src/auth/migrate.ts)
 // then `tsx src/auth/cli.ts init-account` and `bootstrap-admin` make the first
 // account and admin.
