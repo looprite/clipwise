@@ -14,6 +14,7 @@
 export type Access = "public" | "member" | "owner" | "admin";
 
 export const ROUTES: Record<string, { access: Access; note: string }> = {
+  "GET /live": { access: "public", note: "liveness; no database, no data" },
   "GET /health": { access: "public", note: "status only; no data" },
   "ALL /api/auth/*": {
     access: "public",

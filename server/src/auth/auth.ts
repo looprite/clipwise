@@ -161,8 +161,24 @@ export function createAuth(cfg: AuthConfig) {
 
 export type Auth = ReturnType<typeof createAuth>;
 
+// Better Auth starts initialising (including a database read) the moment it is
+// created and keeps the promise (better-auth/dist/auth/base.mjs), and nothing
+// waits on it until a request arrives. With the database unreachable at that
+// moment the rejection is unhandled and Node exits; and a rejected promise
+// stays rejected, so every later sign-in would fail until a restart. So a
+// failed init is handled here and the cached instance is dropped: the next
+// getAuth() builds a fresh one, which retries the database.
 let cached: Auth | null = null;
 export function getAuth(): Auth {
-  if (!cached) cached = createAuth(authConfigFromEnv());
+  if (!cached) {
+    const auth = createAuth(authConfigFromEnv());
+    cached = auth;
+    auth.$context.catch((err: unknown) => {
+      // Class, code and message only; never anything a query carried.
+      const e = err as { name?: string; code?: string; message?: string };
+      console.error(`auth: initialisation failed, will retry on the next request: ${e?.name ?? "Error"} ${e?.code ?? ""} ${e?.message ?? ""}`.trim());
+      if (cached === auth) cached = null;
+    });
+  }
   return cached;
 }

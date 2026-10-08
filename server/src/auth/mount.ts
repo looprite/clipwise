@@ -21,11 +21,22 @@ import type { Express, Request, Response, NextFunction } from "express";
 import { toNodeHandler } from "better-auth/node";
 import { authConfigFromEnv, getAuth, type Auth } from "./auth.js";
 
+// An explicit `auth` (the check scripts pass one) is used as is. Without one,
+// each request asks getAuth() for the current instance, so a Better Auth that
+// failed to start (database unreachable) is replaced on a later request rather
+// than staying dead until a restart; starting one here warms it up for boot.
 export function mountAuth(
   app: Express,
-  auth: Auth = getAuth(),
+  auth?: Auth,
   ipAddressHeader: string | null = authConfigFromEnv().ipAddressHeader,
 ): void {
+  if (!auth) getAuth();
+  const handlers = new WeakMap<Auth, ReturnType<typeof toNodeHandler>>();
+  const handlerFor = (a: Auth) => {
+    let h = handlers.get(a);
+    if (!h) handlers.set(a, (h = toNodeHandler(a)));
+    return h;
+  };
   app.use("/api/auth", (req: Request, res: Response, next: NextFunction) => {
     if (ipAddressHeader) {
       const value = req.headers[ipAddressHeader];
@@ -38,5 +49,15 @@ export function mountAuth(
     }
     next();
   });
-  app.all("/api/auth/*", toNodeHandler(auth));
+  // toNodeHandler has no catch and Express 4 does not catch a rejected async
+  // handler, so an auth failure here would otherwise take the process down.
+  app.all("/api/auth/*", async (req: Request, res: Response) => {
+    try {
+      await handlerFor(auth ?? getAuth())(req, res);
+    } catch (err) {
+      const e = err as { name?: string; code?: string; message?: string };
+      console.error(`auth: request failed: ${e?.name ?? "Error"} ${e?.code ?? ""} ${e?.message ?? ""}`.trim());
+      if (!res.headersSent) res.status(503).json({ error: "auth_unavailable" });
+    }
+  });
 }

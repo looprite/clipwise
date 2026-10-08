@@ -7,7 +7,11 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL environment variable is required");
 }
 
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+// A connect that never completes would otherwise wait forever (pg's default is
+// no timeout). claude.ai gives discovery, registration and token endpoints 10 s,
+// so a stalled connect has to fail well inside that. Neon waking from
+// autosuspend takes a few hundred ms, so 5 s leaves room for it.
+export const pool = new Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000 });
 
 // pg pool emits 'error' on idle clients whose socket dies (Neon suspend, TCP
 // keepalive kill, TLS renegotiation). Without a listener these become
