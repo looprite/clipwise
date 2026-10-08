@@ -33,6 +33,9 @@ const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // The auto-stop decision (SAA-184). Pure: it returns what should happen, and
 // autostopFeed carries out the one effect that stops a capture.
 const autostop = require('./autostop.js');
+// The "Still recording?" reminder: the decision only. This file reads the tap,
+// shows the notification and carries out the one effect, a stop.
+const silenceReminder = require('./silence-reminder.js');
 // The first-run acknowledgement and the notice line (SAA-216). Pure; the gate
 // that uses it is startRecording.
 const consent = require('./consent.js');
@@ -63,6 +66,13 @@ const STARTING_TIMEOUT_MS = 9000;
 // "Recording (stalled)" but does not kill children — losing the rest of
 // a call to a possibly-wrong constant is worse than a misleading label.
 const POLL_INTERVAL_MS = 250;
+// "Still recording?" (silence-reminder.js). The tap is read in pieces of at
+// most SILENCE_CHUNK_BYTES, up to SILENCE_MAX_CHUNKS_PER_TICK per poll, so a
+// poll that finds a backlog catches up without holding the main process. An
+// unanswered reminder is withdrawn after SILENCE_REMINDER_TTL_MS.
+const SILENCE_CHUNK_BYTES = 262144;
+const SILENCE_MAX_CHUNKS_PER_TICK = 8;
+const SILENCE_REMINDER_TTL_MS = 5 * 60 * 1000;
 const TAP_STALE_MS = 1000;
 const MIC_STALE_MS = 3200;
 
@@ -2223,16 +2233,180 @@ function autostopBegin(stem, trigger) {
     return a;
 }
 
+// --- "Still recording?" (silence-reminder.js) ---------------------------------
+//
+// If the tap has had no sound for 60s of audio time, ask. The tap file is the
+// only source: systemtap reports no levels (its log carries lifecycle and byte
+// counts only), but the file grows continuously and pollTick already stats it.
+// So each poll reads the bytes appended since the last one and hands them to
+// silence-reminder.js, which decides. Nothing here can stop a capture except
+// the reminder's own Stop button, and a failure anywhere in this section turns
+// the detector off for that capture rather than affecting it.
+
+function silenceBegin(s) {
+    return {
+        st: silenceReminder.initialState(s.startedAtMs),
+        fd: null, offset: 0, bytesPerSecond: null, formatTries: 0,
+        off: null,           // why the detector is off for this capture, if it is
+        notification: null, ttl: null,
+    };
+}
+
+// The format systemtap says it is writing, from its own log. The tap has been
+// 48000 Hz mono float32 in all 108 logs on record; read here rather than
+// assumed, so a different format turns the detector off instead of being
+// misread as audio.
+function silenceTapFormat(tapLogPath) {
+    let text;
+    try { text = fs.readFileSync(tapLogPath, 'utf8'); } catch { return null; }
+    const m = text.match(/^format sample_rate=(\d+) channels=(\d+) bits=(\d+) is_float=(true|false)/m);
+    if (!m) return null;
+    return {
+        ok: m[3] === '32' && m[4] === 'true' && Number(m[1]) > 0 && Number(m[2]) > 0,
+        rate: Number(m[1]), channels: Number(m[2]), line: m[0],
+    };
+}
+
+function silenceLog(s, entry) {
+    if (s && s.autostop) autostopLogLine(s.autostop, entry);
+}
+
+function silenceDisable(s, why) {
+    const z = s.silence;
+    if (!z || z.off) return;
+    z.off = why;
+    console.error(`silence: reminder off for this capture — ${why}`);
+    silenceLog(s, { event: 'silence_detector_off', t: new Date().toISOString(), why });
+    if (z.fd !== null) { try { fs.closeSync(z.fd); } catch {} z.fd = null; }
+}
+
+function silenceWithdraw(s) {
+    const z = s.silence;
+    if (z.ttl) { clearTimeout(z.ttl); z.ttl = null; }
+    if (z.notification) {
+        try { z.notification.close(); } catch (err) {
+            console.error(`silence: could not withdraw notification: ${String(err)}`);
+        }
+        z.notification = null;
+    }
+}
+
+function silenceShow(s) {
+    const z = s.silence;
+    const title = 'Still recording?';
+    const body = 'No call audio for a minute. Recording continues unless you press Stop.';
+    console.error(`silence: ${title} — ${body}`);
+    z.ttl = setTimeout(() => silenceFeed(s, { type: 'expire', t: Date.now() }), SILENCE_REMINDER_TTL_MS);
+    if (!Notification.isSupported()) {
+        console.error('silence: Notification.isSupported() is false — reminder cannot be shown');
+        return;
+    }
+    try {
+        // silent: the tap hears everything the Mac plays, so the reminder's own
+        // sound would count as sound and reset the very count it came from. Keep
+        // is first: it is the button macOS shows, and a stray click on it costs
+        // nothing, where a stray Stop ends a call's recording. There is no
+        // osascript fallback for this one: it cannot carry buttons and it plays
+        // a sound.
+        const n = new Notification({
+            title, body, silent: true,
+            actions: [
+                { type: 'button', text: 'Keep' },
+                { type: 'button', text: 'Stop' },
+            ],
+        });
+        n.on('action', (_e, index) => {
+            // An answer for a capture that has since ended does nothing.
+            if (session !== s) return;
+            silenceFeed(s, { type: 'response', t: Date.now(), response: index === 0 ? 'keep' : 'stop' });
+        });
+        n.once('failed', (_e, err) => console.error(`silence: notification failed: ${String(err)}`));
+        n.once('show', () => console.error(`notify: delivered — ${title}`));
+        z.notification = n;
+        n.show();
+    } catch (err) {
+        console.error(`silence: could not show the reminder: ${String(err)}`);
+    }
+}
+
+function silenceFeed(s, ev) {
+    const z = s && s.silence;
+    if (!z) return;
+    const r = silenceReminder.step(z.st, ev);
+    silenceApply(s, r);
+}
+
+function silenceApply(s, r) {
+    const z = s.silence;
+    z.st = r.state;
+    for (const o of r.out) {
+        if (o.kind === 'log') silenceLog(s, o.entry);
+        else if (o.kind === 'show') silenceShow(s);
+        else if (o.kind === 'withdraw') silenceWithdraw(s);
+        else if (o.kind === 'stop') stopRecording(o.cause);
+    }
+}
+
+// Called by pollTick while the state is 'recording'. tapSize is the size
+// pollTick has just read.
+function silenceTick(s, tapSize) {
+    const z = s.silence;
+    if (!z || z.off) return;
+    try {
+        if (!z.bytesPerSecond) {
+            const fmt = silenceTapFormat(s.paths.tapLog);
+            if (!fmt) {
+                if (++z.formatTries > 20) silenceDisable(s, 'no format line in the systemtap log');
+                return;
+            }
+            if (!fmt.ok) { silenceDisable(s, `tap is not 32-bit float (${fmt.line})`); return; }
+            z.bytesPerSecond = fmt.rate * fmt.channels * 4;
+        }
+        if (z.fd === null) z.fd = fs.openSync(s.paths.tap, 'r');
+        for (let i = 0; i < SILENCE_MAX_CHUNKS_PER_TICK; i++) {
+            const whole = Math.floor((tapSize - z.offset) / 4) * 4;
+            if (whole <= 0) break;
+            const n = Math.min(whole, SILENCE_CHUNK_BYTES);
+            const buf = Buffer.alloc(n);
+            const got = fs.readSync(z.fd, buf, 0, n, z.offset);
+            if (got <= 0) break;
+            const usable = got - (got % 4);
+            z.offset += usable;
+            silenceApply(s, silenceReminder.feedBytes(z.st, buf.subarray(0, usable), Date.now(), z.bytesPerSecond));
+            // A stop from the reminder ends the session; nothing more to read.
+            if (session !== s) break;
+        }
+    } catch (err) {
+        silenceDisable(s, String(err));
+    }
+}
+
+// At every stop (autostopFinish calls this first): close the tracker, which
+// withdraws a pending reminder and makes any later click inert.
+function silenceEnd(s, cause) {
+    const z = s && s.silence;
+    if (!z) return;
+    silenceFeed(s, { type: 'end', t: Date.now(), cause });
+    silenceWithdraw(s);
+    if (z.fd !== null) { try { fs.closeSync(z.fd); } catch {} z.fd = null; }
+}
+
 // At stop: close the tracker and write its record into the manifest, which
 // transcribe.py carries into the transcript and ingest into
 // recordings.metadata.autostop — the same route as the aec block. Runs before
 // teardown, whose manifest rewrites read-modify-write and keep this key.
 function autostopFinish(s, cause) {
+    // First, so a pending reminder is withdrawn and its entry closed before the
+    // block is written, whichever way the capture is ending.
+    silenceEnd(s, cause);
     const a = s && s.autostop;
     if (!a) return;
     autostopFeed(a, { type: 'stop', t: Date.now(), cause });
     if (a.timer) { clearTimeout(a.timer); a.timer = null; }
     const block = autostop.autostopBlock(a.state);
+    // The reminders ride in the same block, so they reach the transcript and
+    // recordings.metadata.autostop with no change to either.
+    if (s.silence) Object.assign(block, silenceReminder.silenceBlock(s.silence.st, s.silence.off));
     autostopLogLine(a, { event: 'block', ...block });
     try {
         const manifest = JSON.parse(fs.readFileSync(s.paths.manifest, 'utf8'));
@@ -3210,6 +3384,7 @@ function startRecording() {
     // Per-capture would-stop tracker and its autostop-<stem>.log (SAA-184).
     // Logging only.
     session.autostop = autostopBegin(stamp, trigger);
+    session.silence = silenceBegin(session);
     // Only capture-child exits drive state. Poller death is not fatal.
     tapProc.once('exit', () => onCaptureChildExit('tap'));
     micProc.once('exit', () => onCaptureChildExit('mic'));
@@ -3284,6 +3459,9 @@ function pollTick() {
         const isStalled = tapStale || micStale;
         if (state === 'recording' && isStalled)      setState('stalled');
         else if (state === 'stalled' && !isStalled)  setState('recording');
+        // Only while both tracks are writing: a stalled capture has its own
+        // notification, and its audio time is not trustworthy.
+        if (state === 'recording') silenceTick(s, tapSize);
     }
 }
 
@@ -3316,7 +3494,8 @@ function teardown(cb) {
 
 // `cause` is what stopped it, recorded on the capture's autostop block:
 // 'manual' (the tray), 'auto' (the trigger app released the mic and stayed
-// gone, SAA-184), 'child_exit', 'start_timeout'.
+// gone, SAA-184), 'silence-reminder' (Stop on the "Still recording?"
+// notification), 'child_exit', 'start_timeout'.
 function stopRecording(cause) {
     if (state === 'stopped') return;
     const stopCause = typeof cause === 'string' ? cause : 'manual';
