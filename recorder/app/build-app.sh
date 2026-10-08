@@ -162,6 +162,9 @@ cp "$APP_SRC/app-scope.js" "$C/Resources/app/app-scope.js"
 # The auto-stop decision (SAA-184). main.js requires this by relative path; a
 # bundle without it fails to launch.
 cp "$APP_SRC/autostop.js" "$C/Resources/app/autostop.js"
+# The "Still recording?" reminder's decision. main.js requires it by relative
+# path; a bundle without it fails to launch.
+cp "$APP_SRC/silence-reminder.js" "$C/Resources/app/silence-reminder.js"
 # The first-run acknowledgement (SAA-216). main.js requires consent.js by
 # relative path and loads consent.html by path relative to itself; a bundle
 # without the first fails to launch, and without the second the gate would
