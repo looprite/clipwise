@@ -252,8 +252,8 @@ export async function runDiarizationForCapture(
   // app-bundle copy under Contents/Resources exists for the CC-BY-4.0
   // redistribution requirement and packaging parity with systemtap/miccap,
   // not because the pipeline reads it from there.
-  const diarizeBin = resolve(__dirname, "..", "..", "..", "recorder", "diarize", ".build", "release", "diarize");
-  const modelsParentDir = resolve(__dirname, "..", "..", "..", "recorder", "diarize", "models");
+  const diarizeBin = resolve(import.meta.dirname, "..", "..", "..", "recorder", "diarize", ".build", "release", "diarize");
+  const modelsParentDir = resolve(import.meta.dirname, "..", "..", "..", "recorder", "diarize", "models");
   if (!existsSync(diarizeBin)) {
     return skip(`recorder/diarize binary not found at ${diarizeBin} (run recorder/diarize/fetch-models.sh and swift build)`);
   }

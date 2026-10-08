@@ -196,7 +196,7 @@ const CASES: Case[] = [
   {
     name: "diarize.ts: the binary is only reached through sidecarForCapture, and mtime is read as bigint nanoseconds",
     run: () => {
-      const src = readFileSync(resolve(__dirname, "..", "..", "src", "pipeline", "diarize.ts"), "utf8");
+      const src = readFileSync(resolve(import.meta.dirname, "..", "..", "src", "pipeline", "diarize.ts"), "utf8");
       const calls = src.split("execFileSync(diarizeBin").length - 1;
       const within = /sidecarForCapture\([^)]*\(\) => \{[\s\S]*?execFileSync\(diarizeBin/.test(src);
       if (calls !== 1 || !within) return `execFileSync(diarizeBin appears ${calls} time(s); inside sidecarForCapture callback: ${within}`;
