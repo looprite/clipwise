@@ -40,6 +40,7 @@ import { applyVoiceNamesForCapture } from "./apply-voice-names.js";
 import { describeMapping, describeRows, describeScope } from "../ingest/identity.js";
 import { describeVoiceNaming } from "../ingest/voice-names.js";
 import { runCapturePipeline, type Sidecar } from "./run-capture.js";
+import { describeError, describeErrorLine } from "../lib/safe-error.js";
 import { isTrashed } from "../lib/trash-marker.js";
 import { reconcileTrash } from "./trash.js";
 
@@ -351,7 +352,7 @@ export async function runRecoveryPass(opts: {
       const r = await reconcileTrash(dir);
       if (r.marked > 0 || r.cleared > 0) log(`trash: ${r.marked} row(s) marked, ${r.cleared} cleared to match the markers`);
     } catch (err) {
-      log(`trash: could not reconcile the database (${err instanceof Error ? err.message : String(err)})`);
+      log(`trash: could not reconcile the database (${describeErrorLine(err)})`);
     }
   }
   const all = manifestCandidates(dir);
@@ -374,7 +375,7 @@ export async function runRecoveryPass(opts: {
         identityOutcomes.push({
           stem: c.stem,
           status: "no_answer",
-          detail: `error reading/applying identity: ${err instanceof Error ? err.message : String(err)}`,
+          detail: `error reading/applying identity: ${describeErrorLine(err)}`,
         });
         continue;
       }
@@ -421,7 +422,7 @@ export async function runRecoveryPass(opts: {
         voiceNamesOutcomes.push({
           stem: c.stem,
           status: "no_answer",
-          detail: `error reading/applying voice names: ${err instanceof Error ? err.message : String(err)}`,
+          detail: `error reading/applying voice names: ${describeErrorLine(err)}`,
         });
         continue;
       }
@@ -554,7 +555,7 @@ export async function runRecoveryPass(opts: {
       });
       log(`  ${c.stem}: recovered`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = describeErrorLine(err);
       a.last_error = message;
       a.last_action = "failed";
       a.last_action_at = new Date().toISOString();
@@ -639,9 +640,7 @@ async function main(): Promise<void> {
 if (process.argv[1] && process.argv[1].endsWith("recover.ts")) {
   main()
     .catch((err) => {
-      process.stderr.write(
-        `recover: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
-      );
+      process.stderr.write(`recover: ${describeError(err)}\n`);
       process.exitCode = 1;
     })
     .finally(async () => {

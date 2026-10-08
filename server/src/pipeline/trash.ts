@@ -33,6 +33,7 @@ import { and, eq, inArray, isNotNull } from "drizzle-orm";
 
 import { db, pool, schema } from "../db/index.js";
 import { CLIPWISE_SOURCE } from "../ingest/clipwise.js";
+import { describeErrorLine } from "../lib/safe-error.js";
 import {
   STEM_RE,
   captureFiles,
@@ -87,7 +88,7 @@ async function setTrashed(sourceId: string, at: Date | null): Promise<number> {
   } catch (err) {
     throw new TrashError(
       "db_unreachable",
-      `could not write trashed_at: ${err instanceof Error ? err.message : String(err)}`,
+      `could not write trashed_at: ${describeErrorLine(err)}`,
     );
   }
 }
@@ -160,7 +161,7 @@ export async function deleteCapture(
   } catch (err) {
     throw new TrashError(
       "db_unreachable",
-      `files removed, row not deleted (delete again to finish): ${err instanceof Error ? err.message : String(err)}`,
+      `files removed, row not deleted (delete again to finish): ${describeErrorLine(err)}`,
     );
   }
   removeMarker(dir, stem);
@@ -237,7 +238,9 @@ async function main(): Promise<void> {
     } catch (err) {
       failed++;
       const code = err instanceof TrashError ? err.code : "error";
-      const message = err instanceof Error ? err.message : String(err);
+      // A TrashError's message is ours (already scrubbed where it wraps a
+      // database error); anything else goes through describeErrorLine.
+      const message = err instanceof TrashError ? err.message : describeErrorLine(err);
       process.stdout.write(`TRASH_RESULT ${JSON.stringify({ action, stem, ok: false, code, message })}\n`);
     }
   }
@@ -249,7 +252,7 @@ async function main(): Promise<void> {
 if (process.argv[1] && /(^|[\\/])trash\.(ts|js)$/.test(process.argv[1])) {
   main()
     .catch((err) => {
-      process.stderr.write(`trash: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`trash: ${describeErrorLine(err)}\n`);
       process.exitCode = 1;
     })
     .finally(() => pool.end());

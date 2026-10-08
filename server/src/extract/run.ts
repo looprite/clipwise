@@ -11,6 +11,7 @@ import { runCollapseOnly, runExtraction } from "./extract.js";
 import { backfillMissingEmbeddings } from "./embeddings.js";
 import { parseFathomLeaves } from "./fathom-leaves.js";
 import { runCoverage } from "./harness.js";
+import { logError } from "../lib/safe-error.js";
 
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
@@ -198,6 +199,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(err);
+  logError("run", err);
   process.exit(1);
 });

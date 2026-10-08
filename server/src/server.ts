@@ -2,6 +2,7 @@ import "dotenv/config";
 import type { Server } from "node:http";
 import { buildApp } from "./app.js";
 import { pool } from "./db/index.js";
+import { logError } from "./lib/safe-error.js";
 
 // Starts the server and returns the function that shuts it down (index.ts calls
 // it on SIGTERM/SIGINT).
@@ -21,8 +22,7 @@ function exitAfterPoolClose(): void {
       process.exit(0);
     })
     .catch((err: unknown) => {
-      const e = err as { name?: string; code?: string; message?: string };
-      console.error(`shutdown: closing the pool failed: ${e?.name ?? "Error"} ${e?.code ?? ""} ${e?.message ?? ""}`.trim());
+      logError("shutdown: closing the pool failed", err);
       process.exit(1);
     });
 }

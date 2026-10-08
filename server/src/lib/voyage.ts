@@ -77,8 +77,9 @@ async function embedOne(
     body: JSON.stringify({ input: texts, model, input_type: inputType }),
   });
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`voyage embed ${res.status}: ${body}`);
+    // The status only. The response body is Voyage's error text, which can quote
+    // the input, and the input is the words of a call.
+    throw new Error(`voyage embed ${res.status}`);
   }
   const data = (await res.json()) as { data: { embedding: number[] }[] };
   return data.data.map((d) => d.embedding);

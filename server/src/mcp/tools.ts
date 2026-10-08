@@ -11,6 +11,7 @@
 import { z } from "zod";
 import type { AccessContext } from "../access/context.js";
 import { HttpError } from "../lib/http.js";
+import { logError } from "../lib/safe-error.js";
 import { displayTitle, formatMinutes, formatTimestamp } from "../lib/transcript-file.js";
 import { searchMoments, searchMomentsQuerySchema } from "../services/search-moments.js";
 import { getTranscriptPage } from "../services/transcript.js";
@@ -193,6 +194,6 @@ export function toolErrorText(err: unknown): string {
   if (err instanceof HttpError) {
     return err.detail === undefined ? err.message : `${err.message}: ${JSON.stringify(err.detail)}`;
   }
-  console.error("mcp tool failed:", err);
+  logError("mcp tool failed", err);
   return "internal_error";
 }

@@ -9,6 +9,7 @@
 
 import { ingestTranscript } from "./clipwise.js";
 import { pool } from "../db/index.js";
+import { describeErrorLine } from "../lib/safe-error.js";
 
 async function main(): Promise<void> {
   const transcriptPath = process.argv[2];
@@ -22,7 +23,7 @@ async function main(): Promise<void> {
 
 main()
   .catch((err) => {
-    process.stderr.write(`ingest: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`ingest: ${describeErrorLine(err)}\n`);
     process.exitCode = 1;
   })
   .finally(async () => {

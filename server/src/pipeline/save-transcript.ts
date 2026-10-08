@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { and, eq, isNotNull, isNull } from "drizzle-orm";
 
 import { db, pool, schema } from "../db/index.js";
+import { describeErrorLine } from "../lib/safe-error.js";
 import { readTranscript } from "../lib/transcript-read.js";
 import {
   buildTurns,
@@ -107,7 +108,7 @@ async function main(): Promise<void> {
 
 main()
   .catch((err) => {
-    process.stderr.write(`save-transcript: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`save-transcript: ${describeErrorLine(err)}\n`);
     process.exitCode = 1;
   })
   .finally(() => pool.end());

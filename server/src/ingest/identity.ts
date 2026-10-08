@@ -43,6 +43,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { describeErrorLine } from "../lib/safe-error.js";
 import { isVoiceLabel } from "../pipeline/diarize.js";
 
 // Bumped 1 -> 2 for `scope` (SAA-153/SAA-169): the shape the recorder writes
@@ -100,7 +101,7 @@ export function readIdentityAnswer(
     return doc;
   } catch (err) {
     process.stdout.write(
-      `identity: ${path} unreadable (${String(err)}) — recording left unidentified\n`,
+      `identity: ${path} unreadable (${describeErrorLine(err)}) — recording left unidentified\n`,
     );
     return null;
   }

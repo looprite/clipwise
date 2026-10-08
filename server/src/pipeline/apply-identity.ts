@@ -54,6 +54,7 @@ import { join, resolve } from "node:path";
 import { eq, sql } from "drizzle-orm";
 
 import { db, pool, schema } from "../db/index.js";
+import { describeError } from "../lib/safe-error.js";
 import { CLIPWISE_SOURCE } from "../ingest/clipwise.js";
 import {
   applyIdentity,
@@ -259,9 +260,7 @@ async function main(): Promise<void> {
 if (process.argv[1] && process.argv[1].endsWith("apply-identity.ts")) {
   main()
     .catch((err) => {
-      process.stderr.write(
-        `apply-identity: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
-      );
+      process.stderr.write(`apply-identity: ${describeError(err)}\n`);
       process.exitCode = 1;
     })
     .finally(async () => {

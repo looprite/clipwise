@@ -23,6 +23,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { db } from "../db/index.js";
+import { describeErrorLine } from "../lib/safe-error.js";
 import { ingestTranscript, type CaptureIdentity } from "../ingest/clipwise.js";
 import { readExtractionCompletion, runExtraction } from "../extract/extract.js";
 import { runDiarizationForCapture } from "./diarize.js";
@@ -341,7 +342,7 @@ export async function runCapturePipeline(opts: PipelineOptions): Promise<Pipelin
     writeSidecar(dir, sidecar);
   };
   const fail = (step: StepName, err: unknown, state: StepState = "failed"): never => {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = describeErrorLine(err);
     finish(step, state, null, message);
     throw err instanceof Error ? err : new Error(message);
   };
@@ -380,7 +381,7 @@ export async function runCapturePipeline(opts: PipelineOptions): Promise<Pipelin
       log(`calendar match: ok_partial — ${calendarErrorCount} calendar(s) failed to fetch`);
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = describeErrorLine(err);
     finish("match", "skipped", { error: message });
     log(`calendar match: skipped — ${message}`);
   }
@@ -432,7 +433,7 @@ export async function runCapturePipeline(opts: PipelineOptions): Promise<Pipelin
         calendarMatchDetail = { applied: true, ...application };
         log(`calendar match applied: ${describeCalendarMatchApplication(application)}`);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = describeErrorLine(err);
         calendarMatchDetail = { applied: false, error: message };
         log(`calendar match application failed (ingest still ok): ${message}`);
       }
@@ -482,7 +483,7 @@ export async function runCapturePipeline(opts: PipelineOptions): Promise<Pipelin
     // Defense in depth: runDiarizationForCapture returns rather than throws
     // for every case it anticipates. Anything that reaches here is
     // unanticipated, and still must not fail the capture.
-    const message = err instanceof Error ? err.message : String(err);
+    const message = describeErrorLine(err);
     finish("diarize", "skipped", { error: message });
     log(`diarize: skipped — ${message}`);
   }

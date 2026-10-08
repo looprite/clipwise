@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "./schema.js";
+import { logError } from "../lib/safe-error.js";
 
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL environment variable is required");
@@ -18,7 +19,7 @@ export const pool = new Pool({ connectionString: process.env.DATABASE_URL, conne
 // uncaughtException and kill the process — see SAA-69. The pool replaces the
 // bad client on the next query, so logging is enough.
 pool.on("error", (err) => {
-  console.error("pg pool error on idle client:", err);
+  logError("pg pool error on idle client", err);
 });
 
 // SAA-69 only covers clients sitting idle in the pool. A client that has been
@@ -48,7 +49,7 @@ pool.on("error", (err) => {
 // goes back. Paired so the listener doesn't accumulate on a client reused
 // across many checkouts over its lifetime.
 function logCheckedOutClientError(err: Error): void {
-  console.error("pg client error while checked out:", err);
+  logError("pg client error while checked out", err);
 }
 pool.on("acquire", (client) => {
   client.on("error", logCheckedOutClientError);
