@@ -1,9 +1,11 @@
 import { Router } from "express";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
+import { accessOf } from "../access/authenticate.js";
+import { recordingOwnedBy } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
-import { readTranscript } from "../lib/transcript-read.js";
+import { getTranscriptFor } from "../services/transcript.js";
 
 const speakerInputSchema = z.object({
   label: z.string().max(128),
@@ -72,26 +74,20 @@ export const transcriptRouter = Router();
 transcriptRouter.get(
   "/recordings/:id/transcript",
   asyncHandler(async (req, res) => {
-    const recordingId = req.params.id;
-    // A trashed recording is not found (SAA-154), the same 404 as an unknown id.
-    const [recording] = await db
-      .select({ id: schema.recordings.id })
-      .from(schema.recordings)
-      .where(and(eq(schema.recordings.id, recordingId), isNull(schema.recordings.trashedAt)));
-    if (!recording) throw new HttpError(404, "recording_not_found");
-
-    res.json(await readTranscript(recordingId));
+    res.json(await getTranscriptFor(accessOf(req), req.params.id));
   }),
 );
 
 transcriptRouter.post(
   "/recordings/:id/transcript",
   asyncHandler(async (req, res) => {
+    const ctx = accessOf(req);
     const recordingId = req.params.id;
+    // Only the recording's owner adds a transcript to it.
     const [recording] = await db
       .select()
       .from(schema.recordings)
-      .where(eq(schema.recordings.id, recordingId));
+      .where(and(eq(schema.recordings.id, recordingId), recordingOwnedBy(ctx)));
     if (!recording) throw new HttpError(404, "recording_not_found");
 
     const body = parseBody(importTranscriptSchema, req);

@@ -1,6 +1,9 @@
 import { Router } from "express";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
+import { accessOf } from "../access/authenticate.js";
+import type { AccessContext } from "../access/context.js";
+import { recordingOwnedBy, recordingVisibleTo } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
 import { slugify, slugWithSuffix } from "../lib/slug.js";
@@ -16,6 +19,8 @@ const createRecordingSchema = z.object({
   endedAt: z.string().datetime().optional(),
   status: z.string().max(32).optional(),
   meetingKind: z.string().max(32).optional(),
+  // Private unless the owner says otherwise.
+  visibility: z.enum(["private", "shared"]).optional(),
   metadata: z.record(z.unknown()).optional(),
 });
 
@@ -30,24 +35,31 @@ const createAttendeeSchema = z.object({
 
 export const recordingsRouter = Router({ mergeParams: true });
 
-async function ensureAccount(accountId: string): Promise<void> {
-  const [account] = await db
-    .select({ id: schema.accounts.id })
-    .from(schema.accounts)
-    .where(eq(schema.accounts.id, accountId));
-  if (!account) throw new HttpError(404, "account_not_found");
-}
-
-async function findRecording(accountId: string, recordingId: string) {
+// "Not found" covers a recording that is trashed (SAA-154), that does not
+// exist, and that the caller may not see — the same answer for all three.
+async function findRecording(ctx: AccessContext, recordingId: string) {
   const [recording] = await db
     .select()
     .from(schema.recordings)
     .where(
       and(
-        eq(schema.recordings.accountId, accountId),
         eq(schema.recordings.id, recordingId),
-        // A trashed recording is not found (SAA-154).
         isNull(schema.recordings.trashedAt),
+        recordingVisibleTo(ctx),
+      ),
+    );
+  return recording;
+}
+
+async function findOwnedRecording(ctx: AccessContext, recordingId: string) {
+  const [recording] = await db
+    .select()
+    .from(schema.recordings)
+    .where(
+      and(
+        eq(schema.recordings.id, recordingId),
+        isNull(schema.recordings.trashedAt),
+        recordingOwnedBy(ctx),
       ),
     );
   return recording;
@@ -56,8 +68,7 @@ async function findRecording(accountId: string, recordingId: string) {
 recordingsRouter.post(
   "/",
   asyncHandler(async (req, res) => {
-    const accountId = req.params.accountId;
-    await ensureAccount(accountId);
+    const ctx = accessOf(req);
     const body = parseBody(createRecordingSchema, req);
     const slug = body.slug
       ? slugify(body.slug)
@@ -65,7 +76,9 @@ recordingsRouter.post(
     const [recording] = await db
       .insert(schema.recordings)
       .values({
-        accountId,
+        accountId: ctx.accountId,
+        ownerMemberId: ctx.memberId,
+        visibility: body.visibility ?? "private",
         slug,
         title: body.title,
         source: body.source,
@@ -86,12 +99,11 @@ recordingsRouter.post(
 recordingsRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const accountId = req.params.accountId;
-    await ensureAccount(accountId);
+    const ctx = accessOf(req);
     const recordings = await db
       .select()
       .from(schema.recordings)
-      .where(and(eq(schema.recordings.accountId, accountId), isNull(schema.recordings.trashedAt)))
+      .where(and(recordingVisibleTo(ctx), isNull(schema.recordings.trashedAt)))
       .orderBy(desc(schema.recordings.startedAt));
     res.json({ recordings });
   }),
@@ -100,7 +112,7 @@ recordingsRouter.get(
 recordingsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
-    const recording = await findRecording(req.params.accountId, req.params.id);
+    const recording = await findRecording(accessOf(req), req.params.id);
     if (!recording) throw new HttpError(404, "recording_not_found");
     const attendees = await db
       .select()
@@ -113,7 +125,7 @@ recordingsRouter.get(
 recordingsRouter.post(
   "/:id/attendees",
   asyncHandler(async (req, res) => {
-    const recording = await findRecording(req.params.accountId, req.params.id);
+    const recording = await findOwnedRecording(accessOf(req), req.params.id);
     if (!recording) throw new HttpError(404, "recording_not_found");
     const body = parseBody(createAttendeeSchema, req);
     const [attendee] = await db
@@ -135,7 +147,7 @@ recordingsRouter.post(
 recordingsRouter.get(
   "/:id/attendees",
   asyncHandler(async (req, res) => {
-    const recording = await findRecording(req.params.accountId, req.params.id);
+    const recording = await findRecording(accessOf(req), req.params.id);
     if (!recording) throw new HttpError(404, "recording_not_found");
     const attendees = await db
       .select()

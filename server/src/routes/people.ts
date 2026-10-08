@@ -1,14 +1,10 @@
 import { Router } from "express";
 import { and, eq, ilike } from "drizzle-orm";
 import { z } from "zod";
+import { accessOf } from "../access/authenticate.js";
+import { personVisibleTo } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
-import { asyncHandler, HttpError, parseBody, parseQuery } from "../lib/http.js";
-
-const upsertPersonSchema = z.object({
-  email: z.string().email().max(320),
-  name: z.string().max(256).optional(),
-  avatarUrl: z.string().url().max(2048).optional(),
-});
+import { asyncHandler, HttpError, parseQuery } from "../lib/http.js";
 
 const listPeopleQuerySchema = z.object({
   email: z.string().max(320).optional(),
@@ -16,53 +12,19 @@ const listPeopleQuerySchema = z.object({
 
 export const peopleRouter = Router({ mergeParams: true });
 
-async function ensureAccount(accountId: string): Promise<void> {
-  const [account] = await db
-    .select({ id: schema.accounts.id })
-    .from(schema.accounts)
-    .where(eq(schema.accounts.id, accountId));
-  if (!account) throw new HttpError(404, "account_not_found");
-}
-
-peopleRouter.post(
-  "/",
-  asyncHandler(async (req, res) => {
-    const accountId = req.params.accountId;
-    await ensureAccount(accountId);
-    const body = parseBody(upsertPersonSchema, req);
-    const [person] = await db
-      .insert(schema.people)
-      .values({
-        accountId,
-        email: body.email,
-        name: body.name,
-        avatarUrl: body.avatarUrl,
-      })
-      .onConflictDoUpdate({
-        target: [schema.people.accountId, schema.people.email],
-        set: {
-          name: body.name ?? null,
-          avatarUrl: body.avatarUrl ?? null,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
-    res.status(200).json({ person });
-  }),
-);
+// Read-only. There used to be a POST here that upserted by email; nothing
+// called it (people rows are written by the capture pipeline), and an upsert
+// by email would let a caller overwrite — and so detect — a person who only
+// appears on someone else's private recording.
 
 peopleRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const accountId = req.params.accountId;
-    await ensureAccount(accountId);
+    const ctx = accessOf(req);
     const query = parseQuery(listPeopleQuerySchema, req);
     const where = query.email
-      ? and(
-          eq(schema.people.accountId, accountId),
-          ilike(schema.people.email, `%${query.email}%`),
-        )
-      : eq(schema.people.accountId, accountId);
+      ? and(personVisibleTo(ctx), ilike(schema.people.email, `%${query.email}%`))
+      : personVisibleTo(ctx);
     const people = await db.select().from(schema.people).where(where);
     res.json({ people });
   }),
@@ -71,13 +33,11 @@ peopleRouter.get(
 peopleRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
-    const accountId = req.params.accountId;
+    const ctx = accessOf(req);
     const [person] = await db
       .select()
       .from(schema.people)
-      .where(
-        and(eq(schema.people.accountId, accountId), eq(schema.people.id, req.params.id)),
-      );
+      .where(and(personVisibleTo(ctx), eq(schema.people.id, req.params.id)));
     if (!person) throw new HttpError(404, "person_not_found");
     res.json({ person });
   }),

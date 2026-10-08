@@ -41,6 +41,7 @@ import { basename, dirname } from "node:path";
 import { and, count, eq, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { slugify } from "../lib/slug.js";
+import { resolveOwnerMemberId } from "./owner.js";
 import {
   applyIdentity,
   applyScope,
@@ -400,11 +401,18 @@ export async function ingestTranscript(
     };
   }
 
+  // Resolved only for a recording about to be inserted, not for the reuse path
+  // above (which keeps whoever owns the existing row). Throws on a
+  // misconfiguration so the capture fails visibly instead of being stored where
+  // no one can see it — see ingest/owner.ts.
+  const ownerMemberId = await resolveOwnerMemberId(account.id);
+
   const result = await db.transaction(async (tx) => {
     const [recording] = await tx
       .insert(schema.recordings)
       .values({
         accountId: account.id,
+        ownerMemberId,
         slug,
         title,
         source: CLIPWISE_SOURCE,
