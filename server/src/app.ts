@@ -47,6 +47,14 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
 
   app.use(express.json({ limit: "16mb" }));
 
+  // Liveness: the process is up and serving. Never touches the database, so a
+  // host or compose health check on it neither fails during a database outage
+  // (a restart would not help) nor keeps Neon's compute awake. /health below is
+  // readiness.
+  app.get("/live", (_req, res) => {
+    res.status(200).json({ status: "ok" });
+  });
+
   app.get("/health", async (_req, res) => {
     try {
       await db.execute(sql`select 1`);
