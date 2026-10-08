@@ -242,7 +242,7 @@ function transcribeIfMissing(dir: string, stem: string): { path: string; ran: bo
   }
   // Three levels up lands at the repo root from either src/pipeline (tsx) or
   // dist/pipeline (built), so this holds however the seam is invoked.
-  const transcribePy = resolve(__dirname, "..", "..", "..", "recorder", "transcribe.py");
+  const transcribePy = resolve(import.meta.dirname, "..", "..", "..", "recorder", "transcribe.py");
   if (!existsSync(transcribePy)) {
     throw new PipelineError(`recorder/transcribe.py not found at ${transcribePy}`, "transcribe");
   }

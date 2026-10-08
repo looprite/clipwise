@@ -239,7 +239,7 @@ const CASES: Case[] = [
     run: async () => {
       // From src/extract (tsx) or dist/extract (compiled), the source file is
       // in src/extract either way.
-      const src = readFileSync(resolve(__dirname, "..", "..", "src", "extract", "extract.ts"), "utf8");
+      const src = readFileSync(resolve(import.meta.dirname, "..", "..", "src", "extract", "extract.ts"), "utf8");
       const poolAt = src.indexOf("await runBoundedPool(");
       const insertAt = src.indexOf(".insert(schema.moments)");
       if (poolAt === -1) return "no `await runBoundedPool(` in extract.ts";
