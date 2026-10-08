@@ -46,6 +46,10 @@ const mkStem = (n: number): string => `2026-03-0${n}T10-00-0${n}Z`;
 const caps: Record<string, Cap> = {};
 const SHARED = `sharedterm${run}`;
 const ROW_PREFIX = `check-trash-${run}-`;
+// The throwaway account's one member, who owns every row and is the caller the
+// routers see (they need an access context since the access layer). Set once
+// the account exists.
+let ownerMemberId: string | undefined;
 
 function writeFiles(c: Cap): void {
   const w = (name: string, body = "{}") => writeFileSync(join(dir, name), body);
@@ -66,6 +70,7 @@ async function makeRow(accountId: string, key: string, n: number, status: string
     .insert(schema.recordings)
     .values({
       accountId,
+      ownerMemberId,
       slug: `${ROW_PREFIX}${key}`,
       title: `Check ${key}`,
       source: CLIPWISE_SOURCE,
@@ -152,9 +157,18 @@ async function main(): Promise<void> {
     .values({ name: `check-trash ${run}`, slug: `check-trash-${run}` })
     .returning({ id: schema.accounts.id });
   const acc = account.id;
+  const [member] = await db
+    .insert(schema.accountMembers)
+    .values({ accountId: acc, email: `owner-${run}@check-trash.test`, role: "admin" })
+    .returning({ id: schema.accountMembers.id, email: schema.accountMembers.email });
+  ownerMemberId = member.id;
 
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => {
+    req.access = { accountId: acc, memberId: member.id, role: "admin", authUserId: "check-trash", email: member.email };
+    next();
+  });
   app.use("/accounts/:accountId/recordings", recordingsRouter);
   app.use("/accounts/:accountId/moments", momentsRouter);
   app.use("/", transcriptRouter);
@@ -342,6 +356,9 @@ async function main(): Promise<void> {
     const gone = await deleteCapture(dir, X.stem);
     check("crash mid-delete: deleting again finishes it (row gone, marker gone)", gone.rowsDeleted === 1 && !isTrashed(dir, X.stem) && (await counts([X.rowId])).recordings === 0, JSON.stringify(gone));
   } finally {
+    // Recordings first: owner_member_id restricts deleting a member that still
+    // owns one, and the account's cascade does not promise an order.
+    await db.delete(schema.recordings).where(like(schema.recordings.sourceId, `${ROW_PREFIX}%`));
     await db.delete(schema.accounts).where(eq(schema.accounts.id, acc));
     const left = await db.select({ id: schema.recordings.id }).from(schema.recordings).where(like(schema.recordings.sourceId, `${ROW_PREFIX}%`));
     check("cleanup: the throwaway account and every row of this run are gone", left.length === 0, `${left.length} rows left`);

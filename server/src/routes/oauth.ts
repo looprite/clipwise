@@ -7,6 +7,7 @@ import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "../db/index.js";
+import { accessOf } from "../access/authenticate.js";
 import { asyncHandler, HttpError, parseQuery } from "../lib/http.js";
 import { encrypt } from "../lib/crypto.js";
 import { exchangeCode, listCalendars, selectSearchableCalendars } from "../lib/google-calendar.js";
@@ -53,6 +54,11 @@ oauthRouter.get(
   "/oauth/google/connect",
   asyncHandler(async (req, res) => {
     const { account_id: accountId } = parseQuery(connectQuerySchema, req);
+    // Mounted behind requireMember + requireAdmin (app.ts). The account asked
+    // for must be the caller's own. /callback is deliberately not behind them:
+    // Google's redirect carries no token, and it is gated by the single-use
+    // state this route issues.
+    if (accountId !== accessOf(req).accountId) throw new HttpError(404, "account_not_found");
     const [account] = await db
       .select({ id: schema.accounts.id })
       .from(schema.accounts)

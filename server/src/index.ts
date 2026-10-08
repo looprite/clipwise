@@ -1,46 +1,7 @@
 import "dotenv/config";
-import express, { type Request, type Response } from "express";
-import { sql } from "drizzle-orm";
-import { db } from "./db/index.js";
-import { accountsRouter } from "./routes/accounts.js";
-import { peopleRouter } from "./routes/people.js";
-import { recordingsRouter } from "./routes/recordings.js";
-import { transcriptRouter } from "./routes/transcript.js";
-import { momentsRouter } from "./routes/moments.js";
-import { oauthRouter } from "./routes/oauth.js";
-import { errorHandler } from "./lib/http.js";
+import { buildApp } from "./app.js";
 
-const app = express();
-
-// Sign-in (src/auth). Mounted only when configured, so a server that has not
-// been set up for it behaves exactly as before. Ahead of express.json(), which
-// would consume the body Better Auth reads itself (see auth/mount.ts). This
-// does not protect the routes below; closing them is the next change.
-if (process.env.BETTER_AUTH_SECRET) {
-  const { mountAuth } = await import("./auth/mount.js");
-  mountAuth(app);
-}
-
-app.use(express.json({ limit: "16mb" }));
-
-app.get("/health", async (_req: Request, res: Response) => {
-  try {
-    await db.execute(sql`select 1`);
-    res.status(200).json({ status: "ok", db: "ok" });
-  } catch (err) {
-    console.error("health check: database unreachable:", err);
-    res.status(503).json({ status: "error", db: "unreachable" });
-  }
-});
-
-app.use("/accounts", accountsRouter);
-app.use("/accounts/:accountId/people", peopleRouter);
-app.use("/accounts/:accountId/recordings", recordingsRouter);
-app.use("/accounts/:accountId/moments", momentsRouter);
-app.use("/", transcriptRouter);
-app.use("/", oauthRouter);
-
-app.use(errorHandler);
+const { app } = await buildApp();
 
 const port = Number(process.env.PORT ?? 3000);
 
