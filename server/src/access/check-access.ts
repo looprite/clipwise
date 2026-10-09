@@ -10,7 +10,10 @@
 //     shared-but-personal, trashed and carrying personnel-assessment moments.
 //     Each reads, searches, lists and writes through every route; nobody sees
 //     what they should not, by any route, count or error message.
-//  4. Revocation: a member's still-valid token stops working on the next call
+//  4. Two kinds of token (SAA-244): every route takes the kind the table says
+//     (`requires`) and refuses the other; only the recorder's client can obtain a
+//     capture token; discovery still advertises the four MCP scopes.
+//  5. Revocation: a member's still-valid token stops working on the next call
 //     once they are removed.
 //
 // WRITES to the database it is pointed at (tagged rows, removed at the end), so
@@ -20,15 +23,37 @@
 // Usage:
 //   CLIPWISE_CHECK_SCRATCH_DB=1 tsx src/access/check-access.ts
 // with DATABASE_URL, BETTER_AUTH_SECRET, BETTER_AUTH_URL, AUTH_PASSWORD_ENABLED=true.
+//
+// Controls (SAA-244), each of which must make the check fail, and on exactly one
+// line, to show the check can see what it claims to:
+//   CLIPWISE_CHECK_CONTROL=requires-dropped
+//       the table's `requires` for POST /accounts/:accountId/recordings is changed
+//       to "mcp" in this process's copy of the table, as if the scope check had
+//       been removed from that route: the line for that route fails.
+//   CLIPWISE_CHECK_CONTROL=no-registration-defaults
+//       the dynamic-registration assertion about the capture scope is run
+//       against a provider built without clientRegistrationDefaultScopes
+//       (createAuth's second argument): it fails.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { buildApp } from "../app.js";
-import { authConfigFromEnv } from "../auth/auth.js";
+import { authConfigFromEnv, createAuth } from "../auth/auth.js";
 import { addMember, createPasswordLogin, removeMember, requireAccount } from "../auth/members.js";
+import { ensureRecorderClient, RECORDER_CLIENT_ID, RECORDER_REDIRECT_URI } from "../auth/recorder-client.js";
+import { CAPTURE_SCOPE, MCP_SCOPES } from "../auth/scopes.js";
+import { verifyAccessToken } from "../auth/tokens.js";
 import { db, pool, schema } from "../db/index.js";
 import { MCP_TOOLS, ROUTES } from "./classification.js";
 import { listRoutes } from "./route-list.js";
+
+const CONTROL = process.env.CLIPWISE_CHECK_CONTROL ?? "";
+if (CONTROL !== "" && CONTROL !== "requires-dropped" && CONTROL !== "no-registration-defaults") {
+  process.stderr.write(`check-access: unknown CLIPWISE_CHECK_CONTROL ${JSON.stringify(CONTROL)}\n`);
+  process.exit(2);
+}
+// The route whose `requires` the first control changes.
+const CONTROL_ROUTE = "POST /accounts/:accountId/recordings";
 
 if (process.env.CLIPWISE_CHECK_SCRATCH_DB !== "1") {
   process.stderr.write(
@@ -42,6 +67,8 @@ const cfg = authConfigFromEnv();
 const PASSWORD = `pw-${randomBytes(9).toString("base64url")}`;
 const WORD = `zebra${tag}`;
 const KIND = `secretkind${tag}`;
+// Whether this run made the recorder's client (and so removes it at the end).
+let recorderCreated = false;
 
 let failed = 0;
 let total = 0;
@@ -105,7 +132,7 @@ async function tokensFor(email: string, scope = "openid offline_access"): Promis
     });
     clientId = reg.json.client_id;
   }
-  const signIn = await http("POST", "/api/auth/sign-in/email", { json: { email, password: PASSWORD } });
+  const signIn = { cookie: await sessionFor(email) };
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const query = new URLSearchParams({
@@ -144,6 +171,62 @@ async function tokensFor(email: string, scope = "openid offline_access"): Promis
 }
 const tokenFor = async (email: string, scope?: string): Promise<string> => (await tokensFor(email, scope)).access;
 
+// One sign-in per person for the whole run: sign-in is rate-limited (10 per
+// 5 minutes, auth/auth.ts), and every flow below needs a session.
+const sessions = new Map<string, string>();
+async function sessionFor(email: string): Promise<string> {
+  const known = sessions.get(email);
+  if (known) return known;
+  const signIn = await http("POST", "/api/auth/sign-in/email", { json: { email, password: PASSWORD } });
+  sessions.set(email, signIn.cookie);
+  return signIn.cookie;
+}
+
+// SAA-244. One authorization-code + PKCE flow for any client, scope and
+// resource, reporting how far it got: the access token, or the error and the
+// step that gave it. (tokensFor above is the claude.ai-shaped flow the older
+// checks use; this one takes the client and resource as arguments.)
+type FlowResult = { access: string | null; refresh: string | null; error: string | null; step: "authorize" | "token" | "done" };
+async function oauthFlow(o: { email: string; clientId: string; redirectUri: string; scope: string; resource: string }): Promise<FlowResult> {
+  const signIn = { cookie: await sessionFor(o.email) };
+  const verifier = randomBytes(32).toString("base64url");
+  const query = new URLSearchParams({
+    response_type: "code",
+    client_id: o.clientId,
+    redirect_uri: o.redirectUri,
+    scope: o.scope,
+    state: "s",
+    code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+    code_challenge_method: "S256",
+    resource: o.resource,
+  });
+  const authorize = await http("GET", `/api/auth/oauth2/authorize?${query}`, { cookie: signIn.cookie });
+  let next = String(authorize.json?.url ?? authorize.headers.get("location") ?? "");
+  if (next.startsWith("/consent")) {
+    const consent = await http("POST", "/api/auth/oauth2/consent", {
+      json: { accept: true, oauth_query: next.split("?")[1] },
+      cookie: signIn.cookie,
+    });
+    next = String(consent.json?.url ?? consent.headers.get("location") ?? "");
+  }
+  const back = next ? new URL(next, cfg.baseURL) : null;
+  const code = back?.searchParams.get("code") ?? null;
+  const authError = back?.searchParams.get("error") ?? (authorize.json?.error as string | undefined) ?? null;
+  if (!code) return { access: null, refresh: null, error: authError ?? "no_code", step: "authorize" };
+  const token = await http("POST", "/api/auth/oauth2/token", {
+    form: {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: o.redirectUri,
+      client_id: o.clientId,
+      code_verifier: verifier,
+      resource: o.resource,
+    },
+  });
+  if (!token.json?.access_token) return { access: null, refresh: null, error: (token.json?.error as string) ?? "no_token", step: "token" };
+  return { access: token.json.access_token as string, refresh: (token.json.refresh_token as string) ?? null, error: null, step: "done" };
+}
+
 type Who = { email: string; memberId: string; token: string; refresh: string | null };
 async function makeUser(label: string, role: "admin" | "member"): Promise<Who> {
   const email = `${label}-${tag}@clipwise.test`;
@@ -174,6 +257,11 @@ async function cleanup(accountId: string | null): Promise<void> {
   await run(`delete from auth_user where email like $1`, [like]);
   await run(`delete from account_members where email like $1`, [like]);
   await run(`delete from "oauthClient" where name like $1`, [`check-access-${tag}%`]);
+  // The recorder's client is the instance's own; remove it only if this run made it.
+  if (recorderCreated) {
+    await run(`delete from "oauthClientResource" where "clientId" = $1`, [RECORDER_CLIENT_ID]);
+    await run(`delete from "oauthClient" where "clientId" = $1`, [RECORDER_CLIENT_ID]);
+  }
 }
 
 async function main(): Promise<void> {
@@ -187,6 +275,14 @@ async function main(): Promise<void> {
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   try {
+    if (CONTROL === "requires-dropped") {
+      ROUTES[CONTROL_ROUTE] = { ...ROUTES[CONTROL_ROUTE], requires: "mcp" };
+      process.stdout.write(`control: requires-dropped — ${CONTROL_ROUTE} says "mcp" in this process's copy of the table\n`);
+    }
+    if (CONTROL === "no-registration-defaults") {
+      process.stdout.write("control: no-registration-defaults — the dynamic-registration scope assertion runs against a provider without clientRegistrationDefaultScopes\n");
+    }
+
     // ---- 1. classification -------------------------------------------------
     const listed = listRoutes(app, mounts).map((r) => `${r.method} ${r.path}`);
     const unclassified = listed.filter((k) => !ROUTES[k]);
@@ -341,12 +437,28 @@ async function main(): Promise<void> {
     record((await http("GET", `/accounts/${acc}/recordings/${rec.a1.id}`, { token: B.token })).status === 404 && (await http("GET", `/accounts/${acc}/recordings/${rec.a2.id}`, { token: B.token })).status === 200, "recordings by id: private is 404, shared is 200");
     record((await http("GET", `/accounts/${acc}/recordings/${rec.a1.id}/attendees`, { token: B.token })).status === 404, "attendees: a private call's attendee list is 404 to others");
 
+    // ---- the recorder's tokens (SAA-244) -------------------------------------
+    // The write routes take a capture token, so the "only the owner" checks below
+    // use one for each person. The recorder's client is made by the same function
+    // the CLI runs; its tokens are for audience …/capture with the capture scope,
+    // claude.ai's and Claude Code's for …/mcp with the four scopes they have
+    // always had.
+    const recorder = await ensureRecorderClient();
+    recorderCreated = recorder.created;
+    const loopback = RECORDER_REDIRECT_URI.replace("127.0.0.1", "127.0.0.1:53127"); // any port: the library ignores it
+    const recFlow = (who: Who) =>
+      oauthFlow({ email: who.email, clientId: recorder.clientId, redirectUri: loopback, scope: `openid offline_access ${CAPTURE_SCOPE}`, resource: cfg.captureResource });
+    const capA = await recFlow(A);
+    const capB = await recFlow(B);
+    const capC = await recFlow(C);
+    const capToken = (who: Who): string => (who === A ? capA : who === B ? capB : capC).access ?? "";
+
     // ---- writes are the owner's --------------------------------------------
-    const addAtt = (who: Who, key: string) => http("POST", `/accounts/${acc}/recordings/${rec[key].id}/attendees`, { token: who.token, json: { name: "Added" } });
+    const addAtt = (who: Who, key: string) => http("POST", `/accounts/${acc}/recordings/${rec[key].id}/attendees`, { token: capToken(who), json: { name: "Added" } });
     record((await addAtt(B, "a2")).status === 404 && (await addAtt(A, "a2")).status === 201, "attendees: only the owner can add one — even to a shared call");
-    const addMoment = (who: Who, key: string) => http("POST", `/accounts/${acc}/moments`, { token: who.token, json: { recordingId: rec[key].id, kind: "observation", title: `${WORD} added`, startSec: 0, endSec: 1 } });
+    const addMoment = (who: Who, key: string) => http("POST", `/accounts/${acc}/moments`, { token: capToken(who), json: { recordingId: rec[key].id, kind: "observation", title: `${WORD} added`, startSec: 0, endSec: 1 } });
     record((await addMoment(B, "a2")).status === 404 && (await addMoment(A, "a2")).status === 201, "moments: only the owner can add one");
-    record((await http("POST", `/recordings/${rec.a2.id}/transcript`, { token: B.token, json: {} })).status === 404, "transcript: only the owner can add one");
+    record((await http("POST", `/recordings/${rec.a2.id}/transcript`, { token: capToken(B), json: {} })).status === 404, "transcript: only the owner can add one");
 
     // ---- people ------------------------------------------------------------
     const peopleB = await http("GET", `/accounts/${acc}/people`, { token: B.token });
@@ -562,6 +674,140 @@ async function main(): Promise<void> {
     const getMcp = await http("GET", "/mcp", { token: A.token });
     const delMcp = await http("DELETE", "/mcp", { token: A.token });
     record(getMcp.status === 405 && delMcp.status === 405 && (await http("GET", "/mcp")).status === 401, "mcp: GET and DELETE are 405 once authenticated, 401 before");
+
+    // ---- 4. two kinds of token (SAA-244) -----------------------------------
+    const FOUR = [...MCP_SCOPES] as string[];
+
+    // The recorder client gets a capture token.
+    const capClaims = capA.access ? await verifyAccessToken(capA.access, "capture") : null;
+    const capAsMcp = capA.access ? await verifyAccessToken(capA.access, "mcp") : null;
+    record(
+      !!capClaims && capClaims.scope.includes(CAPTURE_SCOPE) && capAsMcp === null && !!capA.refresh,
+      "recorder client: obtains a token for the capture resource with the capture scope and a refresh token (loopback redirect, any port)",
+      `error ${capA.error} at ${capA.step}`,
+    );
+    // It works on a capture route, and is refused on /mcp and on a read route.
+    const capCreate = await http("POST", `/accounts/${acc}/recordings`, { token: capA.access ?? "", json: { title: `check-access ${tag} capture`, slug: `check-access-${tag}-cap` } });
+    record(capCreate.status === 201, "recorder token: works on a capture route (POST /accounts/:accountId/recordings creates a recording)", `${capCreate.status} ${capCreate.json?.error ?? ""}`);
+    const capOnMcp = await rpc(capA.access ?? "", "tools/list");
+    const capOnRead = await http("GET", "/accounts/me", { token: capA.access ?? "" });
+    record(capOnMcp.status === 401 && capOnRead.status === 401, "recorder token: refused on /mcp and on a read route (GET /accounts/me)", `/mcp ${capOnMcp.status}, read ${capOnRead.status}`);
+    // An MCP token is refused on a capture route with the scope it lacks.
+    const mcpOnCapture = await http("POST", `/accounts/${acc}/recordings`, { token: A.token, json: { slug: `check-access-${tag}-mcp` } });
+    record(
+      mcpOnCapture.status === 403 &&
+        mcpOnCapture.json?.error === "insufficient_scope" &&
+        (mcpOnCapture.headers.get("www-authenticate") ?? "").includes('error="insufficient_scope"'),
+      "MCP token: refused on a capture route with 403 insufficient_scope and a challenge naming the scope",
+      `${mcpOnCapture.status} ${mcpOnCapture.json?.error ?? ""} ${mcpOnCapture.headers.get("www-authenticate") ?? ""}`,
+    );
+
+    // Every route that needs a token takes the kind its table entry says, and
+    // refuses the other. A capture route answers an MCP token 403
+    // insufficient_scope; an MCP route answers a capture token 401.
+    const tableBody = (key: string): Record<string, unknown> =>
+      key === "POST /accounts/:accountId/recordings" ? { slug: `check-access-${tag}-tbl` } : {};
+    for (const key of listed) {
+      const entry = ROUTES[key];
+      if (!entry || entry.requires === "public") continue;
+      const [method, path] = key.split(" ");
+      const real = method === "ALL" ? "GET" : method;
+      const json = real === "POST" ? tableBody(key) : undefined;
+      const asMcp = await http(real, fill(path), { token: C.token, json });
+      const asCap = await http(real, fill(path), { token: capC.access ?? "", json });
+      const insufficient = (r: Reply) => r.status === 403 && r.json?.error === "insufficient_scope";
+      const through = (r: Reply) => r.status !== 401 && !insufficient(r);
+      const ok = entry.requires === "capture" ? insufficient(asMcp) && through(asCap) : through(asMcp) && asCap.status === 401;
+      record(
+        ok,
+        `requires: ${key} takes a ${entry.requires} token and refuses the other`,
+        `table says ${entry.requires}; MCP token → ${asMcp.status}${asMcp.json?.error ? ` ${asMcp.json.error}` : ""}; capture token → ${asCap.status}${asCap.json?.error ? ` ${asCap.json.error}` : ""}`,
+      );
+    }
+
+    // Dynamic registration is open to anyone, and cannot reach the capture scope
+    // or the capture resource.
+    const dcrBody = (extra: Record<string, unknown>) => ({
+      client_name: `check-access-${tag}-dcr`,
+      redirect_uris: ["https://claude.ai/api/mcp/auth_callback"],
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      ...extra,
+    });
+    const register = async (json: Record<string, unknown>, via?: ReturnType<typeof createAuth>): Promise<{ status: number; json: any }> => {
+      if (!via) return http("POST", "/api/auth/oauth2/register", { json });
+      const res = await via.handler(
+        new Request(`${cfg.baseURL}/api/auth/oauth2/register`, {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: cfg.baseURL },
+          body: JSON.stringify(json),
+        }),
+      );
+      const text = await res.text();
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+      return { status: res.status, json: parsed };
+    };
+    // THE assertion the second control targets: with the control it is the only
+    // one that runs against a provider built without clientRegistrationDefaultScopes.
+    const controlAuth = CONTROL === "no-registration-defaults" ? createAuth(cfg, { omitRegistrationDefaultScopes: true }) : undefined;
+    const askCapture = await register(dcrBody({ scope: `openid ${CAPTURE_SCOPE}` }), controlAuth);
+    record(
+      askCapture.status === 400 && askCapture.json?.error === "invalid_scope",
+      "dynamic registration: a client asking for the capture scope is refused (invalid_scope)",
+      `${askCapture.status} ${askCapture.json?.error ?? ""}; registered scope: ${askCapture.json?.scope ?? "(none)"}`,
+    );
+    const askResource = await register(dcrBody({ resources: [cfg.captureResource] }));
+    record(
+      askResource.status === 400 && askResource.json?.error === "invalid_target",
+      "dynamic registration: a client asking for the capture resource is refused (invalid_target)",
+      `${askResource.status} ${askResource.json?.error ?? ""}`,
+    );
+    const plain = await register(dcrBody({}));
+    const plainScopes = String(plain.json?.scope ?? "").split(" ").filter(Boolean);
+    record(
+      plain.status === 201 && sameSet(plainScopes, FOUR),
+      "dynamic registration: a client that names no scope is registered with the four MCP scopes and nothing else",
+      `${plain.status}; scope: ${plainScopes.join(" ")}`,
+    );
+    // And a dynamically registered client cannot ask for either at sign-in.
+    const dcrId = String(plain.json?.client_id ?? "");
+    const dcrCallback = "https://claude.ai/api/mcp/auth_callback";
+    const dcrScope = await oauthFlow({ email: A.email, clientId: dcrId, redirectUri: dcrCallback, scope: `openid ${CAPTURE_SCOPE}`, resource: cfg.mcpResource });
+    record(!dcrScope.access && dcrScope.error === "invalid_scope", "dynamic client at sign-in: asking for the capture scope is refused (invalid_scope)", `${dcrScope.error} at ${dcrScope.step}`);
+    const dcrResource = await oauthFlow({ email: A.email, clientId: dcrId, redirectUri: dcrCallback, scope: "openid offline_access", resource: cfg.captureResource });
+    record(!dcrResource.access && dcrResource.error === "invalid_target", "dynamic client at sign-in: asking for the capture resource is refused (invalid_target)", `${dcrResource.error} at ${dcrResource.step}`);
+
+    // Only the recorder's client is linked to the capture resource, and making
+    // it again changes nothing.
+    const recorderAgain = await ensureRecorderClient();
+    const links = await pool.query(`select "clientId" from "oauthClientResource" where "resourceId" = $1`, [cfg.captureResource]);
+    const recorderRows = await pool.query(`select count(*)::int as n from "oauthClient" where "clientId" = $1`, [recorder.clientId]);
+    record(
+      sameSet(links.rows.map((r: any) => r.clientId), [recorder.clientId]) && recorderRows.rows[0].n === 1 && recorderAgain.created === false,
+      "the recorder's client is the only one linked to the capture resource, and creating it again adds nothing",
+      `linked: ${links.rows.map((r: any) => r.clientId).join(", ")}; client rows: ${recorderRows.rows[0].n}; second run created: ${recorderAgain.created}`,
+    );
+
+    // What claude.ai reads is unchanged, and an MCP client's refresh still works.
+    const asMeta = await http("GET", "/.well-known/oauth-authorization-server/api/auth");
+    const prMeta = await http("GET", "/.well-known/oauth-protected-resource");
+    record(
+      asMeta.status === 200 && sameSet(asMeta.json?.scopes_supported ?? [], FOUR) && prMeta.status === 200 && !("scopes_supported" in (prMeta.json ?? {})),
+      "discovery is unchanged: the authorization server advertises the four MCP scopes, the protected-resource document advertises none",
+      `AS ${JSON.stringify(asMeta.json?.scopes_supported)}; resource ${JSON.stringify(prMeta.json?.scopes_supported)}`,
+    );
+    const mcpTok = await tokensFor(A.email);
+    const refreshed = await http("POST", "/api/auth/oauth2/token", {
+      form: { grant_type: "refresh_token", refresh_token: mcpTok.refresh ?? "", client_id: mcpTok.clientId, resource: cfg.mcpResource },
+    });
+    const refreshedMcp = refreshed.json?.access_token ? await rpc(refreshed.json.access_token, "tools/list") : null;
+    record(refreshedMcp?.status === 200, "an MCP client's refresh grant still yields a token that works on /mcp", `refresh ${refreshed.status}; /mcp ${refreshedMcp?.status ?? "(no token)"}`);
 
     // ---- fail closed -------------------------------------------------------
     const saved = process.env.BETTER_AUTH_SECRET;

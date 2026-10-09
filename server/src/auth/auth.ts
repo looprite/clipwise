@@ -28,6 +28,7 @@ import {
   findMemberByEmail,
   linkMemberToUser,
 } from "./membership.js";
+import { CAPTURE_RESOURCE_SCOPES, CAPTURE_SCOPE, MCP_SCOPES } from "./scopes.js";
 
 export type AuthConfig = {
   secret: string;
@@ -36,6 +37,9 @@ export type AuthConfig = {
   // The exact URL of the MCP endpoint, as the user enters it in Claude. Tokens
   // are bound to it, and the resource server checks `aud` against it.
   mcpResource: string;
+  // The audience of the recorder's tokens (SAA-244): <baseURL>/capture. Not a
+  // route; an identifier that a capture token names and /mcp does not accept.
+  captureResource: string;
   passwordEnabled: boolean;
   // When set, only emails on this domain may sign in (in addition to being
   // members). Null leaves the member list as the only gate.
@@ -58,6 +62,7 @@ export function authConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AuthCon
     secret,
     baseURL,
     mcpResource: env.MCP_RESOURCE_URL ?? `${baseURL}/mcp`,
+    captureResource: `${baseURL}/capture`,
     passwordEnabled: env.AUTH_PASSWORD_ENABLED === "true",
     allowedDomain: env.AUTH_ALLOWED_EMAIL_DOMAIN?.trim().toLowerCase() || null,
     ipAddressHeader: env.AUTH_IP_HEADER?.trim().toLowerCase() || null,
@@ -65,7 +70,11 @@ export function authConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AuthCon
   };
 }
 
-export function createAuth(cfg: AuthConfig) {
+// `control` is for check-access's SAA-244 control only: it builds its own
+// instance without clientRegistrationDefaultScopes, to show that the assertion
+// about dynamic clients and the capture scope fails without it. getAuth() never
+// passes it.
+export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultScopes?: boolean } = {}) {
   return betterAuth({
     appName: "Clipwise",
     baseURL: cfg.baseURL,
@@ -152,6 +161,23 @@ export function createAuth(cfg: AuthConfig) {
         loginPage: "/login",
         consentPage: "/consent",
         resource: cfg.mcpResource,
+        // SAA-244. The capture scope exists, but only the recorder's client can
+        // have it:
+        //  - `scopes` must name it for a token to carry it;
+        //  - clientRegistrationDefaultScopes pins what a dynamically registered
+        //    client gets (and may ask for) to the four it always had. Without it
+        //    the default is `scopes`, and every such client would be registered
+        //    with the capture scope (oauth-provider authorize:1615-1616, 1917-1919);
+        //  - advertisedMetadata keeps the published scopes_supported the four, so
+        //    nothing a client reads from discovery changes;
+        //  - the capture resource is not among the resources a dynamic client may
+        //    register for (the mcp plugin adds only the MCP resource to those), and
+        //    per-client resource enforcement (on by default) refuses any client not
+        //    linked to it. allowedScopes limits what a token for it can carry.
+        scopes: [...MCP_SCOPES, CAPTURE_SCOPE],
+        ...(control.omitRegistrationDefaultScopes ? {} : { clientRegistrationDefaultScopes: [...MCP_SCOPES] }),
+        advertisedMetadata: { scopes_supported: [...MCP_SCOPES] },
+        resources: [{ identifier: cfg.captureResource, allowedScopes: [...CAPTURE_RESOURCE_SCOPES] }],
         accessTokenExpiresIn: cfg.accessTokenSeconds,
         allowDynamicClientRegistration: true,
         allowUnauthenticatedClientRegistration: true,

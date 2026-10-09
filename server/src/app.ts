@@ -5,7 +5,10 @@
 //   - /health, /api/auth/* (Better Auth's own gating) and the Google Calendar
 //     callback (gated by a single-use state) are reachable without a token;
 //   - everything else goes through requireMember: a valid access token AND an
-//     active member row on this request (access/authenticate.ts);
+//     active member row on this request (access/authenticate.ts). The routers
+//     that have write routes use requireMemberOrCaptureWrites instead: reads
+//     take that MCP token, every other method takes the recorder's capture
+//     token (SAA-244);
 //   - the older routes keep :accountId in the URL, which sameAccountOnly checks
 //     against the caller's own account — it no longer decides which account;
 //   - starting a Google Calendar connection also needs an admin.
@@ -14,7 +17,7 @@
 
 import express, { type Express, type RequestHandler, type Router } from "express";
 import { sql } from "drizzle-orm";
-import { requireAdmin, requireMember, sameAccountOnly } from "./access/authenticate.js";
+import { requireAdmin, requireMember, requireMemberOrCaptureWrites, sameAccountOnly } from "./access/authenticate.js";
 import { authorizationServerMetadata, protectedResourceMetadata } from "./auth/discovery.js";
 import { consentPage, loginPage } from "./auth/pages.js";
 import { db } from "./db/index.js";
@@ -104,12 +107,12 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
 
   // Guards for routes that live in routers mounted at "/" with fully
   // qualified paths.
-  app.use("/recordings", requireMember);
+  app.use("/recordings", requireMemberOrCaptureWrites);
   app.use("/oauth/google/connect", requireMember, requireAdmin);
 
   mount("/accounts/:accountId/people", [requireMember, sameAccountOnly], peopleRouter);
-  mount("/accounts/:accountId/recordings", [requireMember, sameAccountOnly], recordingsRouter);
-  mount("/accounts/:accountId/moments", [requireMember, sameAccountOnly], momentsRouter);
+  mount("/accounts/:accountId/recordings", [requireMemberOrCaptureWrites, sameAccountOnly], recordingsRouter);
+  mount("/accounts/:accountId/moments", [requireMemberOrCaptureWrites, sameAccountOnly], momentsRouter);
   mount("/accounts", [requireMember], accountsRouter);
   mount("/", [], transcriptRouter);
   mount("/", [], oauthRouter);

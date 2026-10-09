@@ -14,4 +14,8 @@ export type AccessContext = {
   // Better Auth's user id (the token's `sub`).
   authUserId: string;
   email: string;
+  // The scopes on the token this request came with (SAA-244). Which kind of
+  // token a route accepts is decided before a handler runs (authenticate.ts);
+  // this is here so a service can see what the caller was granted.
+  scope: string[];
 };

@@ -7,9 +7,14 @@
 //   tsx src/auth/check-tokens.ts
 
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWTPayload } from "jose";
+import { CAPTURE_SCOPE, type ExpectedResource } from "./scopes.js";
 import { verifyAccessToken } from "./tokens.js";
 
-const config = { baseURL: "https://clip.example.test", mcpResource: "https://clip.example.test/mcp" };
+const config = {
+  baseURL: "https://clip.example.test",
+  mcpResource: "https://clip.example.test/mcp",
+  captureResource: "https://clip.example.test/capture",
+};
 const ISSUER = `${config.baseURL}/api/auth`;
 const USERINFO = `${ISSUER}/oauth2/userinfo`;
 
@@ -37,7 +42,9 @@ async function sign(
     .sign(over.key ?? mine.privateKey);
 }
 
-type Case = { name: string; token: () => Promise<string>; expect: "ok" | "refused" };
+// `as` is the resource the verifier is told to expect (default: mcp).
+type Case = { name: string; token: () => Promise<string>; expect: "ok" | "refused"; as?: ExpectedResource };
+const CAPTURE_PAYLOAD = { aud: [config.captureResource, USERINFO], scope: `openid offline_access ${CAPTURE_SCOPE}` };
 const CASES: Case[] = [
   { name: "a token for this resource, as Better Auth issues it (resource + userinfo audiences), is accepted", token: () => sign(), expect: "ok" },
   { name: "a token whose only audience is this resource is accepted", token: () => sign({ payload: { aud: config.mcpResource } }), expect: "ok" },
@@ -55,18 +62,40 @@ const CASES: Case[] = [
   { name: "a token with no subject is refused", token: () => sign({ drop: ["sub"] }), expect: "refused" },
   { name: "garbage is refused", token: async () => "not.a.token", expect: "refused" },
   { name: "an empty string is refused", token: async () => "", expect: "refused" },
+  // SAA-244: the two kinds of token, and neither is accepted in the other's place.
+  { name: "capture: a token for the capture resource with the capture scope is accepted as a capture token", token: () => sign({ payload: CAPTURE_PAYLOAD }), expect: "ok", as: "capture" },
+  { name: "capture: that same token is refused where an MCP token is expected", token: () => sign({ payload: CAPTURE_PAYLOAD }), expect: "refused", as: "mcp" },
+  { name: "capture: an MCP token is refused where a capture token is expected", token: () => sign(), expect: "refused", as: "capture" },
+  {
+    name: "capture: a token for the capture resource WITHOUT the capture scope is refused as a capture token",
+    token: () => sign({ payload: { ...CAPTURE_PAYLOAD, scope: "openid offline_access" } }),
+    expect: "refused",
+    as: "capture",
+  },
+  {
+    name: "capture: a token naming both resources is refused either way (audience confusion)",
+    token: () => sign({ payload: { aud: [config.mcpResource, config.captureResource, USERINFO], scope: `openid ${CAPTURE_SCOPE}` } }),
+    expect: "refused",
+    as: "capture",
+  },
+  {
+    name: "capture: ...and as an MCP token",
+    token: () => sign({ payload: { aud: [config.mcpResource, config.captureResource, USERINFO], scope: `openid ${CAPTURE_SCOPE}` } }),
+    expect: "refused",
+    as: "mcp",
+  },
 ];
 
 let failed = 0;
 for (const c of CASES) {
-  const got = await verifyAccessToken(await c.token(), { keys, config });
+  const got = await verifyAccessToken(await c.token(), c.as ?? "mcp", { keys, config });
   const actual = got ? "ok" : "refused";
   const ok = actual === c.expect;
   if (!ok) failed++;
   process.stdout.write(`${ok ? "ok  " : "FAIL"} ${c.name}${ok ? "" : ` — expected ${c.expect}, got ${actual}`}\n`);
 }
 
-const good = await verifyAccessToken(await sign(), { keys, config });
+const good = await verifyAccessToken(await sign(), "mcp", { keys, config });
 const shape = good?.sub === "user-1" && good.scope.join() === "openid,offline_access" && good.clientId === "client-1";
 if (!shape) failed++;
 process.stdout.write(`${shape ? "ok  " : "FAIL"} an accepted token yields its subject, scopes and client\n`);
