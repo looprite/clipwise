@@ -6,7 +6,14 @@
 #   scratch-db.sh up              create scratch-<date>, record its endpoint,
 #                                 write its settings to ~/clipwise-eval/scratch/,
 #                                 prove the guard, make one admin
-#   scratch-db.sh run <check>     check-access | check-auth | check-trash
+#   scratch-db.sh up --with-data  the same, but a copy of main's rows too
+#                                 (scratch-data-<date>). No account or admin is
+#                                 made: main's are there. For trying a schema
+#                                 push on real data; `run` allows only
+#                                 check-unique-index on it
+#   scratch-db.sh push            drizzle-kit push against the scratch endpoint
+#   scratch-db.sh run <check>     check-access | check-auth | check-trash, or any
+#                                 other src/**/check-*.ts by its file name
 #   scratch-db.sh down            delete the branch and its files, then read back
 #
 # Exit codes: 0 ok, 1 a step failed (the branch is left up), 2 refused before
@@ -261,6 +268,12 @@ list_scratch_branches() {
 }
 
 cmd_up() {
+  local with_data=0
+  case "${1:-}" in
+    "") ;;
+    --with-data) with_data=1 ;;
+    *) refuse "usage: scratch-db.sh up [--with-data]" ;;
+  esac
   command -v neonctl >/dev/null || refuse "neonctl is not installed"
   command -v jq >/dev/null || refuse "jq is not installed"
   command -v openssl >/dev/null || refuse "openssl is not installed"
@@ -275,16 +288,22 @@ cmd_up() {
   main_endpoints >/dev/null || refuse "main's endpoint cannot be read from Neon"
 
   local branch f e out bid ep suspend mainbid ops op i st
-  branch="scratch-$(date +%Y-%m-%d)"
+  if [ "$with_data" = 1 ]; then
+    branch="scratch-data-$(date +%Y-%m-%d)"
+  else
+    branch="scratch-$(date +%Y-%m-%d)"
+  fi
   f="$(env_file "$branch")"
   e="$(empty_file "$branch")"
 
   mkdir -p -m 700 "$SCRATCH_DIR" && chmod 700 "$SCRATCH_DIR" || fail "cannot make $SCRATCH_DIR"
   umask 077
 
-  say "up: creating $branch (schema-only from $MAIN_BRANCH, suspend after 3600 s)"
+  local only=(--schema-only) kind="schema-only"
+  if [ "$with_data" = 1 ]; then only=(); kind="with main's data"; fi
+  say "up: creating $branch ($kind from $MAIN_BRANCH, suspend after 3600 s)"
   out="$(neonctl branches create --project-id "$PROJECT_ID" --name "$branch" --parent "$MAIN_BRANCH" \
-    --schema-only --suspend-timeout=3600 --output json 2>&1)" \
+    ${only[@]+"${only[@]}"} --suspend-timeout=3600 --output json 2>&1)" \
     || { say "$out" | scrub >&2; fail "branch create failed"; }
   bid="$(printf '%s' "$out" | jq -r '.branch.id')"
   out=""
@@ -343,6 +362,7 @@ cmd_up() {
     printf 'SCRATCH_BRANCH=%s\n' "$branch"
     printf 'SCRATCH_BRANCH_ID=%s\n' "$bid"
     printf 'SCRATCH_ENDPOINT_ID=%s\n' "$ep"
+    printf 'SCRATCH_MODE=%s\n' "$([ "$with_data" = 1 ] && echo data || echo schema)"
     printf 'BETTER_AUTH_SECRET=%s\n' "$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9')"
     printf 'SCRATCH_ADMIN_EMAIL=%s\n' "$ADMIN_EMAIL"
     printf 'SCRATCH_ADMIN_PASSWORD=%s\n' "$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9')"
@@ -360,6 +380,10 @@ cmd_up() {
   password_isolation_test "$f" || fail "the scratch password was not refused by main; the branch is left up"
 
   who_am_i "$f" || fail "who am I failed; the branch is left up"
+  if [ "$with_data" = 1 ]; then
+    say "up: done (with main's data; no account or admin made). Next: scratch-db.sh push | run check-unique-index | down"
+    return 0
+  fi
   say "up: expected from the code: init-account makes the one account, bootstrap-admin adds one member and its login"
   clean_exec "$f" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED SCRATCH_ADMIN_PASSWORD -- \
     npx --no-install tsx src/auth/cli.ts init-account --name Scratch 2>&1 | scrub
@@ -369,7 +393,7 @@ cmd_up() {
     --password-env SCRATCH_ADMIN_PASSWORD 2>&1 | scrub
   [ "${PIPESTATUS[0]}" = 0 ] || fail "bootstrap-admin failed; the branch is left up"
   who_am_i "$f" || fail "who am I failed; the branch is left up"
-  say "up: done. Next: scratch-db.sh run check-access | check-auth | check-trash"
+  say "up: done. Next: scratch-db.sh run check-access | check-auth | check-trash (or push)"
 }
 
 # The one settings file there is, or a refusal.
@@ -381,34 +405,66 @@ only_env_file() {
   printf '%s' "$files"
 }
 
-cmd_run() {
-  local check="${1:-}" script f b
-  case "$check" in
-    check-access) script="src/access/check-access.ts" ;;
-    check-auth) script="src/auth/check-auth.ts" ;;
-    check-trash) script="src/pipeline/check-trash.ts" ;;
-    *) refuse "usage: scratch-db.sh run check-access|check-auth|check-trash" ;;
-  esac
+# The part `run` and `push` share: the one settings file, the guard on the host
+# it names, Node as the child will see it, and a who-am-I through the server's own
+# pool. Sets F (the settings file) and MODE (schema or data); exits 2 or 3 on a
+# refusal.
+scratch_ready() {
   command -v neonctl >/dev/null || refuse "neonctl is not installed"
   command -v jq >/dev/null || refuse "jq is not installed"
   select_node
-  f="$(only_env_file)" || exit $?
-  b="$(basename "$f" .env)"
+  F="$(only_env_file)" || exit $?
+  local b
+  b="$(basename "$F" .env)"
   [ -f "$(empty_file "$b")" ] || { : > "$(empty_file "$b")"; chmod 600 "$(empty_file "$b")"; }
+  MODE="$(envval SCRATCH_MODE "$F")"
+  [ -n "$MODE" ] || MODE=schema
 
-  SCRATCH_ENDPOINT_ID="$(envval SCRATCH_ENDPOINT_ID "$f")"
+  SCRATCH_ENDPOINT_ID="$(envval SCRATCH_ENDPOINT_ID "$F")"
   local url host
-  url="$(envval DATABASE_URL "$f")"
+  url="$(envval DATABASE_URL "$F")"
   host="$(host_of "$url")"
   url=""
   guard_host "$host" || exit 3
   # What the child will see, not what the keg says.
   local seen want
   want="$(tr -d '[:space:]' < "$SERVER_DIR/.nvmrc")"
-  seen="$(clean_exec "$f" -- node -v)"
-  say "run: node -v as the check will see it: $seen"
+  seen="$(clean_exec "$F" -- node -v)"
+  say "run: node -v as the child will see it: $seen"
   case "$seen" in v"$want".*) ;; *) refuse "node is $seen, not v$want.x" ;; esac
-  who_am_i "$f" || exit $?
+  who_am_i "$F" || exit $?
+}
+
+# check-access | check-auth | check-trash, or any other check-*.ts under src/,
+# found by its file name. The name is matched against a pattern before it is
+# looked up, and must name exactly one file.
+check_script() {
+  local name="$1" found n
+  case "$name" in
+    check-access) say "src/access/check-access.ts"; return 0 ;;
+    check-auth) say "src/auth/check-auth.ts"; return 0 ;;
+    check-trash) say "src/pipeline/check-trash.ts"; return 0 ;;
+  esac
+  case "$name" in
+    check-[a-z0-9-]*) ;;
+    *) return 1 ;;
+  esac
+  case "$name" in *[!a-z0-9-]*) return 1 ;; esac
+  found="$(cd "$SERVER_DIR" && find src -type f -name "$name.ts" | sort)"
+  n="$(printf '%s' "$found" | grep -c . )"
+  [ "$n" = 1 ] || return 1
+  say "$found"
+}
+
+cmd_run() {
+  local check="${1:-}" script
+  script="$(check_script "$check")" \
+    || refuse "usage: scratch-db.sh run <check>: check-access | check-auth | check-trash, or the file name of one src/**/check-*.ts (got '$check')"
+  scratch_ready
+  if [ "$MODE" = data ]; then
+    # The write checks assume the empty branch their own setup made.
+    [ "$check" = check-unique-index ] || refuse "this scratch branch has main's data; only check-unique-index runs on it"
+  fi
 
   say "run: $check"
   case "$check" in
@@ -422,15 +478,27 @@ cmd_run() {
       [ -n "$v" ] || refuse "VOYAGE_API_KEY is not set in $real_env"
       VOYAGE_VALUE="$v"
       v=""
-      clean_exec "$f" DATABASE_URL VOYAGE_API_KEY -- npx --no-install tsx "$script" 2>&1 | scrub
+      clean_exec "$F" DATABASE_URL VOYAGE_API_KEY -- npx --no-install tsx "$script" 2>&1 | scrub
       exit "${PIPESTATUS[0]}"
       ;;
     *)
-      clean_exec "$f" DATABASE_URL CLIPWISE_CHECK_SCRATCH_DB BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED -- \
+      clean_exec "$F" DATABASE_URL CLIPWISE_CHECK_SCRATCH_DB BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED -- \
         npx --no-install tsx "$script" 2>&1 | scrub
       exit "${PIPESTATUS[0]}"
       ;;
   esac
+}
+
+# drizzle-kit push against the scratch endpoint, and nothing else. stdin is
+# closed, so a prompt (a data-loss warning, a truncate question) cannot be
+# answered: it is the output that says whether one appeared. Progress-spinner
+# frames are dropped from the log; every other line is kept.
+cmd_push() {
+  scratch_ready
+  say "push: drizzle-kit push ($MODE branch)"
+  clean_exec "$F" DATABASE_URL -- npx --no-install drizzle-kit push </dev/null 2>&1 \
+    | scrub | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g' | grep -v 'Pulling schema from database\|Pulling schema' 
+  exit "${PIPESTATUS[0]}"
 }
 
 cmd_down() {
@@ -456,8 +524,9 @@ cmd_down() {
 }
 
 case "${1:-}" in
-  up) cmd_up ;;
+  up) shift; cmd_up "$@" ;;
   run) shift; cmd_run "$@" ;;
+  push) cmd_push ;;
   down) cmd_down ;;
-  *) say "usage: scratch-db.sh up | run <check-access|check-auth|check-trash> | down" >&2; exit 2 ;;
+  *) say "usage: scratch-db.sh up [--with-data] | push | run <check> | down" >&2; exit 2 ;;
 esac
