@@ -155,6 +155,11 @@ export function createAuth(cfg: AuthConfig) {
         accessTokenExpiresIn: cfg.accessTokenSeconds,
         allowDynamicClientRegistration: true,
         allowUnauthenticatedClientRegistration: true,
+        // The provider's default adds client_credentials, a machine-to-machine
+        // grant with no user in it. Nothing here uses it (Claude does not
+        // support it either, claude.com/docs/connectors/building/authentication),
+        // and the access layer needs a member behind every token.
+        grantTypes: ["authorization_code", "refresh_token"],
       }),
     ],
   });
