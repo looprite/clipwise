@@ -12,6 +12,8 @@
 //   npx tsx src/lib/check-safe-error.ts
 
 import Anthropic from "@anthropic-ai/sdk";
+import express from "express";
+import type { AddressInfo } from "node:net";
 import { DrizzleQueryError } from "drizzle-orm/errors";
 import { DatabaseError } from "pg";
 import { inspect } from "node:util";
@@ -36,6 +38,18 @@ function capture(fn: () => void): string {
   console.error = (...args: unknown[]) => lines.push(args.map((a) => (typeof a === "string" ? a : inspect(a))).join(" "));
   try {
     fn();
+  } finally {
+    console.error = original;
+  }
+  return lines.join("\n");
+}
+
+async function captureAsync(fn: () => Promise<void>): Promise<string> {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => lines.push(args.map((a) => (typeof a === "string" ? a : inspect(a))).join(" "));
+  try {
+    await fn();
   } finally {
     console.error = original;
   }
@@ -132,6 +146,40 @@ async function main(): Promise<void> {
     const full = describeError(c.err);
     check(`  describeError (with frames) has no phrase`, !full.includes(PHRASE) && !full.includes(QUOTED), `FULL: ${full.slice(0, 300)}`);
   }
+
+  // A request body the parser cannot use, through the real express.json and the
+  // real errorHandler: the answer is a constant, the phrase is not in it, and
+  // nothing is logged. The control is the old behaviour (a 500 and a log line).
+  const server = await new Promise<import("node:http").Server>((resolve) => {
+    const app = express();
+    app.use(express.json({ limit: "1kb" }));
+    app.post("/", (_req, res) => res.json({ ok: true }));
+    app.use(errorHandler);
+    const srv = app.listen(0, "127.0.0.1", () => resolve(srv));
+  });
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  const post = async (body: string) => {
+    let text = "";
+    let status = 0;
+    const logged = await captureAsync(async () => {
+      const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+      status = res.status;
+      text = await res.text();
+    });
+    return { status, text, logged };
+  };
+  const control = await post(`{"ok": true}`);
+  check("control: a well-formed body reaches the route (200)", control.status === 200, `got ${control.status} ${control.text}`);
+  const badJson = await post(`{"text": "${PHRASE}", oops}`);
+  check("a malformed JSON body answers 400 invalid_json", badJson.status === 400 && badJson.text === `{"error":"invalid_json"}`, `got ${badJson.status} ${badJson.text}`);
+  check("  ...and neither the answer nor the log holds the phrase", !badJson.text.includes(PHRASE) && !badJson.logged.includes(PHRASE) && !badJson.logged.includes(QUOTED), `LOGGED: ${badJson.logged.slice(0, 300)}`);
+  const badStart = await post(`${PHRASE} said this`);
+  check("a malformed body that starts with the phrase answers 400 invalid_json", badStart.status === 400 && badStart.text === `{"error":"invalid_json"}`, `got ${badStart.status} ${badStart.text}`);
+  check("  ...and neither the answer nor the log holds the phrase", !badStart.text.includes(PHRASE) && !badStart.logged.includes(PHRASE) && !badStart.logged.includes(QUOTED), `LOGGED: ${badStart.logged.slice(0, 300)}`);
+  const tooBig = await post(`{"text": "${PHRASE}${"a".repeat(2000)}"}`);
+  check("an oversized body answers 413 payload_too_large", tooBig.status === 413 && tooBig.text === `{"error":"payload_too_large"}`, `got ${tooBig.status} ${tooBig.text}`);
+  check("  ...and neither the answer nor the log holds the phrase", !tooBig.text.includes(PHRASE) && !tooBig.logged.includes(PHRASE), `LOGGED: ${tooBig.logged.slice(0, 300)}`);
+  server.close();
 
   // What callers and checks match on must survive unchanged.
   const notFound = new Error("recording 11111111-2222-3333-4444-555555555555 not found");
