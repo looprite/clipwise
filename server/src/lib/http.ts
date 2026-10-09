@@ -37,6 +37,24 @@ export class HttpError extends Error {
   }
 }
 
+// What body-parser (express.json) raises for a request body it cannot use. They
+// carry a status and a `type`, and their message and `.body` can quote the
+// request, so the answer is a constant per type and the error is not logged.
+const BODY_PARSER_ERRORS: Record<string, { status: number; error: string }> = {
+  "entity.parse.failed": { status: 400, error: "invalid_json" },
+  "entity.too.large": { status: 413, error: "payload_too_large" },
+  "encoding.unsupported": { status: 415, error: "unsupported_encoding" },
+  "charset.unsupported": { status: 415, error: "unsupported_charset" },
+  "request.aborted": { status: 400, error: "request_aborted" },
+  "request.size.invalid": { status: 400, error: "invalid_request" },
+};
+
+function bodyParserError(err: unknown): { status: number; error: string } | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const type = (err as { type?: unknown }).type;
+  return typeof type === "string" && Object.hasOwn(BODY_PARSER_ERRORS, type) ? BODY_PARSER_ERRORS[type] : undefined;
+}
+
 export const errorHandler = (
   err: unknown,
   req: Request,
@@ -49,6 +67,11 @@ export const errorHandler = (
   }
   if (err instanceof HttpError) {
     res.status(err.status).json({ error: err.message, detail: err.detail });
+    return;
+  }
+  const body = bodyParserError(err);
+  if (body) {
+    res.status(body.status).json({ error: body.error });
     return;
   }
   // The route pattern, not the URL: no query string, nothing the caller typed.

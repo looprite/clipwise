@@ -88,13 +88,17 @@ type Reply = { status: number; json: any; headers: Headers; cookie: string };
 async function http(
   method: string,
   path: string,
-  o: { token?: string; json?: unknown; form?: Record<string, string>; cookie?: string; headers?: Record<string, string> } = {},
+  o: { token?: string; json?: unknown; raw?: string; form?: Record<string, string>; cookie?: string; headers?: Record<string, string> } = {},
 ): Promise<Reply> {
   const headers: Record<string, string> = { origin: cfg.baseURL, ...o.headers };
   let body: string | undefined;
   if (o.json !== undefined) {
     headers["content-type"] = "application/json";
     body = JSON.stringify(o.json);
+  }
+  if (o.raw !== undefined) {
+    headers["content-type"] = "application/json";
+    body = o.raw;
   }
   if (o.form) {
     headers["content-type"] = "application/x-www-form-urlencoded";
@@ -476,6 +480,21 @@ async function main(): Promise<void> {
       for (const [label, r] of probes) {
         record(r.status === 404 && r.json?.error === "recording_not_found", `malformed id: ${label} is 404 recording_not_found`, `got ${r.status} ${r.json?.error ?? ""}`);
       }
+    }
+
+    // ---- a body that is not JSON, or too big, is the caller's error -----------
+    // The parser's own errors used to fall through errorHandler as a 500. The
+    // phrase stands for the words of a call: the answer must not repeat it.
+    {
+      const phrase = `PURPLE-ELEPHANT-${tag}`;
+      const badJson = await http("POST", `/accounts/${acc}/recordings`, { token: capToken(A), raw: `{"title": "${phrase}", oops}` });
+      record(
+        badJson.status === 400 && badJson.json?.error === "invalid_json" && !JSON.stringify(badJson.json).includes(phrase),
+        "bad JSON: a capture route answers 400 invalid_json and does not repeat the body",
+        `got ${badJson.status} ${JSON.stringify(badJson.json)}`,
+      );
+      const tooBig = await http("POST", `/accounts/${acc}/recordings`, { token: capToken(A), raw: `{"title": "${"a".repeat(17 * 1024 * 1024)}"}` });
+      record(tooBig.status === 413 && tooBig.json?.error === "payload_too_large", "an oversized body answers 413 payload_too_large", `got ${tooBig.status} ${JSON.stringify(tooBig.json)}`);
     }
 
     // ---- people ------------------------------------------------------------
