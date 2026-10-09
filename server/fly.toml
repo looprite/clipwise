@@ -1,0 +1,68 @@
+# Fly.io configuration for the Clipwise server. Every key below is checked
+# against https://docs.fly.io/reference/configuration.
+#
+# Secrets (DATABASE_URL, BETTER_AUTH_SECRET, VOYAGE_API_KEY, ...) are never in
+# this file: set them with `fly secrets set` (https://docs.fly.io/apps/secrets/).
+# .env.example lists every variable and says which are secret.
+
+# The first key is the app name. Placeholder: set it to the real app's name
+# before the first `fly deploy`.
+app = "REPLACE-WITH-APP-NAME"
+
+# Neon is in AWS us-west-2 (Oregon); sjc is the nearest Fly region.
+primary_region = "sjc"
+
+# The server drains on SIGTERM (src/index.ts, src/server.ts) and exits 0, giving
+# in-flight requests up to DRAIN_CAP_MS = 10 s. kill_timeout is the seconds Fly
+# waits before it force-stops the machine, so it must stay above that cap.
+# (Fly's default signal is SIGINT and its default timeout is 5 s; the maximum
+# is 300 s.)
+kill_signal = "SIGTERM"
+kill_timeout = 15
+
+[build]
+  dockerfile = "Dockerfile"
+  # The Dockerfile's production stage: compiled output, NODE_ENV=production,
+  # non-root user. It has a CMD, which Fly requires of the target stage.
+  build-target = "prod"
+
+# Non-secret settings only; secrets take precedence over these if both are set.
+# MCP_RESOURCE_URL is not set: it defaults to BETTER_AUTH_URL + "/mcp".
+[env]
+  BETTER_AUTH_URL = "https://looprite.clipwiseapp.com"
+  # Fly sets this header to the client's address. Without it every request
+  # behind Fly's proxy shares one sign-in rate-limit bucket (src/auth/mount.ts).
+  AUTH_IP_HEADER = "fly-client-ip"
+  # Decided 2026-10-08 (SAA-227): password sign-in stays on in production, and
+  # only looprite.ai emails may become users. The code reads the string "true"
+  # (src/auth/auth.ts) and lower-cases the domain. The domain is checked when a
+  # login is created, not on each sign-in (src/auth/auth.ts, user.create.before).
+  AUTH_PASSWORD_ENABLED = "true"
+  AUTH_ALLOWED_EMAIL_DOMAIN = "looprite.ai"
+
+[http_service]
+  # The server listens on 3000 (Fly's default would be 8080).
+  internal_port = 3000
+  force_https = true
+
+  # Always on, no scale-to-zero. auto_stop_machines is a string and "off" is
+  # its default; stating it keeps a `fly launch` regeneration from changing it.
+  # min_machines_running only takes effect when auto_stop_machines is "stop" or
+  # "suspend", so with "off" it is documentation of intent, not a control.
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  # Liveness, not readiness: /live never touches the database, so a Neon outage
+  # does not fail the check and restart a healthy server (a restart would not
+  # help), and the check does not keep Neon's compute awake. Must answer 2xx.
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/live"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
