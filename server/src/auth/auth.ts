@@ -177,6 +177,9 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
         scopes: [...MCP_SCOPES, CAPTURE_SCOPE],
         ...(control.omitRegistrationDefaultScopes ? {} : { clientRegistrationDefaultScopes: [...MCP_SCOPES] }),
         advertisedMetadata: { scopes_supported: [...MCP_SCOPES] },
+        // The resources are seeded insert-only: an existing oauthResource row keeps
+        // its allowedScopes when this option changes, so a scope change needs the
+        // row updated too (on every instance), not only this line.
         resources: [{ identifier: cfg.captureResource, allowedScopes: [...CAPTURE_RESOURCE_SCOPES] }],
         accessTokenExpiresIn: cfg.accessTokenSeconds,
         allowDynamicClientRegistration: true,
