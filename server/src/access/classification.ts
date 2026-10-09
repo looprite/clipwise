@@ -16,6 +16,8 @@ export type Access = "public" | "member" | "owner" | "admin";
 export const ROUTES: Record<string, { access: Access; note: string }> = {
   "GET /live": { access: "public", note: "liveness; no database, no data" },
   "GET /health": { access: "public", note: "status only; no data" },
+  "GET /favicon.svg": { access: "public", note: "the Clipwise tab icon, a static image; no data" },
+  "GET /favicon.ico": { access: "public", note: "the same icon at the address browsers request on their own; no data" },
   "ALL /api/auth/*": {
     access: "public",
     note: "Better Auth: sign-in, OAuth and token endpoints, with their own checks and rate limits",

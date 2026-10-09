@@ -1,0 +1,15 @@
+// The Clipwise mark, as the server serves it: the tab icon at /favicon.svg and
+// /favicon.ico (app.ts), and the logo drawn inline on the sign-in and consent
+// pages (auth/pages.ts, which strips the xmlns). It is a copy of favicon.svg at
+// the repo root, which the landing page uses, because the production image holds
+// only the compiled server, not the repo; check-brand.ts fails if the two differ.
+
+export const FAVICON_SVG = `<svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="40" height="40" rx="9" fill="#F4620A"/>
+  <rect x="10" y="19" width="3.5" height="10" rx="1.75" fill="white" opacity="0.6"/>
+  <rect x="15.5" y="14" width="3.5" height="15" rx="1.75" fill="white" opacity="0.8"/>
+  <rect x="21" y="10" width="3.5" height="20" rx="1.75" fill="white"/>
+  <rect x="26.5" y="15" width="3.5" height="13" rx="1.75" fill="white" opacity="0.7"/>
+  <circle cx="34" cy="9" r="4" fill="#F5C842"/>
+</svg>
+`;

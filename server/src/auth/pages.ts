@@ -1,7 +1,8 @@
 // The two pages Better Auth sends a person to while Claude is connecting:
 // /login (prove who you are) and /consent (agree to let this client in). Plain
-// HTML and a little script — no framework, and nothing loaded from anywhere:
-// the logo is inline SVG and the font stack names Inter first, so it is used if
+// HTML and a little script — no framework, and nothing loaded from another
+// origin: the logo is inline SVG, the tab icon is /favicon.svg from this server
+// (the CSP's img-src 'self'), and the font stack names Inter first, so it is used if
 // the visitor has it installed and the system font is used if not (the landing
 // page loads Inter from Google Fonts; these pages must not, and the CSP below
 // would block it anyway). The look follows the landing page, index.html.
@@ -25,6 +26,7 @@
 
 import { randomBytes } from "node:crypto";
 import type { RequestHandler, Response } from "express";
+import { FAVICON_SVG } from "../lib/brand.js";
 import { authConfigFromEnv } from "./auth.js";
 
 function send(res: Response, body: (nonce: string) => string): void {
@@ -35,7 +37,8 @@ function send(res: Response, body: (nonce: string) => string): void {
     .set({
       "Content-Security-Policy":
         `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; ` +
-        "connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+        // img-src is what governs the tab icon (<link rel="icon">); same origin only.
+        "img-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff",
@@ -74,17 +77,11 @@ const STYLE = `
   .host { font-weight: 700; overflow-wrap: anywhere; }
 `;
 
-// The Clipwise mark, inline (the same shapes as favicon.svg and the landing
-// page). No xmlns: inline SVG in HTML does not need it, and leaving it out
-// keeps every "http" in these pages a real address or none at all.
-const LOGO = `<svg viewBox="0 0 40 40" fill="none" aria-hidden="true">
-<rect width="40" height="40" rx="9" fill="#F4620A"/>
-<rect x="10" y="19" width="3.5" height="10" rx="1.75" fill="white" opacity="0.6"/>
-<rect x="15.5" y="14" width="3.5" height="15" rx="1.75" fill="white" opacity="0.8"/>
-<rect x="21" y="10" width="3.5" height="20" rx="1.75" fill="white"/>
-<rect x="26.5" y="15" width="3.5" height="13" rx="1.75" fill="white" opacity="0.7"/>
-<circle cx="34" cy="9" r="4" fill="#F5C842"/>
-</svg>`;
+// The Clipwise mark, inline: the same shapes as the tab icon (lib/brand.ts), with
+// no xmlns (inline SVG in HTML does not need it, and leaving it out keeps every
+// "http" in these pages a real address or none at all) and hidden from screen
+// readers, since the wordmark beside it says the name.
+const LOGO = FAVICON_SVG.replace(' xmlns="http://www.w3.org/2000/svg"', ' aria-hidden="true"').trim();
 
 function shell(nonce: string, title: string, inner: string, script: string): string {
   return `<!doctype html>
@@ -94,6 +91,7 @@ function shell(nonce: string, title: string, inner: string, script: string): str
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${title}</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style nonce="${nonce}">${STYLE}</style>
 </head>
 <body>

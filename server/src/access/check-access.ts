@@ -214,6 +214,24 @@ async function main(): Promise<void> {
     const callback = await http("GET", "/oauth/google/callback");
     record(health.status === 200 && authOk.status === 200 && callback.status === 400, "the public routes answer without a token (health 200, auth 200, callback 400 without a state)", `${health.status}/${authOk.status}/${callback.status}`);
 
+    // The tab icon: public, static, and it must not set a cookie or carry any data.
+    for (const path of ["/favicon.svg", "/favicon.ico"]) {
+      const res = await fetch(base + path, { redirect: "manual" });
+      const text = await res.text();
+      record(
+        res.status === 200 &&
+          (res.headers.get("content-type") ?? "").startsWith("image/svg+xml") &&
+          text.startsWith("<svg") &&
+          res.headers.get("set-cookie") === null &&
+          res.headers.get("x-content-type-options") === "nosniff" &&
+          (res.headers.get("content-security-policy") ?? "") === "default-src 'none'",
+        `${path} is public, answers an SVG with no cookie and a locked-down CSP`,
+        `${res.status} ${res.headers.get("content-type")} set-cookie=${res.headers.get("set-cookie")} csp=${res.headers.get("content-security-policy")}`,
+      );
+    }
+    const iconLoginHtml = await (await fetch(base + "/login")).text();
+    record(iconLoginHtml.includes('<link rel="icon" type="image/svg+xml" href="/favicon.svg">'), "/login names the tab icon");
+
     // ---- 3. users, fixtures ------------------------------------------------
     const A = await makeUser("alice", "member");
     const B = await makeUser("bob", "member");
