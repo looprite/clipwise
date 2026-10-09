@@ -12,7 +12,7 @@ FROM base AS deps
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 
-# ---- dev: run tsx watch; source is bind-mounted by compose ----
+# ---- dev: run tsx watch (bind-mount src to reload on edit) ----
 FROM deps AS dev
 COPY tsconfig.json ./
 COPY src ./src
