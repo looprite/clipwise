@@ -1,6 +1,10 @@
 // The two pages Better Auth sends a person to while Claude is connecting:
 // /login (prove who you are) and /consent (agree to let this client in). Plain
-// HTML and a little script — no framework, no assets.
+// HTML and a little script — no framework, and nothing loaded from anywhere:
+// the logo is inline SVG and the font stack names Inter first, so it is used if
+// the visitor has it installed and the system font is used if not (the landing
+// page loads Inter from Google Fonts; these pages must not, and the CSP below
+// would block it anyway). The look follows the landing page, index.html.
 //
 // Both arrive with the OAuth request in the query string (client, redirect,
 // scopes, and a signature Better Auth checks), and both hand that string
@@ -40,26 +44,47 @@ function send(res: Response, body: (nonce: string) => string): void {
     .send(body(nonce));
 }
 
+// The palette is the landing page's (index.html :root); --muted is a step
+// lighter than its #6B6B6B because these pages carry small body text, which
+// that grey does not keep readable on the near-black.
 const STYLE = `
-  :root { color-scheme: light dark; --bg: #f6f6f4; --card: #fff; --fg: #1b1b1a; --muted: #6a6a66; --line: #d9d9d4; --accent: #1f5f4a; --accent-fg: #fff; --err: #a3262a; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #141413; --card: #1d1d1b; --fg: #ecece8; --muted: #9a9a94; --line: #34342f; --accent: #5fb394; --accent-fg: #10231c; --err: #ff8d8f; } }
+  :root { color-scheme: dark; --bg: #0D0D0D; --surface: #151515; --orange: #F4620A; --yellow: #F5C842; --white: #F5F0EB; --muted: #8F8F8F; --border: #222222; --err: #ff8d8f; }
   * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { width: 100%; max-width: 400px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 28px 24px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--white); font: 16px/1.5 'Inter', system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+  .wrap { width: 100%; max-width: 400px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin: 0 0 20px 4px; }
+  .brand svg { width: 32px; height: 32px; flex-shrink: 0; }
+  .brand span { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
+  main { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px 24px; }
+  h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 4px; }
   p { margin: 8px 0; }
   .muted { color: var(--muted); font-size: 14px; }
   label { display: block; font-size: 14px; margin: 16px 0 4px; }
-  input { width: 100%; padding: 10px 12px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 8px; }
-  input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  input { width: 100%; padding: 12px 14px; font: inherit; color: var(--white); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; transition: border-color .15s; }
+  input:focus { border-color: var(--orange); }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
   .row { display: flex; gap: 10px; margin-top: 22px; }
-  button { flex: 1; padding: 11px 14px; font: inherit; font-weight: 600; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
-  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  button { flex: 1; padding: 12px 16px; font: inherit; font-weight: 600; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--white); cursor: pointer; transition: opacity .15s; }
+  button:hover { opacity: .85; }
+  button.primary { background: var(--orange); color: var(--bg); border-color: var(--orange); }
   button[disabled] { opacity: .6; cursor: default; }
   #msg { min-height: 1.4em; margin-top: 14px; font-size: 14px; color: var(--err); }
   ul { padding-left: 20px; margin: 8px 0; }
+  li::marker { color: var(--orange); }
   .host { font-weight: 700; overflow-wrap: anywhere; }
 `;
+
+// The Clipwise mark, inline (the same shapes as favicon.svg and the landing
+// page). No xmlns: inline SVG in HTML does not need it, and leaving it out
+// keeps every "http" in these pages a real address or none at all.
+const LOGO = `<svg viewBox="0 0 40 40" fill="none" aria-hidden="true">
+<rect width="40" height="40" rx="9" fill="#F4620A"/>
+<rect x="10" y="19" width="3.5" height="10" rx="1.75" fill="white" opacity="0.6"/>
+<rect x="15.5" y="14" width="3.5" height="15" rx="1.75" fill="white" opacity="0.8"/>
+<rect x="21" y="10" width="3.5" height="20" rx="1.75" fill="white"/>
+<rect x="26.5" y="15" width="3.5" height="13" rx="1.75" fill="white" opacity="0.7"/>
+<circle cx="34" cy="9" r="4" fill="#F5C842"/>
+</svg>`;
 
 function shell(nonce: string, title: string, inner: string, script: string): string {
   return `<!doctype html>
@@ -72,9 +97,12 @@ function shell(nonce: string, title: string, inner: string, script: string): str
 <style nonce="${nonce}">${STYLE}</style>
 </head>
 <body>
+<div class="wrap">
+<header class="brand">${LOGO}<span>Clipwise</span></header>
 <main>
 ${inner}
 </main>
+</div>
 <script nonce="${nonce}">${script}</script>
 </body>
 </html>`;
