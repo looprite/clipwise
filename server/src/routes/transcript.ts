@@ -4,7 +4,7 @@ import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { recordingOwnedBy } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
-import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
+import { asyncHandler, HttpError, parseBody, uuidParam } from "../lib/http.js";
 import { getTranscriptFor } from "../services/transcript.js";
 
 const speakerInputSchema = z.object({
@@ -70,6 +70,7 @@ function countObservedFidelity(
 }
 
 export const transcriptRouter = Router();
+transcriptRouter.param("id", uuidParam("recording_not_found"));
 
 transcriptRouter.get(
   "/recordings/:id/transcript",
