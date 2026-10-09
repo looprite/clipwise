@@ -18,6 +18,7 @@ import { requireAdmin, requireMember, sameAccountOnly } from "./access/authentic
 import { authorizationServerMetadata, protectedResourceMetadata } from "./auth/discovery.js";
 import { consentPage, loginPage } from "./auth/pages.js";
 import { db } from "./db/index.js";
+import { FAVICON_SVG } from "./lib/brand.js";
 import { errorHandler } from "./lib/http.js";
 import { logError } from "./lib/safe-error.js";
 import { mcpMethodNotAllowed, mcpPost } from "./mcp/server.js";
@@ -74,6 +75,25 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   app.get("/.well-known/oauth-authorization-server/api/auth", authorizationServerMetadata);
   app.get("/login", loginPage);
   app.get("/consent", consentPage);
+
+  // The tab icon for those pages. Served from here because their CSP allows
+  // images from this origin only. /favicon.ico is the address a browser asks for
+  // on its own, whatever the page says, so it answers with the same SVG. Public,
+  // static, no data. The response carries its own CSP so that opening the file
+  // directly cannot run anything.
+  const favicon: RequestHandler = (_req, res) => {
+    res
+      .status(200)
+      .type("image/svg+xml")
+      .set({
+        "Cache-Control": "public, max-age=86400",
+        "Content-Security-Policy": "default-src 'none'",
+        "X-Content-Type-Options": "nosniff",
+      })
+      .send(FAVICON_SVG);
+  };
+  app.get("/favicon.svg", favicon);
+  app.get("/favicon.ico", favicon);
 
   // The MCP endpoint. Stateless Streamable HTTP, so POST only; GET and DELETE
   // are refused after authentication. A missing, bad or revoked login is a 401
