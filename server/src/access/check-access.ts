@@ -460,6 +460,24 @@ async function main(): Promise<void> {
     record((await addMoment(B, "a2")).status === 404 && (await addMoment(A, "a2")).status === 201, "moments: only the owner can add one");
     record((await http("POST", `/recordings/${rec.a2.id}/transcript`, { token: capToken(B), json: {} })).status === 404, "transcript: only the owner can add one");
 
+    // ---- a malformed id is "not found", not a server error ------------------
+    // Postgres rejects a non-UUID compared with a uuid column (22P02), which used
+    // to reach the error handler as a 500. The answer is the same 404 as for a
+    // recording that is not there.
+    {
+      const bad = "not-a-uuid";
+      const probes: Array<[string, Reply]> = [
+        ["GET /recordings/:id/transcript", await http("GET", `/recordings/${bad}/transcript`, { token: A.token })],
+        ["POST /recordings/:id/transcript", await http("POST", `/recordings/${bad}/transcript`, { token: capToken(A), json: {} })],
+        ["GET /accounts/:accountId/recordings/:id", await http("GET", `/accounts/${acc}/recordings/${bad}`, { token: A.token })],
+        ["GET /accounts/:accountId/recordings/:id/attendees", await http("GET", `/accounts/${acc}/recordings/${bad}/attendees`, { token: A.token })],
+        ["POST /accounts/:accountId/recordings/:id/attendees", await http("POST", `/accounts/${acc}/recordings/${bad}/attendees`, { token: capToken(A), json: { name: "x" } })],
+      ];
+      for (const [label, r] of probes) {
+        record(r.status === 404 && r.json?.error === "recording_not_found", `malformed id: ${label} is 404 recording_not_found`, `got ${r.status} ${r.json?.error ?? ""}`);
+      }
+    }
+
     // ---- people ------------------------------------------------------------
     const peopleB = await http("GET", `/accounts/${acc}/people`, { token: B.token });
     const emailsB = (peopleB.json?.people ?? []).map((p: any) => p.email);

@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response, RequestHandler } from "express";
-import { ZodError, type ZodSchema } from "zod";
+import { z, ZodError, type ZodSchema } from "zod";
 import { logError } from "./safe-error.js";
 
 export const asyncHandler =
@@ -7,6 +7,17 @@ export const asyncHandler =
   (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
+
+// For `router.param("id", ...)`: an id that is not a UUID cannot name a row, and
+// handing it to Postgres compared with a uuid column is a 22P02 error, which
+// used to reach errorHandler as a 500. It is the same 404 as for an id that
+// names nothing, so the answer does not say which.
+const UUID = z.string().uuid();
+export function uuidParam(notFound: string): (req: Request, res: Response, next: NextFunction, value: string) => void {
+  return (_req, _res, next, value) => {
+    next(UUID.safeParse(value).success ? undefined : new HttpError(404, notFound));
+  };
+}
 
 export function parseBody<T>(schema: ZodSchema<T>, req: Request): T {
   return schema.parse(req.body);

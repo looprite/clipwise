@@ -5,7 +5,7 @@ import { accessOf } from "../access/authenticate.js";
 import type { AccessContext } from "../access/context.js";
 import { recordingOwnedBy, recordingVisibleTo } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
-import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
+import { asyncHandler, HttpError, parseBody, uuidParam } from "../lib/http.js";
 import { slugify, slugWithSuffix } from "../lib/slug.js";
 
 const createRecordingSchema = z.object({
@@ -34,6 +34,7 @@ const createAttendeeSchema = z.object({
 });
 
 export const recordingsRouter = Router({ mergeParams: true });
+recordingsRouter.param("id", uuidParam("recording_not_found"));
 
 // "Not found" covers a recording that is trashed (SAA-154), that does not
 // exist, and that the caller may not see — the same answer for all three.
