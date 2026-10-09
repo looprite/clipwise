@@ -166,7 +166,7 @@ async function main(): Promise<void> {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    req.access = { accountId: acc, memberId: member.id, role: "admin", authUserId: "check-trash", email: member.email };
+    req.access = { accountId: acc, memberId: member.id, role: "admin", authUserId: "check-trash", email: member.email, scope: [] };
     next();
   });
   app.use("/accounts/:accountId/recordings", recordingsRouter);

@@ -7,6 +7,11 @@
 //   tsx src/auth/cli.ts add-member --email <email> [--role member|admin] [--name <name>]
 //   tsx src/auth/cli.ts remove-member --email <email>
 //   tsx src/auth/cli.ts list-members
+//   tsx src/auth/cli.ts register-recorder
+//
+// register-recorder creates (or repairs) the recorder's OAuth client, the only
+// client that can obtain a capture token (SAA-244). It is a step for every
+// instance, after the server has started once (so the capture resource exists).
 //
 // A password is only ever read from the environment variable named by
 // --password-env, never from argv (which lands in shell history and `ps`).
@@ -29,6 +34,7 @@ import {
   requireEmail,
   type Role,
 } from "./members.js";
+import { ensureRecorderClient } from "./recorder-client.js";
 
 const say = (s: string) => process.stdout.write(`auth: ${s}\n`);
 
@@ -144,9 +150,17 @@ async function main(): Promise<void> {
     }
     case "list-members":
       return listMembers();
+    case "register-recorder": {
+      const r = await ensureRecorderClient();
+      say(`recorder client ${r.created ? "created" : "already existed; set back to its definition"}`);
+      process.stdout.write(
+        `  client_id  ${r.clientId}\n  redirect   ${r.redirectUri} (any port)\n  resource   ${r.resource}\n  scopes     ${r.scopes.join(" ")}\n`,
+      );
+      return;
+    }
     default:
       throw new Refusal(
-        "usage: init-account | bootstrap-admin | add-member | remove-member | list-members (see the header of src/auth/cli.ts)",
+        "usage: init-account | bootstrap-admin | add-member | remove-member | list-members | register-recorder (see the header of src/auth/cli.ts)",
       );
   }
 }

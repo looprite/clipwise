@@ -9,10 +9,14 @@
 // resource, <iss>/oauth2/userinfo]; exp - iat = AUTH_ACCESS_TOKEN_SECONDS.
 //
 // Checked here: signature, issuer, expiry, and audience. The audience must
-// include this instance's MCP resource, and may include nothing else except
-// the issuer's own userinfo endpoint (which Better Auth adds whenever the
-// openid scope is granted). A token that names any other audience was issued
-// for a different resource and is refused (GHSA-p2fr: audience confusion).
+// include the resource the caller says it is protecting ("mcp": this instance's
+// MCP resource; "capture": its capture resource, SAA-244), and may include
+// nothing else except the issuer's own userinfo endpoint (which Better Auth
+// adds whenever the openid scope is granted). A token that names any other
+// audience was issued for a different resource and is refused (GHSA-p2fr:
+// audience confusion) — so a capture token is refused where an MCP token is
+// expected, and the other way round. A capture token must also carry the
+// capture scope.
 //
 // A valid token is necessary, not sufficient: access/authenticate.ts then
 // requires an active member row on every request, so removing a member ends
@@ -27,6 +31,7 @@ import {
   type JWTVerifyOptions,
 } from "jose";
 import { authConfigFromEnv, getAuth } from "./auth.js";
+import { CAPTURE_SCOPE, type ExpectedResource } from "./scopes.js";
 
 export type VerifiedToken = { sub: string; scope: string[]; clientId: string | null };
 
@@ -44,7 +49,8 @@ async function keyset(force: boolean): Promise<ReturnType<typeof createLocalJWKS
 // itself and a config it chose, so no database or running server is needed.
 export async function verifyAccessToken(
   token: string,
-  inject: { keys?: JWTVerifyGetKey; config?: { baseURL: string; mcpResource: string } } = {},
+  expected: ExpectedResource,
+  inject: { keys?: JWTVerifyGetKey; config?: { baseURL: string; mcpResource: string; captureResource: string } } = {},
 ): Promise<VerifiedToken | null> {
   const cfg = inject.config ?? authConfigFromEnv();
   const issuer = `${cfg.baseURL}/api/auth`;
@@ -65,12 +71,15 @@ export async function verifyAccessToken(
     const { payload } = result;
     const audiences = Array.isArray(payload.aud) ? payload.aud : payload.aud ? [payload.aud] : [];
     const allowedExtra = `${issuer}/oauth2/userinfo`;
-    if (!audiences.includes(cfg.mcpResource)) return null;
-    if (audiences.some((a) => a !== cfg.mcpResource && a !== allowedExtra)) return null;
+    const resource = expected === "capture" ? cfg.captureResource : cfg.mcpResource;
+    if (!audiences.includes(resource)) return null;
+    if (audiences.some((a) => a !== resource && a !== allowedExtra)) return null;
     if (typeof payload.sub !== "string" || payload.sub === "") return null;
+    const scope = typeof payload.scope === "string" ? payload.scope.split(" ").filter(Boolean) : [];
+    if (expected === "capture" && !scope.includes(CAPTURE_SCOPE)) return null;
     return {
       sub: payload.sub,
-      scope: typeof payload.scope === "string" ? payload.scope.split(" ").filter(Boolean) : [],
+      scope,
       clientId: typeof payload.client_id === "string" ? payload.client_id : null,
     };
   } catch {
