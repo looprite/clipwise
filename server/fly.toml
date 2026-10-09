@@ -5,9 +5,8 @@
 # this file: set them with `fly secrets set` (https://docs.fly.io/apps/secrets/).
 # .env.example lists every variable and says which are secret.
 
-# The first key is the app name. Placeholder: set it to the real app's name
-# before the first `fly deploy`.
-app = "REPLACE-WITH-APP-NAME"
+# The first key is the app name (https://<app>.fly.dev is its default hostname).
+app = "clipwise-looprite"
 
 # Neon is in AWS us-west-2 (Oregon); sjc is the nearest Fly region.
 primary_region = "sjc"
