@@ -18,7 +18,7 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
 import { runCollapse, type CollapseInput, type CollapseResult } from "./collapse.js";
-import { embedMomentsByIds } from "./embeddings.js";
+import { embedMomentsByIds, type Embedder } from "./embeddings.js";
 import { isApiPushback, runBoundedPool } from "./pass2-pool.js";
 
 // Pass 2's per-topic calls in flight at once (SAA-239). The first call runs
@@ -498,6 +498,16 @@ export type ExtractionResult = {
   elapsedMs: number;
 };
 
+// Thrown when a job's lease is gone at the moment a run would be promoted, or
+// when its run id cannot be recorded: the run is not promoted and the caller
+// stands down (jobs/worker.ts). Not a failure of the work.
+export class LeaseLostError extends Error {
+  constructor() {
+    super("the job's lease was lost");
+    this.name = "LeaseLostError";
+  }
+}
+
 // The status a recording carries once a run has been promoted onto it. The
 // promotion below is the only thing that writes it on the capture path, and
 // both the recovery loop and the double-extract guard (SAA-136) read it to
@@ -549,11 +559,21 @@ export async function readExtractionCompletion(
 // ended_at — and two copies of this expression would be two things to keep in
 // step. Yields NULL when there is no capture block (Fathom imports) or no
 // tracks, which both consumers coalesce away.
+//
+// POST /captures validates capture.tracks against the schema in captures.ts
+// before storing it. This still reads it defensively, as a backstop for rows
+// stored before that validation existed: anything that is not an array of
+// objects with a numeric duration_s is ignored rather than raising, because an
+// error here fails the promotion, and a capture that can never be promoted
+// would fail its job three times and stay pending for good.
 export const CAPTURE_DURATION_SEC = sql`(
   SELECT max((t->>'duration_s')::double precision)
   FROM jsonb_array_elements(
-    coalesce(${schema.recordings.metadata}->'capture'->'tracks', '[]'::jsonb)
+    CASE WHEN jsonb_typeof(${schema.recordings.metadata}->'capture'->'tracks') = 'array'
+         THEN ${schema.recordings.metadata}->'capture'->'tracks'
+         ELSE '[]'::jsonb END
   ) AS t
+  WHERE jsonb_typeof(t->'duration_s') = 'number'
 )`;
 
 // Promote a recording to `current_extraction_run`. The search gate
@@ -582,8 +602,44 @@ export const CAPTURE_DURATION_SEC = sql`(
 // and saying so again is correct. duration_sec and ended_at do coalesce,
 // because a value already measured should not be replaced by a null when the
 // source metadata is absent.
-async function promoteRecording(recordingId: string, runUuid: string, builtOnFingerprint: string): Promise<void> {
-  await db
+//
+// With a lease guard (the jobs worker) the promotion is fenced: in one
+// transaction the job's row is locked FOR UPDATE and must still hold this lease
+// token in state running, and only then is the recording updated. A job whose
+// lease was taken away cannot promote, and nobody can take it away between the
+// check and the write, because the lock is held until the commit.
+async function promoteRecording(
+  recordingId: string,
+  runUuid: string,
+  builtOnFingerprint: string,
+  guard?: { jobId: string; leaseToken: string },
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    if (guard) {
+      const held = await tx
+        .select({ id: schema.jobs.id })
+        .from(schema.jobs)
+        .where(and(eq(schema.jobs.id, guard.jobId), eq(schema.jobs.leaseToken, guard.leaseToken), eq(schema.jobs.state, "running")))
+        .for("update");
+      if (held.length === 0) throw new LeaseLostError();
+    }
+    await promoteStatement(tx, recordingId, runUuid, builtOnFingerprint);
+  });
+  console.log(
+    `extract: promoted current_extraction_run = ${runUuid} on recording ${recordingId}`,
+  );
+  console.log(
+    `extract: marked recording ${recordingId} status=ready (ended_at and duration_sec from capture manifest)`,
+  );
+}
+
+async function promoteStatement(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  recordingId: string,
+  runUuid: string,
+  builtOnFingerprint: string,
+): Promise<void> {
+  await tx
     .update(schema.recordings)
     .set({
       // Terminal status. "ready" matches the vocabulary transcripts already
@@ -614,12 +670,6 @@ async function promoteRecording(recordingId: string, runUuid: string, builtOnFin
       metadata: sql`coalesce(${schema.recordings.metadata}, '{}'::jsonb) || jsonb_build_object('current_extraction_run', ${runUuid}::text, 'extraction_speaker_fingerprint', ${hashOf(builtOnFingerprint)}::text)`,
     })
     .where(eq(schema.recordings.id, recordingId));
-  console.log(
-    `extract: promoted current_extraction_run = ${runUuid} on recording ${recordingId}`,
-  );
-  console.log(
-    `extract: marked recording ${recordingId} status=ready (ended_at and duration_sec from capture manifest)`,
-  );
 }
 
 export async function runExtraction(
@@ -638,6 +688,17 @@ export async function runExtraction(
     // The jobs worker passes one whose fetch it can abort, and the checks pass
     // one whose fetch is a stub.
     client?: Anthropic;
+    // Aborts the run: checked before the promotion, and handed to the embedding
+    // calls. The Anthropic calls are aborted by the client's own fetch.
+    signal?: AbortSignal;
+    // What embeds the run's moments; absent, Voyage.
+    embedder?: Embedder;
+    // Called with the run's id as soon as it is chosen, before any row of the run
+    // exists, so whoever started the run can find its rows if it is killed. May
+    // throw (LeaseLostError) to stop the run before it writes anything.
+    onRunStart?: (runUuid: string) => Promise<void>;
+    // Fences the promotion (see promoteRecording).
+    leaseGuard?: { jobId: string; leaseToken: string };
   } = {},
 ): Promise<ExtractionResult> {
   const applyCollapseStep = options.applyCollapse ?? true;
@@ -657,7 +718,7 @@ export async function runExtraction(
     // normal path promotes with below, so completion means the same thing
     // on both paths as far as recover.ts's isComplete() is concerned.
     const runUuid = randomUUID();
-    await promoteRecording(recordingId, runUuid, await loadSpeakerFingerprint(recordingId));
+    await promoteRecording(recordingId, runUuid, await loadSpeakerFingerprint(recordingId), options.leaseGuard);
     console.log(
       `extract: recording ${recordingId} has zero segments — nothing to extract, promoted with 0 moments`,
     );
@@ -693,6 +754,7 @@ export async function runExtraction(
   const speakerFingerprintAtStart = await loadSpeakerFingerprint(recordingId);
   const rendered = renderTranscript(segs);
   const runUuid = randomUUID();
+  await options.onRunStart?.(runUuid);
 
   console.log(`extract: recording ${recordingId} — ${segs.length} segments`);
   console.log(`extract: run uuid ${runUuid}`);
@@ -889,7 +951,7 @@ export async function runExtraction(
   const idsToEmbed = applyCollapseStep
     ? [...collapse.keptIndices].map((i) => buffered[i].id)
     : buffered.map((b) => b.id);
-  const embedResult = await embedMomentsByIds(idsToEmbed);
+  const embedResult = await embedMomentsByIds(idsToEmbed, { embedder: options.embedder, signal: options.signal });
   console.log(
     `extract: embeddings — ${embedResult.embedded} embedded, ${embedResult.failed} failed (retry via sweep), ${embedResult.skipped} skipped (empty title+summary)`,
   );
@@ -924,7 +986,8 @@ export async function runExtraction(
   // whatever run was previously current, and the failed run's rows remain
   // queryable outside the gate for inspection but do not become visible. See
   // promoteRecording's own comment for what the statement itself does.
-  await promoteRecording(recordingId, runUuid, speakerFingerprintAtStart);
+  options.signal?.throwIfAborted();
+  await promoteRecording(recordingId, runUuid, speakerFingerprintAtStart, options.leaseGuard);
 
   return {
     runUuid,

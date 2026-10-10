@@ -22,21 +22,23 @@
 // quiet room on this machine), so a mic at exactly zero is denied or broken,
 // never merely quiet.
 
-export type Band = "zero" | "floor" | "live";
+// The values of these, as arrays: POST /captures (routes/captures.ts) builds its
+// schema for classification.tracks from them, so the route and the classifier
+// cannot disagree about what a report may hold.
+export const BANDS = ["zero", "floor", "live"] as const;
+export type Band = (typeof BANDS)[number];
 
-export type TrackVerdict =
-  | "live"
-  | "gap"
-  | "dead_denied"
-  | "dead_unexplained"
-  | "no_signal"
-  | "indeterminate";
+export const TRACK_VERDICTS = ["live", "gap", "dead_denied", "dead_unexplained", "no_signal", "indeterminate"] as const;
+export type TrackVerdict = (typeof TRACK_VERDICTS)[number];
+
+export const TRACK_NAMES = ["tap", "mic"] as const;
+export const TRACK_LABELS = ["them", "me"] as const;
 
 export type Span = { start_s: number; end_s: number; duration_s: number };
 
 export type TrackReport = {
-  track: "tap" | "mic";
-  label: "them" | "me";
+  track: (typeof TRACK_NAMES)[number];
+  label: (typeof TRACK_LABELS)[number];
   band: Band;
   verdict: TrackVerdict;
   permission: string;

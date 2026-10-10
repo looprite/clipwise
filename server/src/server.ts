@@ -8,10 +8,10 @@ import { logError } from "./lib/safe-error.js";
 // it on SIGTERM/SIGINT).
 //
 // Shutdown: stop accepting connections, let requests already in flight finish,
-// close the database pool, exit 0. The server holds no jobs (extraction runs on
-// the Mac), so nothing is lost or repeated by stopping. The cap must stay below
-// kill_timeout in fly.toml, which is when the host sends SIGKILL; past the cap
-// we exit 1 rather than hang.
+// close the database pool, exit 0. The cap must stay below kill_timeout in
+// fly.toml, which is when the host sends SIGKILL; past the cap we exit 1 rather
+// than hang. (The jobs worker runs in this process; stopping it is wired in
+// where the shutdown is.)
 const DRAIN_CAP_MS = 10_000;
 
 function exitAfterPoolClose(): void {
@@ -63,9 +63,17 @@ export async function startServer(): Promise<(signal: string) => void> {
     console.log(`Clipwise server listening on port ${port}`);
     import("./app.js")
       .then(({ buildApp }) => buildApp())
-      .then(({ app }) => {
+      .then(async ({ app }) => {
         gate.ready(app);
         console.log("Clipwise app ready");
+        // The worker pulls in extraction, the Anthropic SDK and the database, so it
+        // is imported here, after the app is ready, and not at the top of this file
+        // where it would be loaded before listen(). Once, not awaited: start()
+        // picks up whatever a previous process left unfinished.
+        const [{ JobWorker }, { registerWorker }] = await Promise.all([import("./jobs/worker.js"), import("./jobs/registry.js")]);
+        const worker = new JobWorker();
+        registerWorker(worker);
+        void worker.start();
       })
       .catch((err: unknown) => {
         logError("startup: building the app failed", err);

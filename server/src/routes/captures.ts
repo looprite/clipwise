@@ -45,6 +45,7 @@ import {
 import { countObservedFidelity, sourceFidelitySchema } from "../lib/fidelity.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
 import { slugify } from "../lib/slug.js";
+import { BANDS, TRACK_LABELS, TRACK_NAMES, TRACK_VERDICTS } from "../pipeline/classify-capture.js";
 import { enqueueJob, enqueueReextractForLateNames } from "../jobs/enqueue.js";
 import { wakeWorker } from "../jobs/registry.js";
 
@@ -72,6 +73,54 @@ const identitySchema = z.object({
   scope: z.enum(["work", "personal"]).nullable().optional(),
 });
 
+// capture.tracks is the capture manifest's `tracks`, as the recorder writes it:
+// recorder/app/main.js buildManifest (:466-502) makes the array of two, one per
+// track, and the stop-time readbacks add to each: finalizeMicFormat (:566-583,
+// frames, data_bytes and duration_s from the finished WAV) and the tap's
+// (:640-654, duration_s is null when the length could not be worked out). The
+// fields below are the ones always there at the start (the first six) and the ones
+// the server reads or that are numbers by construction; everything else the
+// recorder adds is kept as sent. The promotion reads duration_s (extract.ts
+// CAPTURE_DURATION_SEC), so a value that is not a number is refused here and
+// never stored.
+const manifestTrackSchema = z
+  .object({
+    track: z.enum(["system", "mic"]),
+    file: z.string().max(512),
+    encoding: z.string().max(32),
+    container: z.string().max(32),
+    sample_rate: z.number(),
+    sample_rate_source: z.string().max(64),
+    channels: z.number().int().optional(),
+    device_name: z.string().max(512).nullable().optional(),
+    device_uid: z.string().max(512).nullable().optional(),
+    frames: z.number().int().nonnegative().nullable().optional(),
+    data_bytes: z.number().int().nonnegative().nullable().optional(),
+    duration_s: z.number().nonnegative().nullable().optional(),
+  })
+  .passthrough();
+const manifestTracksSchema = z.array(manifestTrackSchema).max(8);
+
+// classification.tracks is pipeline/classify-capture.ts's CaptureClassification
+// .tracks: one TrackReport per input track, keyed tap and mic. deniedTrack below
+// reads tap.verdict and mic.verdict.
+const trackReportSchema = z
+  .object({
+    track: z.enum(TRACK_NAMES),
+    label: z.enum(TRACK_LABELS),
+    band: z.enum(BANDS),
+    verdict: z.enum(TRACK_VERDICTS),
+    permission: z.string().max(64),
+    rms: z.number(),
+    peak: z.number(),
+    nonzero_fraction: z.number(),
+    duration_s: z.number(),
+    gaps: z.array(z.object({ start_s: z.number(), end_s: z.number(), duration_s: z.number() })).max(10_000),
+    note: z.string().max(4000),
+  })
+  .passthrough();
+const classificationTracksSchema = z.object({ tap: trackReportSchema, mic: trackReportSchema }).passthrough();
+
 const captureSchema = z.object({
   // Manifest ids are uppercase UUIDs (recorder/app/main.js); the check is
   // case-insensitive and the id is stored as sent, as ingest stores it.
@@ -88,11 +137,11 @@ const captureSchema = z.object({
     concern: z.boolean(),
     reason: z.string().max(4000),
     excludedLabels: z.array(trackSchema),
-    tracks: z.unknown().optional(),
+    tracks: classificationTracksSchema.optional(),
     thresholds: z.unknown().optional(),
   }),
   capture: z.object({
-    tracks: z.unknown().optional(),
+    tracks: manifestTracksSchema.optional(),
     permissions: z.object({ tap: z.string().max(32).optional(), mic: z.string().max(32).optional() }),
     triggerApp: z.object({ key: z.string().max(128).optional(), name: z.string().max(256).optional() }).nullable(),
   }),
