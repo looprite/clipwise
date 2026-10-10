@@ -449,18 +449,17 @@ async function runPass2(
         });
       }
       lastShapeProblem = `moments field was ${out === null ? "null" : typeof out}, not an array`;
-      console.warn(
-        `extract: pass2 span "${span.label}" attempt ${attempt}/${MAX_ATTEMPTS} bad input: ${JSON.stringify(use.input).slice(0, 2000)}`,
-      );
     } else {
       lastShapeProblem = "no tool_use block in response";
     }
+    // Segment numbers, not the span's label or the reply: both are the model's
+    // words about the call (decision 3).
     console.warn(
-      `extract: pass2 span "${span.label}" attempt ${attempt}/${MAX_ATTEMPTS} — ${lastShapeProblem}${attempt < MAX_ATTEMPTS ? ", retrying" : ""}`,
+      `extract: pass2 segments #${span.startSegmentIndex}-#${span.endSegmentIndex} attempt ${attempt}/${MAX_ATTEMPTS} — ${lastShapeProblem}${attempt < MAX_ATTEMPTS ? ", retrying" : ""}`,
     );
   }
   throw new Error(
-    `pass2: span "${span.label}" — model reply had an unusable moments shape after ${MAX_ATTEMPTS} attempts (last: ${lastShapeProblem})`,
+    `pass2: segments #${span.startSegmentIndex}-#${span.endSegmentIndex} — model reply had an unusable moments shape after ${MAX_ATTEMPTS} attempts (last: ${lastShapeProblem})`,
   );
 }
 
@@ -624,14 +623,18 @@ export async function runExtraction(
     // already matching "now," and retryForLateIdentity skips the check
     // entirely on that call regardless of what happens after.
     retryForLateIdentity?: boolean;
+    // The Anthropic client to use. Absent, one is made from ANTHROPIC_API_KEY.
+    // The jobs worker passes one whose fetch it can abort, and the checks pass
+    // one whose fetch is a stub.
+    client?: Anthropic;
   } = {},
 ): Promise<ExtractionResult> {
   const applyCollapseStep = options.applyCollapse ?? true;
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!options.client && !process.env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY not set");
   }
   const t0 = Date.now();
-  const client = new Anthropic();
+  const client = options.client ?? new Anthropic();
   const recording = await loadRecording(recordingId);
   const segs = await loadSegments(recordingId);
   if (segs.length === 0) {
@@ -672,7 +675,7 @@ export async function runExtraction(
   const identityResolved = await loadIdentityResolved(recordingId);
   const attendeeNames = await loadAttendeeNames(recordingId);
   console.log(
-    `extract: identity resolved for this recording: ${identityResolved} (attendees: ${attendeeNames.join(", ") || "none"})`,
+    `extract: identity resolved for this recording: ${identityResolved} (${attendeeNames.length} attendee(s))`,
   );
   // SAA-197: same point in time loadSegments rendered speaker labels from —
   // see the comparison near promoteRecording below.
@@ -760,11 +763,11 @@ export async function runExtraction(
     );
     const lo = spanSegs[0]?.startSec ?? 0;
     const hi = spanSegs[spanSegs.length - 1]?.endSec ?? lo;
-    for (const m of moments) {
+    for (const [k, m] of moments.entries()) {
       if (m.startSec < lo || m.endSec > hi || m.endSec < m.startSec) {
         outOfRange++;
         console.warn(
-          `extract: span ${i} out-of-range moment "${m.title}" start=${m.startSec} end=${m.endSec} (span ${lo}..${hi})`,
+          `extract: span ${i} moment ${k} out of range: start=${m.startSec} end=${m.endSec} (span ${lo}..${hi})`,
         );
         // Preserve the model's original values on the moment so a later
         // reader can distinguish measured from computed. Otherwise this
@@ -780,7 +783,7 @@ export async function runExtraction(
     if (moments.length === 0) {
       zeroYield.push(span);
       console.log(
-        `extract: span ${i}/${spans.length - 1} "${span.label}" — 0 moments (visible gap) — running total ${buffered.length}`,
+        `extract: span ${i}/${spans.length - 1} (segments #${span.startSegmentIndex}-#${span.endSegmentIndex}) — 0 moments (visible gap) — running total ${buffered.length}`,
       );
       continue;
     }
@@ -826,7 +829,7 @@ export async function runExtraction(
       });
     }
     console.log(
-      `extract: span ${i}/${spans.length - 1} "${span.label}" — ${moments.length} moment(s) — running total ${buffered.length}`,
+      `extract: span ${i}/${spans.length - 1} (segments #${span.startSegmentIndex}-#${span.endSegmentIndex}) — ${moments.length} moment(s) — running total ${buffered.length}`,
     );
   }
   if (outOfRange > 0) {
