@@ -19,6 +19,7 @@
     "db:studio": "drizzle-kit studio",
     "auth": "tsx src/auth/cli.ts",
     "auth:migrate": "tsx src/auth/migrate.ts",
+    "jobs": "tsx src/jobs/cli.ts",
     "audit": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {

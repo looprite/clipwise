@@ -43,6 +43,12 @@
 //       started here (start(): the boot path) claims the job, deletes the killed
 //       run's rows, and promotes exactly one run; the killed attempt is counted
 //       (only a shutdown or a lost lease gives one back), so attempts is 2
+// CLI (src/jobs/cli.ts, run as its own process)
+//   r   a job failed on three attempts is put back by `retry` with attempts 0 and
+//       runs to done on one attempt; `retry` refuses a running job, an unknown id
+//       and a malformed one (exit 1, the row untouched); `list` shows the jobs by
+//       id and state and holds the planted phrase nowhere, though the recordings'
+//       moments carry it
 // Throughout: no log line holds the planted phrase (the spawned server's lines
 // included).
 //
@@ -759,6 +765,63 @@ async function main(): Promise<void> {
         standIn.closeAllConnections();
         standIn.close();
       }
+    }
+
+    // ---- r: the jobs CLI ------------------------------------------------------
+    if (wanted("r")) {
+      await clearJobs();
+      const cli = (...args: string[]): Promise<{ code: number | null; out: string; err: string }> =>
+        new Promise((done) => {
+          const child = spawn(process.execPath, ["--import", "tsx", "src/jobs/cli.ts", ...args], {
+            cwd: resolve(import.meta.dirname, "..", ".."),
+            env: process.env,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          children.push(child);
+          let out = "";
+          let err = "";
+          child.stdout!.on("data", (c) => (out += c));
+          child.stderr!.on("data", (c) => (err += c));
+          child.once("close", (code) => {
+            for (const line of `${out}${err}`.split("\n").filter(Boolean)) {
+              captured.push(line);
+              realWrite(`    r| ${line}\n`);
+            }
+            done({ code, out, err });
+          });
+        });
+
+      // A job failed on all three attempts, then retried.
+      const { recordingId } = await fresh();
+      const [failed] = await runToEnd(worker(model({ failStatus: 400 }), makeStubEmbedder()), recordingId);
+      const retried = await cli("retry", failed.id);
+      const [queued] = await jobsOf(recordingId);
+      check("r a failed job (attempts 3) is put back by retry: exit 0, queued, attempts 0, no lease or error left", failed.state === "failed" && failed.attempts === 3 && retried.code === 0 && queued.state === "queued" && queued.attempts === 0 && queued.leaseToken === null && queued.errorClass === null && queued.lastError === null, JSON.stringify({ before: [failed.state, failed.attempts], code: retried.code, after: [queued.state, queued.attempts, queued.errorClass] }));
+      const stub = model();
+      const [doneJob] = await runToEnd(worker(stub, makeStubEmbedder()), recordingId);
+      check("r the retried job runs to done on one attempt, and the recording is ready", doneJob.state === "done" && doneJob.attempts === 1 && (await recOf(recordingId)).status === "ready" && stub.calls.length === 4, JSON.stringify({ state: doneJob.state, attempts: doneJob.attempts, calls: stub.calls.length }));
+
+      // Refusals: a running job, an unknown id, a malformed one.
+      const other = await fresh();
+      await setState(other.recordingId, "running");
+      const [running] = await jobsOf(other.recordingId);
+      const onRunning = await cli("retry", running.id);
+      const [stillRunning] = await jobsOf(other.recordingId);
+      check("r retry refuses a running job: exit 1, says it is running, the row untouched", onRunning.code === 1 && onRunning.err.includes("is running, not failed") && stillRunning.state === "running" && stillRunning.attempts === running.attempts, JSON.stringify({ code: onRunning.code, err: onRunning.err.trim(), state: stillRunning.state }));
+      const unknown = randomUUID();
+      const onUnknown = await cli("retry", unknown);
+      check("r retry refuses an unknown id: exit 1, 'no job with id'", onUnknown.code === 1 && onUnknown.err.includes(`no job with id ${unknown}`), JSON.stringify({ code: onUnknown.code, err: onUnknown.err.trim() }));
+      const onMalformed = await cli("retry", "not-a-uuid");
+      check("r retry refuses a malformed id the same way, not with a database error", onMalformed.code === 1 && onMalformed.err.trim() === "jobs: no job with id not-a-uuid", JSON.stringify({ code: onMalformed.code, err: onMalformed.err.trim() }));
+
+      // list: both jobs, by id and state, and no call content. The phrase is in the
+      // database (the done recording's moments), so its absence here is the list's.
+      const listed = await cli("list");
+      const phraseInDb = (await pool.query("select count(*)::int as n from moments where recording_id = $1 and title like $2", [recordingId, `%${PHRASE}%`])).rows[0].n;
+      const lineOf = (id: string): string => listed.out.split("\n").find((l) => l.includes(id)) ?? "";
+      check("r list exits 0 with one line per job, each with its recording, kind, state and attempts", listed.code === 0 && / done +attempts=1 /.test(lineOf(failed.id)) && lineOf(failed.id).includes(`recording=${recordingId} extract`) && / running +attempts=0 /.test(lineOf(running.id)), JSON.stringify({ code: listed.code, lines: [lineOf(failed.id), lineOf(running.id)] }));
+      check("r list holds the planted phrase nowhere, though the recording's moments carry it", phraseInDb > 0 && !`${listed.out}${listed.err}`.includes(PHRASE), JSON.stringify({ phraseInMoments: phraseInDb }));
+      await clearJobs();
     }
 
     // ---- no content in any log -----------------------------------------------------
