@@ -529,6 +529,71 @@ export const shares = pgTable(
   }),
 );
 
+// Work the server does after a capture is stored (SAA-227 parts D and E): today
+// extraction and its embeddings. One worker takes one job at a time (jobs/worker.ts).
+//
+//   kind   'extract'     the first extraction of a stored capture
+//          're_extract'  a second one, because an identity answer arrived after
+//                        the first finished (base_run is the run that was current)
+//   state  'queued'      waiting; not before run_after (a retry's backoff)
+//          'running'     claimed under lease_token until lease_expires_at
+//          'done' | 'failed'
+//
+// attempts is counted when a job is claimed and given back when the attempt ends
+// through no fault of the work (shutdown, a lost lease, a missing API key).
+// run_ids are the extraction runs this job started, recorded before any row of
+// theirs exists, so a later attempt can delete what a killed one left behind.
+// error_class and last_error are written through lib/safe-error.ts and hold
+// nothing of the call.
+//
+// The partial unique index is what makes "one job per recording and kind at a
+// time" a fact of the database: a second enqueue while one is queued or running
+// does nothing.
+export const jobs = pgTable(
+  "jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    recordingId: uuid("recording_id")
+      .notNull()
+      .references(() => recordings.id, { onDelete: "cascade" }),
+    kind: varchar("kind", { length: 32 }).notNull(),
+    state: varchar("state", { length: 16 }).notNull().default("queued"),
+    attempts: integer("attempts").notNull().default(0),
+    runAfter: timestamp("run_after", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    leaseToken: uuid("lease_token"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    baseRun: uuid("base_run"),
+    runIds: uuid("run_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::uuid[]`),
+    errorClass: varchar("error_class", { length: 128 }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    activeIdx: uniqueIndex("jobs_active_recording_kind_idx")
+      .on(t.recordingId, t.kind)
+      .where(sql`${t.state} in ('queued', 'running')`),
+    recordingIdx: index("jobs_recording_idx").on(t.recordingId),
+    stateIdx: index("jobs_state_run_after_idx").on(t.state, t.runAfter),
+    kindValid: check("jobs_kind_valid", sql`${t.kind} IN ('extract', 're_extract')`),
+    stateValid: check("jobs_state_valid", sql`${t.state} IN ('queued', 'running', 'done', 'failed')`),
+  }),
+);
+
 export const accountsRelations = relations(accounts, ({ many }) => ({
   people: many(people),
   recordings: many(recordings),
