@@ -38,7 +38,7 @@ async function main(): Promise<void> {
   console.log("columns:");
   for (const c of cols.rows) console.log(`  ${c.column_name} ${c.data_type} nullable=${c.is_nullable} default=${c.column_default ?? "-"}`);
   const names = cols.rows.map((c) => c.column_name as string);
-  const want = ["id", "account_id", "recording_id", "kind", "state", "attempts", "run_after", "lease_token", "lease_expires_at", "base_run", "run_ids", "error_class", "last_error", "created_at", "started_at", "finished_at", "updated_at"];
+  const want = ["id", "account_id", "recording_id", "kind", "state", "attempts", "run_after", "lease_token", "lease_expires_at", "run_ids", "error_class", "last_error", "created_at", "started_at", "finished_at", "updated_at"];
   check("the columns are exactly the declared ones", JSON.stringify(names) === JSON.stringify(want), names.join(","));
 
   const cons = await pool.query("select conname, pg_get_constraintdef(oid) as def from pg_constraint where conrelid = 'jobs'::regclass order by conname");

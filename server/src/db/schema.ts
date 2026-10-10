@@ -533,8 +533,9 @@ export const shares = pgTable(
 // extraction and its embeddings. One worker takes one job at a time (jobs/worker.ts).
 //
 //   kind   'extract'     the first extraction of a stored capture
-//          're_extract'  a second one, because an identity answer arrived after
-//                        the first finished (base_run is the run that was current)
+//          're_extract'  another one, because an identity answer named a speaker
+//                        after the first run was started; it does nothing if the
+//                        promoted run was already built on the current names
 //   state  'queued'      waiting; not before run_after (a retry's backoff)
 //          'running'     claimed under lease_token until lease_expires_at
 //          'done' | 'failed'
@@ -567,7 +568,6 @@ export const jobs = pgTable(
       .default(sql`now()`),
     leaseToken: uuid("lease_token"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
-    baseRun: uuid("base_run"),
     runIds: uuid("run_ids")
       .array()
       .notNull()
