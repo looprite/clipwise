@@ -183,6 +183,9 @@ clean_exec() {
     for v in ${vars[@]+"${vars[@]}"}; do
       case "$v" in
         CLIPWISE_CHECK_SCRATCH_DB) export CLIPWISE_CHECK_SCRATCH_DB=1 ;;
+        # A check's control mode (check-access, check-pool-close), taken from the
+        # caller's environment before it was cleaned (see cmd_run).
+        CLIPWISE_CHECK_CONTROL) export CLIPWISE_CHECK_CONTROL="$CHECK_CONTROL_VALUE" ;;
         AUTH_PASSWORD_ENABLED) export AUTH_PASSWORD_ENABLED=true ;;
         BETTER_AUTH_URL) export BETTER_AUTH_URL="$AUTH_ORIGIN" ;;
         VOYAGE_API_KEY) export VOYAGE_API_KEY="$VOYAGE_VALUE" ;;
@@ -458,6 +461,7 @@ check_script() {
 
 cmd_run() {
   local check="${1:-}" script
+  CHECK_CONTROL_VALUE="${CLIPWISE_CHECK_CONTROL:-}"
   script="$(check_script "$check")" \
     || refuse "usage: scratch-db.sh run <check>: check-access | check-auth | check-trash, or the file name of one src/**/check-*.ts (got '$check')"
   scratch_ready
@@ -482,7 +486,7 @@ cmd_run() {
       exit "${PIPESTATUS[0]}"
       ;;
     *)
-      clean_exec "$F" DATABASE_URL CLIPWISE_CHECK_SCRATCH_DB BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED -- \
+      clean_exec "$F" DATABASE_URL CLIPWISE_CHECK_SCRATCH_DB CLIPWISE_CHECK_CONTROL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED -- \
         npx --no-install tsx "$script" 2>&1 | scrub
       exit "${PIPESTATUS[0]}"
       ;;

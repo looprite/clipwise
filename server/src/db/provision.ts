@@ -20,7 +20,7 @@ import { resolve } from "node:path";
 import { getMigrations } from "better-auth/db/migration";
 import { pool } from "./index.js";
 import { ensureChecks } from "./checks.js";
-import { getAuth } from "../auth/auth.js";
+import { endPoolWhenAuthSettled, getAuth } from "../auth/auth.js";
 
 const say = (s: string) => process.stdout.write(`db-provision: ${s}\n`);
 
@@ -49,6 +49,10 @@ async function main(): Promise<void> {
   const { runMigrations } = await getMigrations(getAuth().options);
   await runMigrations();
   say("auth tables created");
+  // The init getAuth() started reads and seeds those tables; a failure of it
+  // fails provisioning. After runMigrations, never before: it creates them.
+  await getAuth().$context;
+  say("auth initialised");
 
   const { rows: after } = await pool.query<{ n: string }>(
     `select count(*)::text as n from information_schema.tables where table_schema = 'public'`,
@@ -61,6 +65,4 @@ main()
     process.stderr.write(`db-provision: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exitCode = 1;
   })
-  .finally(async () => {
-    await pool.end();
-  });
+  .finally(endPoolWhenAuthSettled);
