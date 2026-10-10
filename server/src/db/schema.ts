@@ -234,6 +234,11 @@ export const recordings = pgTable(
     accountIdx: index("recordings_account_idx").on(t.accountId),
     ownerIdx: index("recordings_owner_idx").on(t.ownerMemberId),
     sourceIdx: index("recordings_source_idx").on(t.source, t.sourceId),
+    // One recording per capture per account: POST /captures inserts with ON
+    // CONFLICT on this, so a repeat or a concurrent double POST is one row.
+    // Nulls are distinct in a unique index, so rows with no source_id (manual
+    // inserts) are not constrained.
+    accountSourceIdx: uniqueIndex("recordings_account_source_idx").on(t.accountId, t.source, t.sourceId),
     slugIdx: uniqueIndex("recordings_slug_idx").on(t.slug),
     scopeValid: check("recordings_scope_valid", sql`${t.scope} IN ('work', 'personal')`),
     visibilityValid: check(
