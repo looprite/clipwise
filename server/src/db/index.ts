@@ -11,7 +11,8 @@ if (!process.env.DATABASE_URL) {
 // A connect that never completes would otherwise wait forever (pg's default is
 // no timeout). claude.ai gives discovery, registration and token endpoints 10 s,
 // so a stalled connect has to fail well inside that. Neon waking from
-// autosuspend takes a few hundred ms, so 5 s leaves room for it.
+// autosuspend was measured at 1.5–2.3 s on Node 22 and 1.5–2.1 s on Node 26.11.1
+// (SAA-227), so 5 s leaves room for it.
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000 });
 
 // pg pool emits 'error' on idle clients whose socket dies (Neon suspend, TCP

@@ -215,3 +215,17 @@ export function getAuth(): Auth {
   }
   return cached;
 }
+
+// For a script's last step. getAuth() starts Better Auth's initialisation (a
+// database read, and seeding the OAuth resources) and nothing waits on it, so
+// ending the pool right after leaves that work running against a closed pool:
+// "Cannot use a pool after calling end on the pool". So: wait for the init that
+// is in flight to settle (either way; a failure was already logged by getAuth),
+// then end the pool. A script that never called getAuth() just ends the pool.
+// This is for the end only: a script must not await the init BEFORE its own
+// work, which may be what creates the tables the init reads (migrate.ts).
+export async function endPoolWhenAuthSettled(): Promise<void> {
+  const auth = cached;
+  if (auth) await auth.$context.then(() => undefined, () => undefined);
+  await pool.end();
+}

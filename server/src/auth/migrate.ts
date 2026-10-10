@@ -10,8 +10,7 @@
 // Exit 0 on success. A plan that Better Auth marks unsafe (a required column
 // with no default on a populated table) or a schema problem is a failure.
 
-import { pool } from "../db/index.js";
-import { getAuth } from "./auth.js";
+import { endPoolWhenAuthSettled, getAuth } from "./auth.js";
 import { getMigrations } from "better-auth/db/migration";
 
 async function main(): Promise<void> {
@@ -31,10 +30,20 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  // --plan may run on a database with no auth tables yet, where the init
+  // getAuth() started is expected to fail: it just returns, and the finally
+  // below settles the init and ends the pool.
   if (planOnly) return;
 
   await runMigrations();
   line("applied");
+  // The init getAuth() started is waited for here, after the work and never
+  // before runMigrations (which creates what the init reads), so a failed init
+  // is a failed script and not only a log line. getAuth() drops an instance
+  // whose init failed, so if the first one failed this is a fresh init against
+  // the migrated tables.
+  await getAuth().$context;
+  line("auth initialised");
 }
 
 main()
@@ -42,6 +51,4 @@ main()
     process.stderr.write(`auth-migrate: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
     process.exitCode = 1;
   })
-  .finally(async () => {
-    await pool.end();
-  });
+  .finally(endPoolWhenAuthSettled);

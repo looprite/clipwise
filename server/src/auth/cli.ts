@@ -22,7 +22,7 @@
 
 import { parseArgs } from "node:util";
 import { and, asc, eq, isNull } from "drizzle-orm";
-import { db, pool, schema } from "../db/index.js";
+import { db, schema } from "../db/index.js";
 import { slugify } from "../lib/slug.js";
 import {
   Refusal,
@@ -34,6 +34,7 @@ import {
   requireEmail,
   type Role,
 } from "./members.js";
+import { endPoolWhenAuthSettled } from "./auth.js";
 import { ensureRecorderClient } from "./recorder-client.js";
 
 const say = (s: string) => process.stdout.write(`auth: ${s}\n`);
@@ -172,6 +173,4 @@ main()
     );
     process.exitCode = 1;
   })
-  .finally(async () => {
-    await pool.end();
-  });
+  .finally(endPoolWhenAuthSettled);
