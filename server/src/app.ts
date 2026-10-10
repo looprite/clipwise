@@ -17,7 +17,7 @@
 
 import express, { type Express, type RequestHandler, type Router } from "express";
 import { sql } from "drizzle-orm";
-import { requireAdmin, requireMember, requireMemberOrCaptureWrites, sameAccountOnly } from "./access/authenticate.js";
+import { requireAdmin, requireCapture, requireMember, requireMemberOrCaptureWrites, sameAccountOnly } from "./access/authenticate.js";
 import { authorizationServerMetadata, protectedResourceMetadata } from "./auth/discovery.js";
 import { consentPage, loginPage } from "./auth/pages.js";
 import { db } from "./db/index.js";
@@ -27,6 +27,7 @@ import { logError } from "./lib/safe-error.js";
 import { mcpMethodNotAllowed, mcpPost } from "./mcp/server.js";
 import { accountsRouter } from "./routes/accounts.js";
 import { momentsRouter } from "./routes/moments.js";
+import { capturesPost } from "./routes/captures.js";
 import { oauthRouter } from "./routes/oauth.js";
 import { peopleRouter } from "./routes/people.js";
 import { recordingsRouter } from "./routes/recordings.js";
@@ -104,6 +105,10 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   app.post("/mcp", requireMember, mcpPost);
   app.get("/mcp", requireMember, mcpMethodNotAllowed);
   app.delete("/mcp", requireMember, mcpMethodNotAllowed);
+
+  // The recorder hands over a finished capture. A capture token (SAA-244); the
+  // account and the owner come from it.
+  app.post("/captures", requireCapture, capturesPost);
 
   // Guards for routes that live in routers mounted at "/" with fully
   // qualified paths.

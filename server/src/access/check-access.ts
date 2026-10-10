@@ -15,6 +15,8 @@
 //     capture token; discovery still advertises the four MCP scopes.
 //  5. Revocation: a member's still-valid token stops working on the next call
 //     once they are removed.
+//  6. POST /captures: the recorder's endpoint (routes/captures.ts): who it takes,
+//     whose it stores, what a repeat does, and what it refuses.
 //
 // WRITES to the database it is pointed at (tagged rows, removed at the end), so
 // it refuses to run unless told the database is a scratch one. The database
@@ -251,6 +253,8 @@ async function cleanup(accountId: string | null): Promise<void> {
   };
   if (accountId) {
     await run(`delete from recordings where account_id = $1 and slug like $2`, [accountId, `check-access-${tag}-%`]);
+    // Captures made through POST /captures: slug is clipwise-capture-<stem>-<id>, and the stems start with the tag.
+    await run(`delete from recordings where account_id = $1 and slug like $2`, [accountId, `clipwise-capture-check-access-${tag}-%`]);
     await run(`delete from people where account_id = $1 and email like $2`, [accountId, like]);
   }
   for (const t of ["oauthRefreshToken", "oauthAccessToken", "oauthConsent"]) {
@@ -462,7 +466,6 @@ async function main(): Promise<void> {
     record((await addAtt(B, "a2")).status === 404 && (await addAtt(A, "a2")).status === 201, "attendees: only the owner can add one — even to a shared call");
     const addMoment = (who: Who, key: string) => http("POST", `/accounts/${acc}/moments`, { token: capToken(who), json: { recordingId: rec[key].id, kind: "observation", title: `${WORD} added`, startSec: 0, endSec: 1 } });
     record((await addMoment(B, "a2")).status === 404 && (await addMoment(A, "a2")).status === 201, "moments: only the owner can add one");
-    record((await http("POST", `/recordings/${rec.a2.id}/transcript`, { token: capToken(B), json: {} })).status === 404, "transcript: only the owner can add one");
 
     // ---- a malformed id is "not found", not a server error ------------------
     // Postgres rejects a non-UUID compared with a uuid column (22P02), which used
@@ -472,7 +475,6 @@ async function main(): Promise<void> {
       const bad = "not-a-uuid";
       const probes: Array<[string, Reply]> = [
         ["GET /recordings/:id/transcript", await http("GET", `/recordings/${bad}/transcript`, { token: A.token })],
-        ["POST /recordings/:id/transcript", await http("POST", `/recordings/${bad}/transcript`, { token: capToken(A), json: {} })],
         ["GET /accounts/:accountId/recordings/:id", await http("GET", `/accounts/${acc}/recordings/${bad}`, { token: A.token })],
         ["GET /accounts/:accountId/recordings/:id/attendees", await http("GET", `/accounts/${acc}/recordings/${bad}/attendees`, { token: A.token })],
         ["POST /accounts/:accountId/recordings/:id/attendees", await http("POST", `/accounts/${acc}/recordings/${bad}/attendees`, { token: capToken(A), json: { name: "x" } })],
@@ -495,6 +497,195 @@ async function main(): Promise<void> {
       );
       const tooBig = await http("POST", `/accounts/${acc}/recordings`, { token: capToken(A), raw: `{"title": "${"a".repeat(17 * 1024 * 1024)}"}` });
       record(tooBig.status === 413 && tooBig.json?.error === "payload_too_large", "an oversized body answers 413 payload_too_large", `got ${tooBig.status} ${JSON.stringify(tooBig.json)}`);
+    }
+
+    // ---- POST /captures (the recorder's endpoint) ---------------------------
+    // The ids are uppercase UUIDs, as the recorder's manifest writes them. Stems
+    // start with the tag so cleanup finds what this run made.
+    type CapSeg = { track: "me" | "them"; startMs: number; endMs: number; text: string };
+    const capSeg = (text: string, track: "me" | "them" = "me", startMs = 0, endMs = 1500): CapSeg => ({ track, startMs, endMs, text });
+    const CAP_SEGS: CapSeg[] = [capSeg(`hello ${WORD}`), capSeg("hi there", "them", 1600, 3000)];
+    const capPayload = (o: { id?: string; stem?: string; segments?: CapSeg[]; identity?: unknown; extra?: Record<string, unknown> } = {}) => {
+      const segments = o.segments ?? CAP_SEGS;
+      const id = o.id ?? randomUUID().toUpperCase();
+      return {
+        captureId: id,
+        startedAt: "2026-10-10T10:00:00.000Z",
+        stem: o.stem ?? `check-access-${tag}-${id.slice(0, 8).toLowerCase()}`,
+        engine: "parakeet",
+        model: "check-model",
+        language: "en",
+        segments,
+        sourceFidelity: { declaredTurnCount: segments.length, declaredBodyChars: segments.reduce((n, x) => n + x.text.length, 0), countedFrom: "check-access segments" },
+        classification: { verdict: "both_present", concern: false, reason: "check", excludedLabels: [] as string[] },
+        capture: { tracks: { tap: { verdict: "ok" }, mic: { verdict: "ok" } }, permissions: { tap: "granted", mic: "granted" }, triggerApp: null },
+        ...(o.identity ? { identity: o.identity } : {}),
+        ...o.extra,
+      };
+    };
+    const capPost = (who: Who, payload: unknown) => http("POST", "/captures", { token: capToken(who), json: payload });
+    const capRows = async (id: string) =>
+      (await pool.query(`select id, account_id, owner_member_id, source, source_id, title, slug, status, visibility, scope, metadata, updated_at from recordings where account_id = $1 and source_id = $2`, [acc, id])).rows;
+    const capCount = async (rid: string, table: "segments" | "transcripts" | "attendees") =>
+      (await pool.query(`select count(*)::int as n from ${table} where recording_id = $1`, [rid])).rows[0].n as number;
+    const allRecordings = async () => (await pool.query(`select count(*)::int as n from recordings where account_id = $1`, [acc])).rows[0].n as number;
+    const expectSlug = (stem: string, id: string) => `clipwise-capture-${stem}-${id.replace(/-/g, "").slice(0, 8).toLowerCase()}`;
+
+    // 1. An MCP token is refused with 403, and nothing is written.
+    {
+      const p = capPayload();
+      const r = await http("POST", "/captures", { token: A.token, json: p });
+      record(r.status === 403 && r.json?.error === "insufficient_scope" && (await capRows(p.captureId)).length === 0, "captures 1: an MCP token gets 403 insufficient_scope and no row is written", `got ${r.status} ${r.json?.error ?? ""}`);
+    }
+
+    // 2. Another member's captureId is 409 capture_id_taken, and the row is unchanged.
+    const capX = capPayload();
+    const capXFirst = await capPost(A, capX);
+    const rowsBefore = JSON.stringify(await capRows(capX.captureId));
+    const taken = await capPost(B, capX);
+    const rowsAfter = JSON.stringify(await capRows(capX.captureId));
+    record(
+      capXFirst.status === 201 && taken.status === 409 && taken.json?.error === "capture_id_taken" && rowsBefore === rowsAfter && (await capRows(capX.captureId)).length === 1,
+      "captures 2: another member's captureId is 409 capture_id_taken, and the row is unchanged",
+      `first ${capXFirst.status}; B ${taken.status} ${taken.json?.error ?? ""}; unchanged ${rowsBefore === rowsAfter}`,
+    );
+    const xRow = (await capRows(capX.captureId))[0];
+    const xId = capXFirst.json?.recordingId as string;
+
+    // 3. The owner and the account come from the token, not the body; the server sets the rest.
+    {
+      const p = capPayload({ extra: { ownerMemberId: B.memberId, owner_member_id: B.memberId, accountId: randomUUID(), account_id: randomUUID(), visibility: "shared", source: "elsewhere", sourceId: "mine", slug: "hijack", status: "ready", title: "hijack", scope: "personal" } });
+      const r = await capPost(A, p);
+      const row = (await capRows(p.captureId))[0];
+      record(
+        r.status === 201 && row?.owner_member_id === A.memberId && row.account_id === acc && row.source === "clipwise-recorder" && row.source_id === p.captureId && row.visibility === "private" && row.status === "pending" && String(row.title).startsWith("Clipwise capture") && row.slug === expectSlug(p.stem, p.captureId) && row.scope === null,
+        "captures 3: the owner and account come from the token; source, title, slug, status and visibility are the server's, whatever the body says; an uppercase captureId is stored as sent",
+        `${r.status}; owner ${row?.owner_member_id === A.memberId ? "A" : row?.owner_member_id}; ${row?.source}/${row?.source_id}; ${row?.visibility}/${row?.status}; ${row?.slug}`,
+      );
+    }
+
+    // 4. The same content again is 200 created:false, with nothing new written.
+    {
+      const r = await capPost(A, capX);
+      record(
+        r.status === 200 && r.json?.created === false && r.json?.recordingId === xId && (await capRows(capX.captureId)).length === 1 && (await capCount(xId, "segments")) === 2 && (await capCount(xId, "transcripts")) === 1,
+        "captures 4: the same content again is 200 created:false, with the same recording and nothing new written",
+        `${r.status} ${JSON.stringify(r.json)}`,
+      );
+    }
+
+    // 5. A concurrent double POST makes one row.
+    {
+      const p = capPayload();
+      const [r1, r2] = await Promise.all([capPost(A, p), capPost(A, p)]);
+      const statuses = [r1.status, r2.status].sort();
+      const rows = await capRows(p.captureId);
+      record(
+        statuses.join() === "200,201" && rows.length === 1 && (await capCount(rows[0].id, "transcripts")) === 1 && (await capCount(rows[0].id, "segments")) === 2,
+        "captures 5: a concurrent double POST makes one recording (one 201, one 200), one transcript, two segments",
+        `statuses ${statuses.join()}; rows ${rows.length}`,
+      );
+    }
+
+    // 6. Different segments under the same captureId are 409 capture_content_conflict, and nothing changes.
+    {
+      const before = JSON.stringify(await capRows(capX.captureId));
+      const r = await capPost(A, capPayload({ id: capX.captureId, stem: capX.stem, segments: [capSeg("something else entirely")] }));
+      record(
+        r.status === 409 && r.json?.error === "capture_content_conflict" && JSON.stringify(await capRows(capX.captureId)) === before && (await capCount(xId, "segments")) === 2,
+        "captures 6: different segments under the same captureId are 409 capture_content_conflict, and the row and its segments are unchanged",
+        `${r.status} ${r.json?.error ?? ""}`,
+      );
+    }
+
+    // 7. A later identity answer is applied once.
+    {
+      const answer = { identity_version: 2, answered_at: "2026-10-10T10:05:00.000Z", self: { name: `Alice ${tag}` }, guests: [{ name: `Guest ${tag}` }], scope: "personal" };
+      const p = capPayload();
+      const first = await capPost(A, p);
+      const rid = first.json?.recordingId as string;
+      const late = await capPost(A, { ...p, identity: answer });
+      const atts = (await pool.query(`select name, is_host from attendees where recording_id = $1 order by is_host desc, name`, [rid])).rows;
+      const stored = (await capRows(p.captureId))[0];
+      const again = await capPost(A, { ...p, identity: answer });
+      record(
+        first.status === 201 && late.status === 200 && late.json?.created === false && late.json?.identityApplied === true && atts.length === 2 && atts[0].is_host === true && stored.scope === "personal" && stored.metadata?.identity?.answered_at === answer.answered_at,
+        "captures 7a: an identity answer that arrives on a repeat is applied (host and guest attendee rows, scope, stored answer)",
+        `${late.status} ${JSON.stringify(late.json)}; attendees ${atts.length}; scope ${stored.scope}`,
+      );
+      record(
+        again.status === 200 && again.json?.identityApplied === false && (await capCount(rid, "attendees")) === 2,
+        "captures 7b: the same answer again is not applied again (still two attendee rows)",
+        `${again.status} ${JSON.stringify(again.json)}; attendees ${await capCount(rid, "attendees")}`,
+      );
+      // Two requests carrying the answer at the same moment: applied by one of them.
+      const p2 = capPayload();
+      const first2 = await capPost(A, p2);
+      const answer2 = { ...answer, answered_at: "2026-10-10T10:06:00.000Z" };
+      const [c1, c2] = await Promise.all([capPost(A, { ...p2, identity: answer2 }), capPost(A, { ...p2, identity: answer2 })]);
+      const appliedCount = [c1, c2].filter((c) => c.json?.identityApplied === true).length;
+      record(
+        first2.status === 201 && c1.status === 200 && c2.status === 200 && appliedCount === 1 && (await capCount(first2.json?.recordingId, "attendees")) === 2,
+        "captures 7c: two requests carrying the same late answer at once apply it once (one says applied, two attendee rows)",
+        `${c1.status}/${c2.status}; applied by ${appliedCount}; attendees ${await capCount(first2.json?.recordingId, "attendees")}`,
+      );
+    }
+
+    // 8. Two members starting in the same second: two recordings, two 201s.
+    {
+      const stem = `check-access-${tag}-same-second`;
+      const pA = capPayload({ stem });
+      const pB = capPayload({ stem });
+      const [rA, rB] = await Promise.all([capPost(A, pA), capPost(B, pB)]);
+      record(
+        rA.status === 201 && rB.status === 201 && rA.json?.slug !== rB.json?.slug && rA.json?.slug === expectSlug(stem, pA.captureId) && rB.json?.slug === expectSlug(stem, pB.captureId),
+        "captures 8: two members with the same stem and start time get two 201s and two different slugs",
+        `${rA.status}/${rB.status}; ${rA.json?.slug ?? rA.json?.error} / ${rB.json?.slug ?? rB.json?.error}`,
+      );
+    }
+
+    // 9. A fidelity mismatch is 422 and nothing is written.
+    {
+      const p = capPayload();
+      const r = await capPost(A, { ...p, sourceFidelity: { ...p.sourceFidelity, declaredBodyChars: p.sourceFidelity.declaredBodyChars + 1 } });
+      record(r.status === 422 && r.json?.error === "transcript_fidelity_mismatch" && (await capRows(p.captureId)).length === 0, "captures 9: a fidelity mismatch is 422 transcript_fidelity_mismatch and nothing is written", `${r.status} ${r.json?.error ?? ""}`);
+    }
+
+    // 10. A body that is not JSON is 400.
+    {
+      const phrase = `PURPLE-CAPTURE-${tag}`;
+      const r = await http("POST", "/captures", { token: capToken(A), raw: `{"stem": "${phrase}", oops}` });
+      record(r.status === 400 && r.json?.error === "invalid_json" && !JSON.stringify(r.json).includes(phrase), "captures 10: bad JSON is 400 invalid_json and does not repeat the body", `${r.status} ${JSON.stringify(r.json)}`);
+    }
+
+    // 11. A GET with an id that is not a recording's is 404, not an error.
+    {
+      const probes: Array<[string, Reply]> = [
+        ["GET /accounts/:accountId/recordings/not-a-uuid", await http("GET", `/accounts/${acc}/recordings/not-a-uuid`, { token: A.token })],
+        ["GET /recordings/not-a-uuid/transcript", await http("GET", `/recordings/not-a-uuid/transcript`, { token: A.token })],
+        ["GET /recordings/<the uppercase captureId>/transcript", await http("GET", `/recordings/${capX.captureId}/transcript`, { token: A.token })],
+      ];
+      record(probes.every(([, r]) => r.status === 404 && r.json?.error === "recording_not_found"), "captures 11: a non-UUID id, and a captureId (a UUID, but not a recording's id), are 404 recording_not_found on GET", probes.map(([l, r]) => `${l}: ${r.status}`).join("; "));
+    }
+
+    // 12. The owner reads the capture back; another member gets 404.
+    {
+      const own = await http("GET", `/accounts/${acc}/recordings/${xId}`, { token: A.token });
+      const ownTr = await http("GET", `/recordings/${xId}/transcript`, { token: A.token });
+      const otherRec = await http("GET", `/accounts/${acc}/recordings/${xId}`, { token: B.token });
+      const otherTr = await http("GET", `/recordings/${xId}/transcript`, { token: B.token });
+      record(
+        own.status === 200 && own.json?.recording?.slug === xRow.slug && ownTr.status === 200 && JSON.stringify(ownTr.json).includes(`hello ${WORD}`) && otherRec.status === 404 && otherTr.status === 404,
+        "captures 12: the owner reads the capture and its transcript back; another member gets 404 on both",
+        `owner ${own.status}/${ownTr.status}; other ${otherRec.status}/${otherTr.status}`,
+      );
+    }
+
+    // 14. The table loop's empty body is a 400, and nothing is written.
+    {
+      const nBefore = await allRecordings();
+      const r = await capPost(A, {});
+      record(r.status === 400 && r.json?.error === "invalid_request" && (await allRecordings()) === nBefore, "captures 14: an empty body {} is 400 invalid_request and no recording is written", `${r.status} ${r.json?.error ?? ""}`);
     }
 
     // ---- people ------------------------------------------------------------
@@ -861,6 +1052,11 @@ async function main(): Promise<void> {
     const afterTr = await http("GET", `/recordings/${rec.a2.id}/transcript`, { token: B.token });
     const afterMcp = await rpc(B.token, "tools/list");
     record(before.status === 200 && after.status === 401 && afterMe.status === 401 && afterTr.status === 401 && afterMcp.status === 401, "revocation: removing a member makes their still-valid token 401 on the very next call, on every route and on /mcp", `before ${before.status}; after ${after.status}/${afterMe.status}/${afterTr.status}/mcp ${afterMcp.status}`);
+    {
+      const p = capPayload();
+      const r = await capPost(B, p);
+      record(r.status === 401 && (await capRows(p.captureId)).length === 0, "captures 13: a removed member's still-valid capture token is 401 on POST /captures, and nothing is written", `got ${r.status}`);
+    }
     if (B.refresh) {
       const refreshed = await http("POST", "/api/auth/oauth2/token", { form: { grant_type: "refresh_token", refresh_token: B.refresh, client_id: clientId, resource: cfg.mcpResource } });
       record(refreshed.status >= 400 && !refreshed.json?.access_token, "revocation: a removed member's refresh token no longer yields a new access token", `status ${refreshed.status}`);
