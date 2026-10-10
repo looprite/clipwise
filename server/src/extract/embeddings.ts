@@ -20,7 +20,12 @@ import {
   embed,
   momentEmbedText,
   toPgVectorLiteral,
+  type VoyageInputType,
 } from "../lib/voyage.js";
+
+// What turns texts into vectors. The real one is Voyage; the checks pass a stub.
+export type Embedder = (texts: string[], inputType: VoyageInputType, signal?: AbortSignal) => Promise<number[][]>;
+const voyageEmbedder: Embedder = (texts, inputType, signal) => embed(texts, inputType, undefined, signal);
 
 // Chunk size for fetch + transaction, not for Voyage — voyage.ts chunks
 // internally against the API's 1000-input / 320K-token ceilings. This is
@@ -46,7 +51,14 @@ export type EmbedResult = {
 // anything outside the run. Never throws — an API or DB failure leaves
 // the rows unembedded for the sweep to retry, which is what makes the
 // extraction path robust to Voyage outages per AD #13.
-export async function embedMomentsByIds(ids: string[]): Promise<EmbedResult> {
+//
+// One exception to "never throws": when `signal` has been aborted the abort is
+// rethrown, not counted as a failed batch. An aborted run is not a failed one.
+export async function embedMomentsByIds(
+  ids: string[],
+  opts: { embedder?: Embedder; signal?: AbortSignal } = {},
+): Promise<EmbedResult> {
+  const embedder = opts.embedder ?? voyageEmbedder;
   if (ids.length === 0) return { embedded: 0, failed: 0, skipped: 0 };
   let embedded = 0;
   let failed = 0;
@@ -80,8 +92,9 @@ export async function embedMomentsByIds(ids: string[]): Promise<EmbedResult> {
 
     let vectors: number[][];
     try {
-      vectors = await embed(pairs.map((p) => p.text), "document");
+      vectors = await embedder(pairs.map((p) => p.text), "document", opts.signal);
     } catch (err) {
+      if (opts.signal?.aborted) throw err;
       const msg = describeErrorLine(err);
       console.warn(
         `embeddings: batch of ${pairs.length} failed at Voyage — leaving embedding null for sweep to retry (${msg})`,

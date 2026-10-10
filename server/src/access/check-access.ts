@@ -508,6 +508,15 @@ async function main(): Promise<void> {
     type CapSeg = { track: "me" | "them"; startMs: number; endMs: number; text: string };
     const capSeg = (text: string, track: "me" | "them" = "me", startMs = 0, endMs = 1500): CapSeg => ({ track, startMs, endMs, text });
     const CAP_SEGS: CapSeg[] = [capSeg(`hello ${WORD}`), capSeg("hi there", "them", 1600, 3000)];
+    // The shapes the recorder sends: the manifest's tracks (recorder/app/main.js
+    // buildManifest and the stop-time readbacks) and the classifier's tracks
+    // (pipeline/classify-capture.ts).
+    const MANIFEST_TRACKS = [
+      { track: "system", file: "system-x.f32le.pcm", encoding: "f32le", container: "raw", channels: 1, sample_rate: 48000, sample_rate_source: "systemtap_reported_tap_format", device_name: "Out", device_uid: "out-uid", frames: 144000, data_bytes: 576000, duration_s: 3.0 },
+      { track: "mic", file: "mic-x.wav", encoding: "f32le", container: "wav", channels: 1, sample_rate: 48000, sample_rate_source: "wav_fmt_chunk_readback", device_name: "In", device_uid: "in-uid", frames: 144000, data_bytes: 576000, duration_s: 3.0 },
+    ];
+    const trackReport = (track: "tap" | "mic", label: "them" | "me") => ({ track, label, band: "live", verdict: "live", permission: "granted", rms: 0.02, peak: 0.4, nonzero_fraction: 0.9, duration_s: 3.0, gaps: [] as unknown[], note: "check" });
+    const CLASS_TRACKS = { tap: trackReport("tap", "them"), mic: trackReport("mic", "me") };
     const capPayload = (o: { id?: string; stem?: string; segments?: CapSeg[]; identity?: unknown; extra?: Record<string, unknown> } = {}) => {
       const segments = o.segments ?? CAP_SEGS;
       const id = o.id ?? randomUUID().toUpperCase();
@@ -520,8 +529,8 @@ async function main(): Promise<void> {
         language: "en",
         segments,
         sourceFidelity: { declaredTurnCount: segments.length, declaredBodyChars: segments.reduce((n, x) => n + x.text.length, 0), countedFrom: "check-access segments" },
-        classification: { verdict: "both_present", concern: false, reason: "check", excludedLabels: [] as string[] },
-        capture: { tracks: { tap: { verdict: "ok" }, mic: { verdict: "ok" } }, permissions: { tap: "granted", mic: "granted" }, triggerApp: null },
+        classification: { verdict: "both_present", concern: false, reason: "check", excludedLabels: [] as string[], tracks: CLASS_TRACKS },
+        capture: { tracks: MANIFEST_TRACKS, permissions: { tap: "granted", mic: "granted" }, triggerApp: null },
         ...(o.identity ? { identity: o.identity } : {}),
         ...o.extra,
       };
@@ -689,6 +698,43 @@ async function main(): Promise<void> {
       const nBefore = await allRecordings();
       const r = await capPost(A, {});
       record(r.status === 400 && r.json?.error === "invalid_request" && (await allRecordings()) === nBefore, "captures 14: an empty body {} is 400 invalid_request and no recording is written", `${r.status} ${r.json?.error ?? ""}`);
+    }
+
+    // 15. capture.tracks and classification.tracks of any other shape are 400, and nothing is stored.
+    {
+      const nBefore = await allRecordings();
+      const wrong: Array<[string, (p: ReturnType<typeof capPayload>) => unknown]> = [
+        ["capture.tracks as an object keyed tap and mic (not an array)", (p) => ({ ...p, capture: { ...p.capture, tracks: { tap: { verdict: "ok" }, mic: { verdict: "ok" } } } })],
+        ["capture.tracks with a duration_s that is a string", (p) => ({ ...p, capture: { ...p.capture, tracks: [{ ...MANIFEST_TRACKS[0], duration_s: "3.0" }, MANIFEST_TRACKS[1]] } })],
+        ["capture.tracks with a track name that is neither system nor mic", (p) => ({ ...p, capture: { ...p.capture, tracks: [{ ...MANIFEST_TRACKS[0], track: "tap" }] } })],
+        ["capture.tracks as a string", (p) => ({ ...p, capture: { ...p.capture, tracks: "tracks" } })],
+        ["capture.tracks as null", (p) => ({ ...p, capture: { ...p.capture, tracks: null } })],
+        ["capture.tracks with a scalar in the array", (p) => ({ ...p, capture: { ...p.capture, tracks: [MANIFEST_TRACKS[0], 7] } })],
+        ["classification.tracks without the mic report", (p) => ({ ...p, classification: { ...p.classification, tracks: { tap: CLASS_TRACKS.tap } } })],
+        ["classification.tracks with a verdict the classifier never gives", (p) => ({ ...p, classification: { ...p.classification, tracks: { tap: { ...CLASS_TRACKS.tap, verdict: "fine" }, mic: CLASS_TRACKS.mic } } })],
+        ["classification.tracks as an array", (p) => ({ ...p, classification: { ...p.classification, tracks: [CLASS_TRACKS.tap, CLASS_TRACKS.mic] } })],
+      ];
+      const results: string[] = [];
+      let allRefused = true;
+      for (const [name, build] of wrong) {
+        const p = capPayload();
+        const r = await capPost(A, build(p));
+        const written = (await capRows(p.captureId)).length;
+        const ok = r.status === 400 && r.json?.error === "invalid_request" && written === 0;
+        if (!ok) allRefused = false;
+        results.push(`${ok ? "ok" : "BAD"} ${name}: ${r.status} ${r.json?.error ?? ""} rows=${written}`);
+      }
+      record(allRefused && (await allRecordings()) === nBefore, "captures 15: capture.tracks and classification.tracks of any other shape are 400 invalid_request and nothing is written", results.filter((l) => l.startsWith("BAD")).join("; "));
+      // The right shapes still go in, with fields the server does not know kept as sent.
+      const p = capPayload();
+      const extraTrack = { ...MANIFEST_TRACKS[1], requested_sample_rate: 44100, device_source: "miccap_resolved_default_input" };
+      const ok = await capPost(A, { ...p, capture: { ...p.capture, tracks: [MANIFEST_TRACKS[0], extraTrack] } });
+      const stored = (await capRows(p.captureId))[0];
+      record(
+        ok.status === 201 && stored?.metadata?.capture?.tracks?.[1]?.requested_sample_rate === 44100 && stored?.metadata?.capture?.tracks?.[1]?.duration_s === 3.0 && stored?.metadata?.capture_quality?.tracks?.tap?.verdict === "live",
+        "captures 15: the recorder's shapes are accepted, a track's extra fields are kept as sent, and both are stored on the row",
+        `${ok.status} ${ok.json?.error ?? ""}`,
+      );
     }
 
     // ---- people ------------------------------------------------------------

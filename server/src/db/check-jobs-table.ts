@@ -46,6 +46,21 @@ async function main(): Promise<void> {
   for (const c of cons.rows) console.log(`  ${c.conname}: ${c.def}`);
   check("kind and state have their CHECK constraints", cons.rows.some((c) => c.conname === "jobs_kind_valid") && cons.rows.some((c) => c.conname === "jobs_state_valid"));
 
+  // What deleting an unpromoted run's moments (jobs/worker.ts) can touch: the
+  // foreign keys that point at moments, read from the database.
+  const fks = await pool.query(
+    `select conrelid::regclass::text as from_table, a.attname as from_column, c.confdeltype as on_delete
+     from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any(c.conkey)
+     where c.contype = 'f' and c.confrelid = 'moments'::regclass order by 1, 2`,
+  );
+  console.log("foreign keys that reference moments:");
+  for (const f of fks.rows) console.log(`  ${f.from_table}.${f.from_column} ON DELETE ${({ a: "NO ACTION", r: "RESTRICT", c: "CASCADE", n: "SET NULL", d: "SET DEFAULT" } as Record<string, string>)[f.on_delete as string]}`);
+  check(
+    "the only foreign key into moments is clips.moment_id, ON DELETE SET NULL",
+    fks.rows.length === 1 && fks.rows[0].from_table === "clips" && fks.rows[0].from_column === "moment_id" && fks.rows[0].on_delete === "n",
+    JSON.stringify(fks.rows),
+  );
+
   const fx = await makeAccount("check-jobs-table");
   try {
     const a = await makeRecording(fx, { segments: 1 });

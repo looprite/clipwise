@@ -50,13 +50,14 @@ export async function embed(
   texts: string[],
   inputType: VoyageInputType,
   model: string = DEFAULT_MODEL,
+  signal?: AbortSignal,
 ): Promise<number[][]> {
   const apiKey = process.env.VOYAGE_API_KEY;
   if (!apiKey) throw new Error("VOYAGE_API_KEY not set");
   if (texts.length === 0) return [];
   const out: number[][] = [];
   for (const chunk of chunkForVoyage(texts)) {
-    const vectors = await embedOne(chunk, inputType, model, apiKey);
+    const vectors = await embedOne(chunk, inputType, model, apiKey, signal);
     for (const v of vectors) out.push(v);
   }
   return out;
@@ -67,6 +68,7 @@ async function embedOne(
   inputType: VoyageInputType,
   model: string,
   apiKey: string,
+  signal?: AbortSignal,
 ): Promise<number[][]> {
   const res = await fetch(VOYAGE_ENDPOINT, {
     method: "POST",
@@ -75,6 +77,7 @@ async function embedOne(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({ input: texts, model, input_type: inputType }),
+    signal,
   });
   if (!res.ok) {
     // The status only. The response body is Voyage's error text, which can quote

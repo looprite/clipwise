@@ -94,6 +94,13 @@ function describeOne(e: ErrorLike): string {
   return parts.join(" ");
 }
 
+// The error's class alone (jobs.error_class): "BadRequestError", "Error",
+// "EmbeddingIncompleteError". Nothing of its message.
+export function errorClassOf(err: unknown): string {
+  if (typeof err !== "object" || err === null) return `non-Error(${typeof err})`;
+  return className(err as ErrorLike).slice(0, 128);
+}
+
 export function describeError(err: unknown, opts: { frames?: boolean } = {}): string {
   if (typeof err !== "object" || err === null) return `non-Error thrown (${typeof err})`;
   const chain: string[] = [];
