@@ -52,6 +52,12 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
   },
   "GET /oauth/google/connect": { access: "admin", requires: "mcp", note: "starts a calendar connection for the caller's own account" },
 
+  "POST /captures": {
+    access: "member",
+    requires: "capture",
+    note: "stores a finished capture as a recording owned by the caller (account and owner from the token); a repeat of the caller's own capture is idempotent, another member's capture id is 409",
+  },
+
   "GET /accounts/me": { access: "member", requires: "mcp", note: "the caller's own account and membership" },
 
   "GET /accounts/:accountId/people": { access: "member", requires: "mcp", note: "people on recordings the caller can see, plus unattached ones" },
@@ -69,7 +75,6 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
   "GET /accounts/:accountId/moments/:id": { access: "member", requires: "mcp", note: "404 unless the caller can see it" },
 
   "GET /recordings/:id/transcript": { access: "member", requires: "mcp", note: "404 unless the caller can see the recording" },
-  "POST /recordings/:id/transcript": { access: "owner", requires: "capture", note: "only the recording's owner" },
 };
 
 // The tools Claude calls, served at /mcp. check-access.ts asks the running server
