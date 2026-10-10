@@ -38,6 +38,11 @@
 //       is inside a model call that never answers: exit 0 inside the 10 s drain
 //       cap, the job queued again with its attempts unchanged and no lease, no
 //       rows left; then it runs to done on one attempt
+//   e   SIGKILL to a real server process after its run has written moments and
+//       while it waits on the collapse call: once the dead lease runs out, a worker
+//       started here (start(): the boot path) claims the job, deletes the killed
+//       run's rows, and promotes exactly one run; the killed attempt is counted
+//       (only a shutdown or a lost lease gives one back), so attempts is 2
 // Throughout: no log line holds the planted phrase (the spawned server's lines
 // included).
 //
@@ -675,6 +680,84 @@ async function main(): Promise<void> {
       } finally {
         hang.closeAllConnections();
         hang.close();
+      }
+    }
+
+    // ---- e ---------------------------------------------------------------------
+    // The server in its own process again, its Anthropic calls answered over HTTP
+    // by the stub model here: pass 1 and both pass 2 calls are answered, so the run
+    // inserts its moments, and the collapse call is never answered. The process is
+    // killed outright there, holding the lease, with a run's rows written and not
+    // promoted.
+    if (wanted("e")) {
+      await clearJobs();
+      const remote = model({ onCall: async ({ kind }) => { if (kind === "collapse") await new Promise(() => {}); } });
+      const standIn = createServer((req, res) => {
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+          void remote
+            .fetch("http://stand-in/v1/messages", { method: "POST", body })
+            .then(async (r) => {
+              res.writeHead(r.status, Object.fromEntries(r.headers));
+              res.end(await r.text());
+            })
+            .catch(() => res.destroy());
+        });
+      });
+      standIn.listen(0, "127.0.0.1");
+      await new Promise((r) => standIn.once("listening", r));
+      try {
+        const { recordingId } = await fresh();
+        const [before] = await jobsOf(recordingId);
+        const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
+          cwd: resolve(import.meta.dirname, "..", ".."),
+          env: { ...process.env, PORT: "0", ANTHROPIC_API_KEY: "stub-key", ANTHROPIC_BASE_URL: `http://127.0.0.1:${(standIn.address() as AddressInfo).port}` },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        children.push(child);
+        for (const stream of [child.stdout, child.stderr]) {
+          createInterface({ input: stream! }).on("line", (line) => {
+            captured.push(line);
+            realWrite(`    e| ${line}\n`);
+          });
+        }
+        const exited = new Promise<{ code: number | null; signal: string | null }>((r) => child.once("exit", (code, signal) => r({ code, signal })));
+        let early: { code: number | null } | null = null;
+        void exited.then((x) => (early = x));
+        const t0 = Date.now();
+        while (!remote.calls.includes("collapse") && !early && Date.now() - t0 < 30_000) await sleep(20);
+        const mid = (await jobsOf(recordingId))[0];
+        const killedRun = mid.runIds[0] ?? "";
+        const leftBefore = (await momentsOf(recordingId)).filter((m) => m.run === killedRun).length;
+        check("e the spawned server's run wrote its moments and is waiting on the collapse call, holding the job", !early && remote.calls.join(",") === "pass1,pass2,pass2,collapse" && mid.state === "running" && mid.attempts === 1 && mid.runIds.length === 1 && leftBefore > 0, JSON.stringify({ exitedEarly: early, calls: remote.calls, state: mid.state, attempts: mid.attempts, runIds: mid.runIds.length, killedRunRows: leftBefore }));
+        child.kill("SIGKILL");
+        const ex = await exited;
+        check("e the process was killed outright (SIGKILL), with the job still running under its lease", ex.signal === "SIGKILL" && (await jobsOf(recordingId))[0].state === "running", JSON.stringify(ex));
+
+        // A worker here, through its boot path: start() sees the running job's lease
+        // in the future and arms its timer for when it runs out.
+        const stub = model();
+        const w = worker(stub, makeStubEmbedder());
+        const tKill = Date.now();
+        // The wait for the lease (up to a whole lease, 60 s) is deliberate, not a
+        // stall: it gets a fresh watchdog window, and the rest of the run another.
+        stall.refresh();
+        await w.start();
+        const jobs = await settle(recordingId, 90_000);
+        say(`e the dead lease ran out and the job was taken over and finished ${Math.round((Date.now() - tKill) / 1000)} s after the kill`);
+        stall.refresh();
+        await w.stop();
+        const rec = await recOf(recordingId);
+        const ms = await momentsOf(recordingId);
+        const runs = new Set(ms.map((m) => m.run));
+        check("e the killed run's leftover rows are deleted", ms.every((m) => m.run !== killedRun), JSON.stringify({ killedRunRowsBefore: leftBefore, killedRunRowsAfter: ms.filter((m) => m.run === killedRun).length }));
+        check("e exactly one run is promoted: every moment is the recording's current run, which is the second recorded on the job", runs.size === 1 && ms.length > 0 && ms[0].run === rec.run && jobs[0].runIds.length === 2 && jobs[0].runIds[1] === rec.run, JSON.stringify({ distinctRuns: runs.size, runIds: jobs[0].runIds.length, currentIsSecond: jobs[0].runIds[1] === rec.run }));
+        check("e the recording ends ready, the job done", rec.status === "ready" && jobs.length === 1 && jobs[0].state === "done", JSON.stringify({ status: rec.status, jobs: jobs.map((j) => j.state) }));
+        check("e attempts is 2: the killed attempt is counted, as only a shutdown or a lost lease gives one back", jobs[0].attempts === before.attempts + 2, JSON.stringify({ before: before.attempts, after: jobs[0].attempts }));
+      } finally {
+        standIn.closeAllConnections();
+        standIn.close();
       }
     }
 
