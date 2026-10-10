@@ -11,7 +11,17 @@
 #                                 made: main's are there. For trying a schema
 #                                 push on real data; `run` allows only
 #                                 check-unique-index on it
-#   scratch-db.sh push            drizzle-kit push against the scratch endpoint
+#   scratch-db.sh push            drizzle-kit push against the scratch endpoint,
+#                                 stdin closed: it shows the plan, and exits 1 if
+#                                 the push did not apply (drizzle-kit stops at its
+#                                 `strict` confirmation and still exits 0)
+#   scratch-db.sh push --apply    the same, then, if the plan holds no data-loss
+#                                 line (a drop, truncate or remove, or the "Do you
+#                                 still want to push changes?" prompt), the push
+#                                 again with --force. Otherwise exit 1, unforced
+#   scratch-db.sh push-check [--apply] <file>
+#                                 the same decision on saved drizzle-kit output;
+#                                 touches nothing (for showing the matching)
 #   scratch-db.sh run <check>     check-access | check-auth | check-trash, or any
 #                                 other src/**/check-*.ts by its file name
 #   scratch-db.sh down            delete the branch and its files, then read back
@@ -493,16 +503,108 @@ cmd_run() {
   esac
 }
 
+# ---- reading what drizzle-kit said ----
+# Its exit status is 0 when it stops at a confirmation (measured; it is 1 when it
+# cannot connect), so whether a push applied is decided from its text: it prints
+# "Changes applied" when it ran the statements and "No changes detected" when
+# there was nothing to run, and an "Error:" line when it failed.
+push_applied() {
+  printf '%s\n' "$1" | grep -qE 'Changes applied|No changes detected' || return 1
+  printf '%s\n' "$1" | grep -qE '^Error:' && return 1
+  return 0
+}
+
+# Lines that mean a push would lose data: the prompt that offers to remove or
+# truncate, or any drop / truncate / remove in the plan. Fails closed: a word
+# match is enough.
+push_dataloss_lines() {
+  printf '%s\n' "$1" | grep -iE 'Do you still want to push changes\?' 
+  printf '%s\n' "$1" | grep -iwE 'drop|truncate|remove'
+  return 0
+}
+
+# One drizzle-kit push, stdin closed; its text, with colour codes and the
+# progress frames removed. $@ are extra drizzle-kit flags.
+drizzle_push() {
+  clean_exec "$F" DATABASE_URL -- npx --no-install drizzle-kit push "$@" </dev/null 2>&1 \
+    | scrub | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g' | grep -v 'Pulling schema from database\|Pulling schema'
+}
+
+# What `push --apply` does with a plan (its text in $1): 0 = nothing to apply,
+# 1 = refuse (data-loss line, or the plan itself failed), 2 = go ahead, force.
+apply_decision() {
+  local lines
+  lines="$(push_dataloss_lines "$1")"
+  if [ -n "$lines" ]; then
+    say "push: refused: the plan holds a data-loss line, not forcing:" >&2
+    printf '%s\n' "$lines" | sed 's/^/  /' >&2
+    return 1
+  fi
+  if push_applied "$1"; then return 0; fi
+  # The expected state of a plan with changes: it listed the statements and
+  # stopped at the confirmation because there is no TTY. Anything else (it could
+  # not connect, it failed) is not a plan to force.
+  if printf '%s\n' "$1" | grep -q 'You are about to execute current statements' \
+    && printf '%s\n' "$1" | grep -q 'Interactive prompts require a TTY'; then
+    return 2
+  fi
+  say "push: failed: the plan did not reach drizzle-kit's confirmation, not forcing" >&2
+  return 1
+}
+
 # drizzle-kit push against the scratch endpoint, and nothing else. stdin is
-# closed, so a prompt (a data-loss warning, a truncate question) cannot be
-# answered: it is the output that says whether one appeared. Progress-spinner
-# frames are dropped from the log; every other line is kept.
+# closed, so a prompt (a data-loss warning, a truncate question, the `strict`
+# confirmation) cannot be answered: it is the output that says whether one
+# appeared. Progress-spinner frames are dropped from the log; every other line is
+# kept. Exit 1 if the push did not apply. With --apply, see apply_decision.
 cmd_push() {
+  local apply=0
+  case "${1:-}" in
+    "") ;;
+    --apply) apply=1 ;;
+    *) refuse "usage: scratch-db.sh push [--apply]" ;;
+  esac
   scratch_ready
   say "push: drizzle-kit push ($MODE branch)"
-  clean_exec "$F" DATABASE_URL -- npx --no-install drizzle-kit push </dev/null 2>&1 \
-    | scrub | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g' | grep -v 'Pulling schema from database\|Pulling schema' 
-  exit "${PIPESTATUS[0]}"
+  local out rc
+  out="$(drizzle_push)"
+  if [ "$apply" = 1 ]; then
+    say "push: plan (no --force):"
+    printf '%s\n' "$out"
+    apply_decision "$out"; rc=$?
+    case "$rc" in
+      0) say "push: nothing to apply"; exit 0 ;;
+      1) exit 1 ;;
+    esac
+    say "push: applying with --force (the statements above, no data-loss line)"
+    out="$(drizzle_push --force)"
+    printf '%s\n' "$out"
+  else
+    printf '%s\n' "$out"
+  fi
+  push_applied "$out" || fail "push did not apply"
+  say "push: applied or nothing to apply"
+}
+
+# The decision on saved output, with nothing touched: no branch, no database.
+cmd_push_check() {
+  local apply=0 file
+  if [ "${1:-}" = --apply ]; then apply=1; shift; fi
+  file="${1:-}"
+  [ -f "$file" ] || refuse "usage: scratch-db.sh push-check [--apply] <file>"
+  local text rc
+  text="$(cat "$file")"
+  if [ "$apply" = 1 ]; then
+    apply_decision "$text"; rc=$?
+    case "$rc" in
+      0) say "push-check --apply: nothing to apply (exit 0)"; exit 0 ;;
+      1) say "push-check --apply: refuse, would not force (exit 1)"; exit 1 ;;
+      *) say "push-check --apply: would force (exit 0)"; exit 0 ;;
+    esac
+  fi
+  if push_applied "$text"; then say "push-check: applied or nothing to apply (exit 0)"; exit 0; fi
+  say "push-check: did not apply (exit 1)"
+  exit 1
 }
 
 cmd_down() {
@@ -530,7 +632,8 @@ cmd_down() {
 case "${1:-}" in
   up) shift; cmd_up "$@" ;;
   run) shift; cmd_run "$@" ;;
-  push) cmd_push ;;
+  push) shift; cmd_push "$@" ;;
+  push-check) shift; cmd_push_check "$@" ;;
   down) cmd_down ;;
-  *) say "usage: scratch-db.sh up [--with-data] | push | run <check> | down" >&2; exit 2 ;;
+  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | down" >&2; exit 2 ;;
 esac
