@@ -34,7 +34,12 @@
 //       renewal on stands down at once
 //   k   a database that stays down is asked once per backoff step, and the steps
 //       start again after a success
-// Throughout: no log line holds the planted phrase.
+//   f   SIGTERM to a real server process (src/index.ts, spawned) while its worker
+//       is inside a model call that never answers: exit 0 inside the 10 s drain
+//       cap, the job queued again with its attempts unchanged and no lease, no
+//       rows left; then it runs to done on one attempt
+// Throughout: no log line holds the planted phrase (the spawned server's lines
+// included).
 //
 // CLIPWISE_CHECK_CONTROL=<case,case> runs only those cases (scratch-db.sh passes
 // the variable through). A control is a case run against code with its protection
@@ -43,8 +48,12 @@
 //   scripts/scratch-db.sh run check-jobs
 
 import express from "express";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { inspect } from "node:util";
 import { Client } from "pg";
 import { eq, sql } from "drizzle-orm";
@@ -253,6 +262,7 @@ async function main(): Promise<void> {
     return jobs;
   };
   const named = (body: string): boolean => body.includes("Host Name:");
+  const children: ChildProcess[] = [];
 
   try {
     // ---- enqueue ------------------------------------------------------------
@@ -590,6 +600,84 @@ async function main(): Promise<void> {
       await w.stop();
     }
 
+    // ---- f ---------------------------------------------------------------------
+    // The server as Fly runs it, in its own process: src/index.ts, which listens,
+    // loads the app and starts the worker, and whose SIGTERM handler is the one
+    // under test. Its worker uses the real Anthropic SDK, pointed (ANTHROPIC_BASE_URL)
+    // at an HTTP server here that takes the request and never answers. When that
+    // request's connection closes, the abort has reached the wire.
+    if (wanted("f")) {
+      await clearJobs();
+      let requestAt = 0;
+      let closedAt = 0;
+      const hang = createServer((req, res) => {
+        if (!requestAt) requestAt = Date.now();
+        req.resume();
+        res.on("close", () => {
+          if (!closedAt) closedAt = Date.now();
+        });
+      });
+      hang.listen(0, "127.0.0.1");
+      await new Promise((r) => hang.once("listening", r));
+      try {
+        const { recordingId } = await fresh();
+        const [before] = await jobsOf(recordingId);
+        const lines: { t: number; line: string }[] = [];
+        const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
+          cwd: resolve(import.meta.dirname, "..", ".."),
+          env: { ...process.env, PORT: "0", ANTHROPIC_API_KEY: "stub-key", ANTHROPIC_BASE_URL: `http://127.0.0.1:${(hang.address() as AddressInfo).port}` },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        children.push(child);
+        for (const stream of [child.stdout, child.stderr]) {
+          createInterface({ input: stream! }).on("line", (line) => {
+            lines.push({ t: Date.now(), line });
+            captured.push(line);
+            realWrite(`    f| ${line}\n`);
+          });
+        }
+        const exited = new Promise<{ code: number | null; signal: string | null; t: number }>((r) => child.once("exit", (code, signal) => r({ code, signal, t: Date.now() })));
+        let early: { code: number | null } | null = null;
+        void exited.then((e) => (early = e));
+        const t0 = Date.now();
+        while (!requestAt && !early && Date.now() - t0 < 30_000) await sleep(20);
+        const inCall = requestAt > 0 && !early;
+        check("f the spawned server's worker claimed the job and is inside the model call", inCall && lines.some((l) => l.line.includes(`jobs: ${before.id} `) && l.line.includes("queued→running (attempt 1)")), JSON.stringify({ requestSeen: requestAt > 0, exitedEarly: early }));
+        let ex: { code: number | null; signal: string | null; t: number } | null = null;
+        let sigAt = 0;
+        if (inCall) {
+          await sleep(300); // inside the call, not on its first byte
+          sigAt = Date.now();
+          child.kill("SIGTERM");
+          ex = await Promise.race([exited, sleep(15_000).then(() => null)]);
+          if (!ex) {
+            child.kill("SIGKILL");
+            await exited;
+          }
+        } else {
+          child.kill("SIGKILL");
+          await exited;
+        }
+        const requeuedAt = lines.find((l) => l.line.includes(`jobs: ${before.id} `) && l.line.includes("running→queued"))?.t ?? 0;
+        const since = (t: number): string => (t && sigAt ? `${t - sigAt} ms` : "never");
+        say(`f timings from SIGTERM: the model request's connection closed ${since(closedAt)}, "running→queued" logged ${since(requeuedAt)}, the process exited ${ex ? since(ex.t) : "never (killed at 15 s)"}`);
+        const [after] = await jobsOf(recordingId);
+        const allJobs = (await pool.query("select count(*)::int as n from jobs")).rows[0].n;
+        const moments = await momentsOf(recordingId);
+        const rec = await recOf(recordingId);
+        check("f SIGTERM: the process exits 0 inside the 10 s drain cap", !!ex && ex.code === 0 && ex.t - sigAt < 10_000, JSON.stringify({ code: ex?.code, signal: ex?.signal, ms: ex ? ex.t - sigAt : null }));
+        check("f the abort reached the model call (its connection closed) and the job was requeued before the exit", closedAt > sigAt && requeuedAt > sigAt && !!ex && requeuedAt <= ex.t, JSON.stringify({ closed: since(closedAt), requeued: since(requeuedAt) }));
+        check("f the job is queued again with attempts unchanged and no lease", after.state === "queued" && after.attempts === before.attempts && after.leaseToken === null && after.leaseExpiresAt === null, JSON.stringify({ state: after.state, attemptsBefore: before.attempts, attemptsAfter: after.attempts, hasLease: after.leaseToken !== null, hasExpiry: after.leaseExpiresAt !== null }));
+        check("f no rows left: no moments for the recording, it is still pending with no current run, and this is the only job", moments.length === 0 && rec.status === "pending" && rec.run === null && allJobs === 1, JSON.stringify({ moments: moments.length, rec, jobs: allJobs }));
+        // Then the job finishes, on one attempt: the shutdown's was not counted.
+        const jobs = await runToEnd(worker(model(), makeStubEmbedder()), recordingId);
+        check("f afterwards the job runs to done with attempts 1", jobs.length === 1 && jobs[0].state === "done" && jobs[0].attempts === 1 && (await recOf(recordingId)).status === "ready", JSON.stringify(jobs.map((j) => [j.state, j.attempts])));
+      } finally {
+        hang.closeAllConnections();
+        hang.close();
+      }
+    }
+
     // ---- no content in any log -----------------------------------------------------
     check("no log line written during the whole run holds the planted phrase", !captured.some((l) => l.includes(PHRASE)), captured.filter((l) => l.includes(PHRASE)).slice(0, 3).join("\n     "));
   } finally {
@@ -605,6 +693,8 @@ async function main(): Promise<void> {
       }
     };
     await attempt("stop the workers", () => Promise.all(workers.map((w) => w.stop())));
+    // A spawned server still running (case f gave up on it) holds a pool of its own.
+    for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
     await attempt("read the lease-lost lookups", () => Promise.all(leaseLostLookups));
     say(`LEASELOST events this run: ${leaseLost.length}`);
     for (const e of leaseLost) say(`LEASELOST job=${e.jobId.slice(0, 8)} doneLineLoggedBefore=${e.doneLineBefore} dbStateAfter=${e.dbState}`);
