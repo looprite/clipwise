@@ -15,7 +15,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
 import { runCollapse, type CollapseInput, type CollapseResult } from "./collapse.js";
 import { embedMomentsByIds } from "./embeddings.js";
@@ -185,6 +185,15 @@ async function loadSpeakerFingerprint(recordingId: string): Promise<string> {
     .where(eq(schema.speakers.recordingId, recordingId))
     .orderBy(asc(schema.speakers.label));
   return JSON.stringify(rows);
+}
+
+// The fingerprint as stored on a recording when a run is promoted
+// (metadata.extraction_speaker_fingerprint): a hash, so the names themselves are
+// not copied into a second place. The jobs worker compares it with the current
+// one to know whether a re-extract job has anything to do.
+const hashOf = (fingerprint: string): string => createHash("sha256").update(fingerprint).digest("hex");
+export async function speakerFingerprintHash(recordingId: string): Promise<string> {
+  return hashOf(await loadSpeakerFingerprint(recordingId));
 }
 
 // Ground truth for the roster the unresolved-identity guard hands the
@@ -573,7 +582,7 @@ export const CAPTURE_DURATION_SEC = sql`(
 // and saying so again is correct. duration_sec and ended_at do coalesce,
 // because a value already measured should not be replaced by a null when the
 // source metadata is absent.
-async function promoteRecording(recordingId: string, runUuid: string): Promise<void> {
+async function promoteRecording(recordingId: string, runUuid: string, builtOnFingerprint: string): Promise<void> {
   await db
     .update(schema.recordings)
     .set({
@@ -600,7 +609,9 @@ async function promoteRecording(recordingId: string, runUuid: string): Promise<v
         ${schema.recordings.startedAt} + make_interval(secs => ${CAPTURE_DURATION_SEC}),
         ${schema.recordings.endedAt}
       )`,
-      metadata: sql`coalesce(${schema.recordings.metadata}, '{}'::jsonb) || jsonb_build_object('current_extraction_run', ${runUuid}::text)`,
+      // extraction_speaker_fingerprint: the speaker names this run was built on
+      // (hashOf), so a later re-extract job can tell whether names changed since.
+      metadata: sql`coalesce(${schema.recordings.metadata}, '{}'::jsonb) || jsonb_build_object('current_extraction_run', ${runUuid}::text, 'extraction_speaker_fingerprint', ${hashOf(builtOnFingerprint)}::text)`,
     })
     .where(eq(schema.recordings.id, recordingId));
   console.log(
@@ -646,7 +657,7 @@ export async function runExtraction(
     // normal path promotes with below, so completion means the same thing
     // on both paths as far as recover.ts's isComplete() is concerned.
     const runUuid = randomUUID();
-    await promoteRecording(recordingId, runUuid);
+    await promoteRecording(recordingId, runUuid, await loadSpeakerFingerprint(recordingId));
     console.log(
       `extract: recording ${recordingId} has zero segments — nothing to extract, promoted with 0 moments`,
     );
@@ -913,7 +924,7 @@ export async function runExtraction(
   // whatever run was previously current, and the failed run's rows remain
   // queryable outside the gate for inspection but do not become visible. See
   // promoteRecording's own comment for what the statement itself does.
-  await promoteRecording(recordingId, runUuid);
+  await promoteRecording(recordingId, runUuid, speakerFingerprintAtStart);
 
   return {
     runUuid,

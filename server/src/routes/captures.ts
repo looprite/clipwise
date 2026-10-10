@@ -21,7 +21,11 @@
 //   another member's id   409 capture_id_taken; the row is unchanged
 // "Same content" is a SHA-256 of the segments as sent (metadata.capture.content_hash).
 //
-// The end of the request is afterStore(). It does nothing yet except answer 201.
+// The extraction job is queued in the same transaction as the capture, so a stored
+// capture always has one. The end of the request is afterStore(): answer 201, then
+// wake the worker. A repeat creates no job, except that an identity answer which
+// names a speaker after extraction has started or finished queues a re-extract
+// (jobs/enqueue.ts has the cases).
 
 import { createHash } from "node:crypto";
 import type { RequestHandler, Response } from "express";
@@ -41,6 +45,8 @@ import {
 import { countObservedFidelity, sourceFidelitySchema } from "../lib/fidelity.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
 import { slugify } from "../lib/slug.js";
+import { enqueueJob, enqueueReextractForLateNames } from "../jobs/enqueue.js";
+import { wakeWorker } from "../jobs/registry.js";
 
 const trackSchema = z.enum(["me", "them"]);
 
@@ -105,11 +111,16 @@ type Stored = {
   identityApplied: boolean;
 };
 
-// What happens once a capture is stored. Nothing yet: the transcript is in the
-// database and the recorder is told so. The job that picks it up from here
-// replaces the body of this function.
-function afterStore(res: Response, stored: Stored): void {
+// What happens once a capture is stored and its job committed: the recorder is
+// told, then the worker is woken in this process. Ids only in the log.
+function afterStore(res: Response, stored: Stored, jobId: string | null): void {
   res.status(201).json({ created: true, ...stored });
+  logQueued(jobId, stored.recordingId, "extract");
+  wakeWorker();
+}
+
+function logQueued(jobId: string | null, recordingId: string, kind: string): void {
+  if (jobId) console.log(`jobs: ${jobId} recording=${recordingId} kind=${kind} queued`);
 }
 
 // The first 8 hex digits of the capture id, lowercase.
@@ -246,14 +257,19 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       if (storedHash !== contentHash) throw new HttpError(409, "capture_content_conflict");
 
       let identityApplied = false;
+      let reextractJobId: string | null = null;
       if (identity && !identityAlreadyApplied(existing.metadata, identity)) {
         await applyIdentity(tx, existing.id, identity);
-        await applySpeakerNames(tx, existing.id, identity);
+        const mapping = await applySpeakerNames(tx, existing.id, identity);
         await applyScope(tx, existing.id, identity);
         await storeIdentityMetadata(tx, existing.id, identity);
         identityApplied = true;
+        // Only a speaker name actually written changes what extraction would see.
+        if (mapping.applied.length > 0) {
+          reextractJobId = await enqueueReextractForLateNames(tx, existing);
+        }
       }
-      return { kind: "repeat" as const, recordingId: existing.id, identityApplied };
+      return { kind: "repeat" as const, recordingId: existing.id, identityApplied, reextractJobId };
     }
 
     const [transcript] = await tx
@@ -315,8 +331,11 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       );
     }
 
+    const jobId = await enqueueJob(tx, { accountId: ctx.accountId, recordingId: recording.id, kind: "extract" });
+
     return {
       kind: "created" as const,
+      jobId,
       stored: {
         recordingId: recording.id,
         transcriptId: transcript.id,
@@ -329,8 +348,10 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
   });
 
   if (outcome.kind === "created") {
-    afterStore(res, outcome.stored);
+    afterStore(res, outcome.stored, outcome.jobId);
     return;
   }
   res.status(200).json({ created: false, recordingId: outcome.recordingId, identityApplied: outcome.identityApplied });
+  logQueued(outcome.reextractJobId, outcome.recordingId, "re_extract");
+  if (outcome.reextractJobId) wakeWorker();
 });
