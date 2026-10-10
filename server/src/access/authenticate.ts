@@ -25,6 +25,8 @@ import { findMemberByAuthUserId } from "../auth/membership.js";
 import { CAPTURE_SCOPE, type ExpectedResource } from "../auth/scopes.js";
 import { verifyAccessToken } from "../auth/tokens.js";
 import { asyncHandler, HttpError } from "../lib/http.js";
+import { logError } from "../lib/safe-error.js";
+import { isDependencyDown, sendUnavailable } from "../lib/unavailable.js";
 import type { AccessContext } from "./context.js";
 
 declare global {
@@ -78,16 +80,26 @@ function requireToken(expected: ExpectedResource): RequestHandler {
       res.status(503).json({ error: "auth_not_configured" });
       return;
     }
-    const ctx = await authenticate(req, expected);
-    if (!ctx) {
-      if (expected === "capture" && (await authenticate(req, "mcp"))) {
-        insufficientScope(res);
+    try {
+      const ctx = await authenticate(req, expected);
+      if (!ctx) {
+        if (expected === "capture" && (await authenticate(req, "mcp"))) {
+          insufficientScope(res);
+          return;
+        }
+        unauthorized(res);
         return;
       }
-      unauthorized(res);
+      req.access = ctx;
+    } catch (err) {
+      // The key set or the member lookup could not reach the database: say so
+      // (503, retry) rather than 401, which would tell a valid caller to sign in
+      // again. Anything else is ours and stays a 500 via errorHandler.
+      if (!isDependencyDown(err)) throw err;
+      logError(`${req.method} ${req.baseUrl}${req.route?.path ?? ""}`, err);
+      sendUnavailable(res);
       return;
     }
-    req.access = ctx;
     next();
   });
 }

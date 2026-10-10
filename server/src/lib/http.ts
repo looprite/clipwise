@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response, RequestHandler } from "express";
 import { z, ZodError, type ZodSchema } from "zod";
 import { logError } from "./safe-error.js";
+import { isDependencyDown, sendUnavailable } from "./unavailable.js";
 
 export const asyncHandler =
   (fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>): RequestHandler =>
@@ -78,5 +79,9 @@ export const errorHandler = (
   // The error itself goes through logError, which leaves out anything a query,
   // a JSON body or an API response carried (lib/safe-error.ts).
   logError(`${req.method} ${req.baseUrl}${req.route?.path ?? ""}`, err);
+  if (isDependencyDown(err)) {
+    sendUnavailable(res);
+    return;
+  }
   res.status(500).json({ error: "internal_error" });
 };

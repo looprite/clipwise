@@ -24,6 +24,7 @@
 
 import {
   createLocalJWKSet,
+  decodeProtectedHeader,
   errors,
   jwtVerify,
   type JSONWebKeySet,
@@ -55,6 +56,16 @@ export async function verifyAccessToken(
   const cfg = inject.config ?? authConfigFromEnv();
   const issuer = `${cfg.baseURL}/api/auth`;
   const options: JWTVerifyOptions = { issuer, typ: "at+jwt", algorithms: ["EdDSA"], clockTolerance: 5 };
+  // A string that is not shaped like a token is refused here, before any key is
+  // fetched: garbage gets 401 even when the database is down.
+  // decodeProtectedHeader only parses the string (no I/O), and for a string that
+  // is not a JWT it throws a plain TypeError, not a JOSEError (jose 6.2.12,
+  // lib/validate.js), so here any throw means "not a token".
+  try {
+    decodeProtectedHeader(token);
+  } catch {
+    return null;
+  }
   try {
     let result;
     if (inject.keys) {
@@ -82,7 +93,12 @@ export async function verifyAccessToken(
       scope,
       clientId: typeof payload.client_id === "string" ? payload.client_id : null,
     };
-  } catch {
-    return null;
+  } catch (err) {
+    // null means "this token is not valid", and only jose can say so. Anything
+    // else (the database behind the key set, a bug) is not the token's fault and
+    // is thrown, so an outage is a 503 and not a 401 that sends the recorder
+    // back to sign in.
+    if (err instanceof errors.JOSEError) return null;
+    throw err;
   }
 }

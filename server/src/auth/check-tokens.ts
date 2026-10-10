@@ -6,7 +6,7 @@
 // Usage:
 //   tsx src/auth/check-tokens.ts
 
-import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWTPayload } from "jose";
+import { SignJWT, createLocalJWKSet, errors, exportJWK, generateKeyPair, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { CAPTURE_SCOPE, type ExpectedResource } from "./scopes.js";
 import { verifyAccessToken } from "./tokens.js";
 
@@ -100,5 +100,38 @@ const shape = good?.sub === "user-1" && good.scope.join() === "openid,offline_ac
 if (!shape) failed++;
 process.stdout.write(`${shape ? "ok  " : "FAIL"} an accepted token yields its subject, scopes and client\n`);
 
-process.stdout.write(`\n${CASES.length + 1 - failed}/${CASES.length + 1} passed\n`);
+// What null means: only jose can say "this token is not valid". Any other error
+// (a key set that could not be fetched, a bug) rejects, so the caller can tell an
+// outage from a bad token (access/authenticate.ts answers 503 for the first).
+let extra = 0;
+function check(ok: boolean, name: string): void {
+  extra++;
+  if (!ok) failed++;
+  process.stdout.write(`${ok ? "ok  " : "FAIL"} ${name}\n`);
+}
+const boom = new Error("keys unavailable (not a JOSE error)");
+const throwing = (err: Error): JWTVerifyGetKey => async () => {
+  throw err;
+};
+const rejected = await verifyAccessToken(await sign(), "mcp", { keys: throwing(boom), config }).then(
+  () => null,
+  (e: unknown) => e,
+);
+check(rejected === boom, "a non-JOSE error from the key lookup rejects (it is not turned into null)");
+const joseNull = await verifyAccessToken(await sign(), "mcp", { keys: throwing(new errors.JWKSNoMatchingKey()), config }).then(
+  (v) => v,
+  () => "rejected",
+);
+check(joseNull === null, "a JOSE error from the key lookup returns null");
+let keyCalls = 0;
+const counting: JWTVerifyGetKey = async (...a) => {
+  keyCalls++;
+  return keys(...a);
+};
+const shapes = ["not.a.token", "", "a.b.c", "Bearer x", "....", "eyJhbGciOiJFZERTQSJ9"];
+const results = await Promise.all(shapes.map((t) => verifyAccessToken(t, "mcp", { keys: counting, config }).then((v) => v, () => "rejected")));
+check(results.every((r) => r === null), "strings that are not shaped like a token return null");
+check(keyCalls === 0, "...and the key lookup is never called for them");
+
+process.stdout.write(`\n${CASES.length + 1 + extra - failed}/${CASES.length + 1 + extra} passed\n`);
 process.exit(failed === 0 ? 0 : 1);
