@@ -1,6 +1,6 @@
 import "dotenv/config";
-import type { Server } from "node:http";
-import { buildApp } from "./app.js";
+import { createServer, type Server } from "node:http";
+import { createGate } from "./boot.js";
 import { pool } from "./db/index.js";
 import { logError } from "./lib/safe-error.js";
 
@@ -47,10 +47,30 @@ export async function startServer(): Promise<(signal: string) => void> {
     server.closeIdleConnections();
   };
 
-  const { app } = await buildApp();
+  // Listen first (boot.ts): the port is open before the app loads, so a health
+  // check connects at once instead of being refused for the whole load, and
+  // anything that gets in before the app is ready is answered by the gate.
+  // app.js is imported here and not at the top, because importing it is most of
+  // the load, and from the listen callback and not right after listen(): the
+  // import evaluates the whole module graph in one synchronous stretch, and
+  // started before the callback it would run first and "listening" would wait
+  // for it. A request that arrives during that stretch waits for it (about 220 ms
+  // on a laptop); it is not refused.
+  const gate = createGate();
   const port = Number(process.env.PORT ?? 3000);
-  const server: Server = app.listen(port, () => {
+  const server: Server = createServer(gate.listener);
+  server.listen(port, () => {
     console.log(`Clipwise server listening on port ${port}`);
+    import("./app.js")
+      .then(({ buildApp }) => buildApp())
+      .then(({ app }) => {
+        gate.ready(app);
+        console.log("Clipwise app ready");
+      })
+      .catch((err: unknown) => {
+        logError("startup: building the app failed", err);
+        process.exit(1);
+      });
   });
   return shutdown;
 }
