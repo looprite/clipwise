@@ -473,14 +473,17 @@ async function main(): Promise<void> {
     // recording that is not there.
     {
       const bad = "not-a-uuid";
-      const probes: Array<[string, Reply]> = [
-        ["GET /recordings/:id/transcript", await http("GET", `/recordings/${bad}/transcript`, { token: A.token })],
-        ["GET /accounts/:accountId/recordings/:id", await http("GET", `/accounts/${acc}/recordings/${bad}`, { token: A.token })],
-        ["GET /accounts/:accountId/recordings/:id/attendees", await http("GET", `/accounts/${acc}/recordings/${bad}/attendees`, { token: A.token })],
-        ["POST /accounts/:accountId/recordings/:id/attendees", await http("POST", `/accounts/${acc}/recordings/${bad}/attendees`, { token: capToken(A), json: { name: "x" } })],
+      // Each route answers with its own not-found code for an id that names nothing.
+      const probes: Array<[string, Reply, string]> = [
+        ["GET /recordings/:id/transcript", await http("GET", `/recordings/${bad}/transcript`, { token: A.token }), "recording_not_found"],
+        ["GET /accounts/:accountId/recordings/:id", await http("GET", `/accounts/${acc}/recordings/${bad}`, { token: A.token }), "recording_not_found"],
+        ["GET /accounts/:accountId/recordings/:id/attendees", await http("GET", `/accounts/${acc}/recordings/${bad}/attendees`, { token: A.token }), "recording_not_found"],
+        ["POST /accounts/:accountId/recordings/:id/attendees", await http("POST", `/accounts/${acc}/recordings/${bad}/attendees`, { token: capToken(A), json: { name: "x" } }), "recording_not_found"],
+        ["GET /accounts/:accountId/moments/:id", await http("GET", `/accounts/${acc}/moments/${bad}`, { token: A.token }), "moment_not_found"],
+        ["GET /accounts/:accountId/people/:id", await http("GET", `/accounts/${acc}/people/${bad}`, { token: A.token }), "person_not_found"],
       ];
-      for (const [label, r] of probes) {
-        record(r.status === 404 && r.json?.error === "recording_not_found", `malformed id: ${label} is 404 recording_not_found`, `got ${r.status} ${r.json?.error ?? ""}`);
+      for (const [label, r, code] of probes) {
+        record(r.status === 404 && r.json?.error === code, `malformed id: ${label} is 404 ${code}`, `got ${r.status} ${r.json?.error ?? ""}`);
       }
     }
 

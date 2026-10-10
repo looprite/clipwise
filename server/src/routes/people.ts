@@ -4,13 +4,15 @@ import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { personVisibleTo } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
-import { asyncHandler, HttpError, parseQuery } from "../lib/http.js";
+import { asyncHandler, HttpError, parseQuery, uuidParam } from "../lib/http.js";
 
 const listPeopleQuerySchema = z.object({
   email: z.string().max(320).optional(),
 });
 
 export const peopleRouter = Router({ mergeParams: true });
+// An id that is not a UUID names no person: the same 404 as one that names nothing.
+peopleRouter.param("id", uuidParam("person_not_found"));
 
 // Read-only. There used to be a POST here that upserted by email; nothing
 // called it (people rows are written by the capture pipeline), and an upsert

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { recordingOwnedBy } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
-import { asyncHandler, HttpError, parseBody, parseQuery } from "../lib/http.js";
+import { asyncHandler, HttpError, parseBody, parseQuery, uuidParam } from "../lib/http.js";
 import { getMoment, searchMoments, searchMomentsQuerySchema } from "../services/search-moments.js";
 
 const createMomentSchema = z.object({
@@ -19,6 +19,8 @@ const createMomentSchema = z.object({
 });
 
 export const momentsRouter = Router({ mergeParams: true });
+// An id that is not a UUID names no moment: the same 404 as one that names nothing.
+momentsRouter.param("id", uuidParam("moment_not_found"));
 
 // Hand-curated moments are added by the recording's owner. Anyone else gets
 // the same 404 as for a recording that does not exist.
