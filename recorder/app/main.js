@@ -1129,13 +1129,16 @@ async function changeTrash(action, rawStems) {
         if (stems.length === 0) { sendMeetingsData(); return; }
     }
 
-    // The same on the server, beside the direct path and not waiting on it.
-    trashOnServer(action, stems);
+    // In server mode the server decides and this Mac follows it (SAA-227 part L
+    // decision 8). Otherwise the same on the server, beside the direct path and
+    // not waiting on it.
+    const server = readCaptureMode().mode === 'server';
+    if (!server) trashOnServer(action, stems);
     trashBusy = true;
     sendMeetingsData();
     let results;
     try {
-        results = await runTrashScript(action, stems);
+        results = server ? await runTrashOnServer(action, stems) : await runTrashScript(action, stems);
     } finally {
         trashBusy = false;
     }
@@ -1147,6 +1150,8 @@ async function changeTrash(action, rawStems) {
         const verb = { trash: 'moved to trash', restore: 'restored', delete: 'deleted' }[action];
         if (action === 'trash' && failed.every((r) => r.code === 'db_unreachable')) {
             notify('Clipwise: not moved to trash', "Couldn't reach the database. Nothing was moved to trash.");
+        } else if (failed.every((r) => r.code === 'server_unreachable')) {
+            notify(`Clipwise: not ${verb}`, `Couldn't reach the Clipwise server. Nothing was ${verb}.`);
         } else {
             notify(`Clipwise: ${failed.length} not ${verb}`, `${failed[0].message || failed[0].code}`);
         }
@@ -3424,6 +3429,90 @@ async function trashOnServer(action, stems) {
                 : await captureServerRequest(server, 'DELETE', `/captures/${captureId}`);
         console.error(`[clipwise-recorder] trash ${action} ${stem}: server ${reply.status ?? 'no reply'}${reply.json.error ? ` ${reply.json.error}` : ''}`);
     }
+}
+
+// Server mode (SAA-227 part L decision 8): the server owns trash state, and this
+// Mac's marker (trashed-<stem>.json, server/src/lib/trash-marker.ts's format) and
+// files follow what it answered. One result per stem, in runTrashScript's shape.
+//   trash    POST …/trash, then the marker, holding the server's trashedAt
+//   restore  POST …/restore, then the marker goes
+//   delete   DELETE, then the files, the manifest last, then the marker, as
+//            trash.ts orders them: a crash part way leaves a capture still in
+//            the trash, and deleting it again finishes it
+// A 404 means the server has no such capture of this member's (never uploaded,
+// or already deleted), and the Mac side still follows. Anything else changes
+// nothing on this Mac.
+async function runTrashOnServer(action, stems) {
+    const server = shadowServer();
+    const results = [];
+    for (const stem of stems) {
+        const fail = (code, message) => results.push({ action, stem, ok: false, code, message });
+        if (!server) { fail('not_signed_in', 'not signed in to the Clipwise server'); continue; }
+        const captureId = captureIdFor(stem);
+        if (!captureId) { fail('no_manifest', `no readable manifest for ${stem}`); continue; }
+        const reply = action === 'trash'
+            ? await captureServerRequest(server, 'POST', `/captures/${captureId}/trash`, {})
+            : action === 'restore'
+                ? await captureServerRequest(server, 'POST', `/captures/${captureId}/restore`, {})
+                : await captureServerRequest(server, 'DELETE', `/captures/${captureId}`);
+        console.error(`[clipwise-recorder] trash ${action} ${stem}: server ${reply.status ?? 'no reply'}${reply.json.error ? ` ${reply.json.error}` : ''}`);
+        if (reply.status === null) { fail('server_unreachable', `couldn't reach the Clipwise server (${reply.json.error || 'no reply'})`); continue; }
+        if (reply.status !== 200 && reply.status !== 404) { fail('server_refused', `the server answered ${reply.status} ${reply.json.error || ''}`.trim()); continue; }
+        try {
+            if (action === 'trash') {
+                const trashedAt = reply.status === 200 && typeof reply.json.trashedAt === 'string' ? reply.json.trashedAt : new Date().toISOString();
+                writeTrashMarker(stem, { stem, source_id: captureId, trashed_at: trashedAt });
+                results.push({ action, stem, ok: true });
+            } else if (action === 'restore') {
+                fs.rmSync(trashMarkerPath(stem), { force: true });
+                results.push({ action, stem, ok: true });
+            } else {
+                const files = removeCaptureFiles(stem);
+                results.push({ action, stem, ok: true, files });
+            }
+        } catch (err) {
+            fail('error', `the server ${action === 'delete' ? 'deleted' : action === 'trash' ? 'trashed' : 'restored'} it, but this Mac could not follow: ${err.code || err.name}`);
+        }
+    }
+    return results;
+}
+
+function trashMarkerPath(stem) {
+    return path.join(OUTDIR, `trashed-${stem}.json`);
+}
+
+// Written whole or not at all, as trash-marker.ts writes it.
+function writeTrashMarker(stem, marker) {
+    const finalPath = trashMarkerPath(stem);
+    fs.writeFileSync(`${finalPath}.tmp`, JSON.stringify(marker, null, 2) + '\n');
+    fs.renameSync(`${finalPath}.tmp`, finalPath);
+}
+
+// Every file of the capture (trash-marker.ts captureFiles: "-<stem>" followed by
+// ".", "-" or the end of the name), the manifest after the rest and the marker
+// last. Returns how many went, the marker not counted.
+function removeCaptureFiles(stem) {
+    const needle = `-${stem}`;
+    const manifest = `manifest-${stem}.json`;
+    const marker = `trashed-${stem}.json`;
+    const files = fs.readdirSync(OUTDIR).filter((name) => {
+        const i = name.indexOf(needle);
+        if (i < 0) return false;
+        const next = name[i + needle.length];
+        return next === '.' || next === '-' || next === undefined;
+    });
+    let removed = 0;
+    for (const name of files) {
+        if (name === manifest || name === marker) continue;
+        fs.rmSync(path.join(OUTDIR, name), { force: true });
+        removed++;
+    }
+    if (files.includes(manifest)) {
+        fs.rmSync(path.join(OUTDIR, manifest), { force: true });
+        removed++;
+    }
+    fs.rmSync(trashMarkerPath(stem), { force: true });
+    return removed;
 }
 
 // An identity answer or voice names just written. The capture is queued again
