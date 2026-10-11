@@ -122,6 +122,10 @@ itself for launch at login — Login Items is a thing you add it to.
 The bundle carries the three Swift binaries. It does not carry the server, so
 `build-app.sh` stamps the path of this checkout into the bundle and the packaged
 app runs the capture→moments pipeline out of it. Move the repo and rebuild.
+The developer keys (the database URL and the API keys) are not in the checkout:
+they are in `~/.config/clipwise/dev.env`, which only `server/scripts/scratch-db.sh`
+and the schema push (`server/drizzle.config.ts`) load, by name. Nothing the app
+runs reads it.
 
 A packaged run has no terminal to print to, so everything it would have written
 to stderr goes to `~/Library/Application Support/clipwise/recorder.log`. That is
