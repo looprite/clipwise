@@ -3799,7 +3799,9 @@ function registerIdentityIpc() {
             finishIdentityWindow();
             return;
         }
-        startApplyIdentity(capture.stem);
+        // In server mode the answer goes only with the capture; the server
+        // applies it (SAA-227 part L).
+        if (readCaptureMode().mode !== 'server') startApplyIdentity(capture.stem);
         uploadAnswer(capture.stem);
         // Answered now, deferred or not (SAA-197) — a marker left from an
         // earlier close no longer describes this capture's state. No-op
@@ -3859,7 +3861,7 @@ function registerIdentityIpc() {
             finishIdentityWindow();
             return;
         }
-        startApplyVoiceNames(capture.stem);
+        if (readCaptureMode().mode !== 'server') startApplyVoiceNames(capture.stem);
         uploadAnswer(capture.stem);
         finishIdentityWindow();
         // The tray's "Name N voices…" item for this stem should disappear
