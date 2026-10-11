@@ -2835,6 +2835,82 @@ async function refreshCaptureTokenOnce() {
     return true;
 }
 
+// The body of POST /captures (server/src/routes/captures.ts captureSchema), from
+// the capture's files on disk: the transcript, the manifest, the classification
+// the pipeline recorded at ingest, and the identity answer when there is one.
+// Throws when a file it needs is missing or unreadable; the thrown error names
+// the file, never what is in it.
+function buildCapturePayload(stem) {
+    const readJson = (name) => {
+        try {
+            return JSON.parse(fs.readFileSync(path.join(OUTDIR, name), 'utf8'));
+        } catch (err) {
+            const e = new Error(`${name}: ${err.code || err.name}`);
+            e.code = err.code || err.name;
+            throw e;
+        }
+    };
+    const transcript = readJson(`transcript-${stem}.json`);
+    const manifest = readJson(`manifest-${stem}.json`);
+    const sidecar = readJson(`pipeline-${stem}.json`);
+    const classification = sidecar.steps && sidecar.steps.ingest && sidecar.steps.ingest.detail
+        ? sidecar.steps.ingest.detail.classification
+        : null;
+    if (!classification) throw new Error(`pipeline-${stem}.json: no classification at ingest`);
+    // Direct ingest stores a missing model as null (ingest/clipwise.ts:438); the
+    // endpoint takes only a string, so there is no faithful default to send.
+    if (typeof transcript.model !== 'string') throw new Error(`transcript-${stem}.json: no model`);
+    let identity;
+    try {
+        identity = readJson(`identity-${stem}.json`);
+    } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+    }
+    // The prompt writes self.source: null when no name was given
+    // (identity-answer.js:138-141); the endpoint takes a string or nothing.
+    if (identity && identity.self && identity.self.source === null) delete identity.self.source;
+    const segments = transcript.segments.map((s) => ({
+        track: s.track,
+        startMs: s.start_ms,
+        endMs: s.end_ms,
+        text: s.text,
+    }));
+    return {
+        // Verbatim: manifest ids are uppercase, as are the 107 rows direct
+        // ingest has filed under them.
+        captureId: manifest.recording_id,
+        startedAt: manifest.started_at,
+        stem,
+        engine: transcript.engine || 'whisper.cpp',
+        model: transcript.model,
+        segments,
+        // Counted off the transcript's own segments (SAA-78), not off the
+        // array above that is about to be sent.
+        sourceFidelity: {
+            declaredTurnCount: transcript.segments.length,
+            declaredBodyChars: transcript.segments.reduce((n, s) => n + s.text.length, 0),
+            countedFrom: `transcript-${stem}.json segments[].text`,
+        },
+        classification: {
+            verdict: classification.verdict,
+            concern: classification.concern,
+            reason: classification.reason,
+            excludedLabels: classification.excludedLabels,
+            tracks: classification.tracks,
+            thresholds: classification.thresholds,
+        },
+        capture: {
+            tracks: manifest.tracks,
+            permissions: manifest.permissions || {},
+            triggerApp: manifest.trigger_app || null,
+        },
+        content: transcript.content,
+        aec: transcript.aec,
+        autostop: transcript.autostop,
+        identity,
+    };
+}
+
 // --- identity (SAA-114) ---------------------------------------------------
 //
 // The prompt is strictly downstream of the audio. It is created from
