@@ -2957,6 +2957,15 @@ async function uploadCapture(stem) {
     console.error(`[clipwise-recorder] upload ${stem}: ${reply.status ?? 'no reply'}${reply.error ? ` ${reply.error}` : ''}`);
 }
 
+// An identity answer just written. While this capture's pipeline is still
+// running, the upload at its exit reads the answer from disk and carries it in
+// the first POST. Otherwise that upload has already gone, and the whole capture
+// is sent again with the answer; the server applies it once (captures.ts).
+function uploadIdentityAnswer(stem) {
+    if (pipeline && pipeline.stem === stem && pipeline.state === 'running') return;
+    uploadCapture(stem);
+}
+
 // --- identity (SAA-114) ---------------------------------------------------
 //
 // The prompt is strictly downstream of the audio. It is created from
@@ -3366,6 +3375,7 @@ function registerIdentityIpc() {
             return;
         }
         startApplyIdentity(capture.stem);
+        uploadIdentityAnswer(capture.stem);
         // Answered now, deferred or not (SAA-197) — a marker left from an
         // earlier close no longer describes this capture's state. No-op
         // when there was never one.
