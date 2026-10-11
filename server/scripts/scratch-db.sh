@@ -25,7 +25,9 @@
 #   scratch-db.sh run <check>     check-access | check-auth | check-trash, or any
 #                                 other src/**/check-*.ts by its file name
 #   scratch-db.sh serve           the server (src/index.ts) on the scratch branch,
-#                                 at http://localhost:3000, after the guard
+#                                 at http://localhost:3000, after the guard, with
+#                                 ANTHROPIC_API_KEY and VOYAGE_API_KEY from the
+#                                 real server/.env so its worker can extract
 #   scratch-db.sh cli <args>      src/auth/cli.ts <args> on the scratch branch,
 #                                 after the guard
 #   scratch-db.sh sql < file      psql on the scratch branch after the guard, the
@@ -37,8 +39,9 @@
 # doing anything, 3 the guard refused a host.
 #
 # Secrets stay in the settings file (mode 600). Nothing here prints the
-# connection string, the admin password, the auth secret or VOYAGE_API_KEY, and
-# none of them goes on a command line (where `ps` would show it).
+# connection string, the admin password, the auth secret, VOYAGE_API_KEY or
+# ANTHROPIC_API_KEY, and none of them goes on a command line (where `ps` would
+# show it).
 #
 # Every check runs from a cleaned environment: only the variables it needs, and
 # DOTENV_CONFIG_PATH pointing at an empty file so nothing from server/.env loads
@@ -65,7 +68,7 @@ refuse() { say "scratch-db: refused: $*" >&2; exit 2; }
 fail() { say "scratch-db: failed: $*" >&2; exit 1; }
 
 # Whatever a tool says on a failure goes through this first.
-scrub() { sed -E 's#postgres(ql)?://[^[:space:]"]+#<url>#g; s#npg_[A-Za-z0-9]+#<secret>#g'; }
+scrub() { sed -E 's#postgres(ql)?://[^[:space:]"]+#<url>#g; s#npg_[A-Za-z0-9]+#<secret>#g; s#sk-ant-[A-Za-z0-9_-]+#<secret>#g'; }
 
 neon() { neonctl "$@" --project-id "$PROJECT_ID" 2>&1; }
 
@@ -206,6 +209,7 @@ clean_exec() {
         AUTH_PASSWORD_ENABLED) export AUTH_PASSWORD_ENABLED=true ;;
         BETTER_AUTH_URL) export BETTER_AUTH_URL="$AUTH_ORIGIN" ;;
         VOYAGE_API_KEY) export VOYAGE_API_KEY="$VOYAGE_VALUE" ;;
+        ANTHROPIC_API_KEY) export ANTHROPIC_API_KEY="$ANTHROPIC_VALUE" ;;
         PROBE_HOST) export PROBE_HOST="$PROBE_HOST_VALUE" ;;
         *) export "$v=$(envval "$v" "$f")" ;;
       esac
@@ -490,15 +494,8 @@ cmd_run() {
   say "run: $check"
   case "$check" in
     check-trash)
-      # The one process that gets VOYAGE_API_KEY, read from the real server/.env.
-      local real_env v
-      real_env="${CLIPWISE_SERVER_ENV:-$(git -C "$SERVER_DIR" worktree list --porcelain | sed -n '1s/^worktree //p')/server/.env}"
-      [ -f "$real_env" ] || refuse "no server/.env to read VOYAGE_API_KEY from ($real_env)"
-      v="$(envval VOYAGE_API_KEY "$real_env")"
-      v="${v#\"}"; v="${v%\"}"; v="${v#\'}"; v="${v%\'}"
-      [ -n "$v" ] || refuse "VOYAGE_API_KEY is not set in $real_env"
-      VOYAGE_VALUE="$v"
-      v=""
+      # One of the two processes that get VOYAGE_API_KEY (serve is the other).
+      VOYAGE_VALUE="$(real_env_value VOYAGE_API_KEY)" || exit 2
       clean_exec "$F" DATABASE_URL VOYAGE_API_KEY -- npx --no-install tsx "$script" 2>&1 | scrub
       exit "${PIPESTATUS[0]}"
       ;;
@@ -510,11 +507,27 @@ cmd_run() {
   esac
 }
 
+# A value from the real server/.env (the main checkout's, not a worktree's), with
+# its quotes taken off. Refuses when the file or the value is missing. Printed
+# only into a variable, never to the terminal.
+real_env_value() {
+  local real_env v
+  real_env="${CLIPWISE_SERVER_ENV:-$(git -C "$SERVER_DIR" worktree list --porcelain | sed -n '1s/^worktree //p')/server/.env}"
+  [ -f "$real_env" ] || refuse "no server/.env to read $1 from ($real_env)"
+  v="$(envval "$1" "$real_env")"
+  v="${v#\"}"; v="${v%\"}"; v="${v#\'}"; v="${v%\'}"
+  [ -n "$v" ] || refuse "$1 is not set in $real_env"
+  printf '%s' "$v"
+}
+
 cmd_serve() {
   [ $# -eq 0 ] || refuse "usage: scratch-db.sh serve"
   scratch_ready
-  say "serve: src/index.ts at $AUTH_ORIGIN"
-  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED -- \
+  # The worker extracts and embeds, so the server gets the two keys the Mac uses.
+  ANTHROPIC_VALUE="$(real_env_value ANTHROPIC_API_KEY)" || exit 2
+  VOYAGE_VALUE="$(real_env_value VOYAGE_API_KEY)" || exit 2
+  say "serve: src/index.ts at $AUTH_ORIGIN, with ANTHROPIC_API_KEY and VOYAGE_API_KEY"
+  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED ANTHROPIC_API_KEY VOYAGE_API_KEY -- \
     npx --no-install tsx src/index.ts 2>&1 | scrub
   exit "${PIPESTATUS[0]}"
 }
