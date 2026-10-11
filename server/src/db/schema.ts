@@ -594,6 +594,38 @@ export const jobs = pgTable(
   }),
 );
 
+// A member's acknowledgement of the recording notice (SAA-216; SAA-227 part I).
+// The recorder copies it from the Mac's consent.json into each capture's
+// manifest and sends it with POST /captures; the server records it here once.
+//
+//   notice_version   consent.js STATEMENT_VERSION; the notice's text is the one in
+//                    the repo at that version
+//   acknowledged_at  when the member agreed, as the Mac recorded it
+//   recorded_at      when the server first learned of it
+//
+// Every acknowledgement is kept, one per member per notice version: raising the
+// version asks everyone again on purpose, and the earlier answer stays on record.
+// A member is never deleted (removal sets removed_at), so the rows go only with
+// the account.
+export const noticeAcknowledgements = pgTable(
+  "notice_acknowledgements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    memberId: uuid("member_id")
+      .notNull()
+      .references(() => accountMembers.id, { onDelete: "cascade" }),
+    noticeVersion: integer("notice_version").notNull(),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }).notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    memberVersionIdx: uniqueIndex("notice_acknowledgements_member_version_idx").on(t.memberId, t.noticeVersion),
+    versionValid: check("notice_acknowledgements_version_valid", sql`${t.noticeVersion} >= 1`),
+  }),
+);
+
 export const accountsRelations = relations(accounts, ({ many }) => ({
   people: many(people),
   recordings: many(recordings),
