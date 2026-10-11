@@ -72,6 +72,15 @@ function recordAcknowledgement(supportDir, now = new Date()) {
     return doc;
 }
 
+// The acknowledgement in force now, as the manifest stamps it at capture start
+// and the recorder sends it to the server (SAA-227 part I): the version and when
+// it was agreed to, nothing else from the file. Null when it is not agreed to.
+function noticeStamp(supportDir) {
+    if (!isAcknowledged(supportDir)) return null;
+    const doc = readConsent(supportDir);
+    return { version: doc.version, acknowledged_at: doc.acknowledged_at };
+}
+
 // 'launch': the window opened by itself when the app started.
 // 'blocked': it opened because something tried to start a capture.
 function buttonLabel(mode) {
@@ -94,6 +103,6 @@ function shouldStartAfterAcknowledgement(mode, blockedStart, holdsMic) {
 
 module.exports = {
     STATEMENT_VERSION, NOTICE_LINE,
-    consentPath, readConsent, isAcknowledged, recordAcknowledgement,
+    consentPath, readConsent, isAcknowledged, recordAcknowledgement, noticeStamp,
     buttonLabel, shouldStartAfterAcknowledgement,
 };
