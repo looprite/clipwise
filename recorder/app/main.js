@@ -9,7 +9,7 @@
 // is a human. The recorder is the trigger; the manifest it wrote at capture
 // start is the record the pipeline keys on.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID, randomBytes, createHash } = require('crypto');
 const zlib = require('zlib');
@@ -279,6 +279,11 @@ const CAPTURE_SERVER_PATH = path.join(SUPPORT_DIR, 'capture-server.json');
 // for <server>/capture with the capture scope, and a refresh token.
 const CAPTURE_CLIENT_ID = 'clipwise-recorder';
 const CAPTURE_SCOPES = 'openid offline_access clipwise:capture';
+// The capture token and its refresh token, encrypted with Electron's safeStorage
+// (a key the Keychain holds for this app). Never written in the clear.
+const CAPTURE_TOKEN_PATH = path.join(SUPPORT_DIR, 'capture-token.bin');
+// How long before the access token runs out (600 s on the server) it is refreshed.
+const CAPTURE_REFRESH_EARLY_MS = 60 * 1000;
 
 // A GUI-launched Electron inherits a minimal PATH with no Homebrew on it, and
 // the pipeline shells out to python3, ffmpeg and whisper-cli. Launched from a
@@ -2725,17 +2730,109 @@ async function exchangeCaptureCode(server, code, redirectUri, verifier) {
             console.error(`[clipwise-recorder] sign-in: token ${status} ${body.error || 'no_token'}`);
             return;
         }
-        captureTokens = {
+        setCaptureTokens({
             server,
             access: body.access_token,
             refresh: body.refresh_token,
             expiresAt: Date.now() + Number(body.expires_in) * 1000,
-        };
+        });
         console.error(`[clipwise-recorder] sign-in: signed in to ${server}`);
     } catch (err) {
-        console.error(`[clipwise-recorder] sign-in: token request failed: ${err.cause?.code || err.name}`);
+        console.error(`[clipwise-recorder] sign-in: failed: ${err.cause?.code || err.name}`);
     }
     renderTray();
+}
+
+// Stored first, then used: a token this process holds is always one the file
+// also holds, so a quit at any moment never leaves only a rotated-away refresh
+// token on disk. Throws when it cannot store, and then nothing changes.
+function setCaptureTokens(tokens) {
+    fs.mkdirSync(SUPPORT_DIR, { recursive: true });
+    const tmp = `${CAPTURE_TOKEN_PATH}.tmp`;
+    fs.writeFileSync(tmp, safeStorage.encryptString(JSON.stringify(tokens)), { mode: 0o600 });
+    fs.renameSync(tmp, CAPTURE_TOKEN_PATH);
+    captureTokens = tokens;
+    scheduleCaptureRefresh();
+}
+
+// At launch. No file is the ordinary signed-out state.
+function loadCaptureTokens() {
+    try {
+        captureTokens = JSON.parse(safeStorage.decryptString(fs.readFileSync(CAPTURE_TOKEN_PATH)));
+        scheduleCaptureRefresh();
+    } catch (err) {
+        if (err.code !== 'ENOENT') console.error(`[clipwise-recorder] capture token: could not read it: ${err.name}`);
+    }
+}
+
+function signOutOfCaptureServer(reason) {
+    captureTokens = null;
+    clearTimeout(captureRefreshTimer);
+    try { fs.unlinkSync(CAPTURE_TOKEN_PATH); } catch {}
+    console.error(`[clipwise-recorder] capture token: signed out (${reason})`);
+    renderTray();
+}
+
+let captureRefreshTimer = null;
+function scheduleCaptureRefresh() {
+    clearTimeout(captureRefreshTimer);
+    if (!captureTokens) return;
+    const delay = Math.max(0, captureTokens.expiresAt - CAPTURE_REFRESH_EARLY_MS - Date.now());
+    captureRefreshTimer = setTimeout(refreshCaptureToken, delay);
+}
+
+// One refresh at a time: the server rotates refresh tokens, and a second request
+// with the one the first just used would invalidate the whole family. A caller
+// that arrives during a refresh gets that refresh's outcome. Resolves true when
+// a new access token is stored.
+let captureRefreshing = null;
+function refreshCaptureToken() {
+    if (!captureRefreshing) {
+        captureRefreshing = refreshCaptureTokenOnce().finally(() => { captureRefreshing = null; });
+    }
+    return captureRefreshing;
+}
+
+// Signed out only when the token endpoint refuses the grant (400 or 401). A
+// network error or any other status keeps the stored tokens; the next use (an
+// upload's 401) tries again.
+async function refreshCaptureTokenOnce() {
+    const tokens = captureTokens;
+    if (!tokens) return false;
+    let reply;
+    try {
+        reply = await postCaptureTokenForm(tokens.server, {
+            grant_type: 'refresh_token',
+            refresh_token: tokens.refresh,
+            client_id: CAPTURE_CLIENT_ID,
+            resource: `${tokens.server}/capture`,
+        });
+    } catch (err) {
+        console.error(`[clipwise-recorder] capture token: refresh failed, kept: ${err.cause?.code || err.name}`);
+        return false;
+    }
+    const { status, body } = reply;
+    if (!body.access_token) {
+        if (status === 400 || status === 401) {
+            signOutOfCaptureServer(`refresh ${status} ${body.error || 'no_token'}`);
+        } else {
+            console.error(`[clipwise-recorder] capture token: refresh ${status} ${body.error || 'no_token'}, kept`);
+        }
+        return false;
+    }
+    try {
+        setCaptureTokens({
+            server: tokens.server,
+            access: body.access_token,
+            refresh: body.refresh_token || tokens.refresh,
+            expiresAt: Date.now() + Number(body.expires_in) * 1000,
+        });
+    } catch (err) {
+        signOutOfCaptureServer(`could not store the refreshed token: ${err.name}`);
+        return false;
+    }
+    console.error(`[clipwise-recorder] capture token: refreshed (${status})`);
+    return true;
 }
 
 // --- identity (SAA-114) ---------------------------------------------------
@@ -3769,6 +3866,8 @@ app.whenReady().then(() => {
     // having tested anything. The plist decides what the app launches as; this
     // decides what it is a moment later. They only mean something together.
     tray = new Tray(iconFor('stopped'));
+    // Before the first render, so the tray knows whether to offer sign-in.
+    loadCaptureTokens();
     setState('stopped');
     registerIdentityIpc();
     registerMeetingsIpc();
