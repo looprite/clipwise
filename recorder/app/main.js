@@ -2840,7 +2840,7 @@ async function refreshCaptureTokenOnce() {
 
 // The body of POST /captures (server/src/routes/captures.ts captureSchema), from
 // the capture's files on disk: the transcript, the manifest, the classification
-// the pipeline recorded at ingest, the identity answer and the voice names when
+// the pipeline recorded, the identity answer and the voice names when
 // there are any, and the voices diarize found. Throws when a file it needs is
 // missing or unreadable; the thrown error names the file, never what is in it.
 function buildCapturePayload(stem) {
@@ -2856,10 +2856,11 @@ function buildCapturePayload(stem) {
     const transcript = readJson(`transcript-${stem}.json`);
     const manifest = readJson(`manifest-${stem}.json`);
     const sidecar = readJson(`pipeline-${stem}.json`);
-    const classification = sidecar.steps && sidecar.steps.ingest && sidecar.steps.ingest.detail
-        ? sidecar.steps.ingest.detail.classification
-        : null;
-    if (!classification) throw new Error(`pipeline-${stem}.json: no classification at ingest`);
+    // The direct pipeline records it at ingest; the database-free one
+    // (capture-cli.ts) at its own classify step.
+    const stepDetail = (name) => (sidecar.steps && sidecar.steps[name] && sidecar.steps[name].detail) || null;
+    const classification = (stepDetail('ingest') || stepDetail('classify') || {}).classification || null;
+    if (!classification) throw new Error(`pipeline-${stem}.json: no classification at ingest or classify`);
     // Direct ingest stores a missing model as null (ingest/clipwise.ts:438); the
     // endpoint takes only a string, so there is no faithful default to send.
     if (typeof transcript.model !== 'string') throw new Error(`transcript-${stem}.json: no model`);
