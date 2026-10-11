@@ -312,6 +312,35 @@ function readNamingData(dir, stem) {
     }
 }
 
+// The majority rule that puts a `them` segment on a diarized voice, for the
+// capture builder in main.js (SAA-227 decision 1): the Mac does the assignment
+// and sends each segment's voice index. A copy of assignVoice in
+// server/src/pipeline/voice-clips.ts, which has the reasoning;
+// check-assign-voice.ts runs both over the same cases. Times in seconds. A turn
+// with no voiceIndex (an excluded voice) counts toward no voice. Null when no
+// voice covers more than half the segment.
+const ASSIGN_VOICE_MAJORITY_FRACTION = 0.5;
+function assignVoice(segStart, segEnd, diarized) {
+    const segDuration = segEnd - segStart;
+    if (segDuration <= 0) return null;
+    const overlapByVoice = new Map();
+    for (const d of diarized) {
+        if (d.voiceIndex == null) continue;
+        const overlap = Math.min(segEnd, d.end) - Math.max(segStart, d.start);
+        if (overlap <= 0) continue;
+        overlapByVoice.set(d.voiceIndex, (overlapByVoice.get(d.voiceIndex) || 0) + overlap);
+    }
+    let bestVoice = null;
+    let bestOverlap = 0;
+    for (const [voice, overlap] of overlapByVoice) {
+        if (overlap > bestOverlap) {
+            bestOverlap = overlap;
+            bestVoice = voice;
+        }
+    }
+    return bestVoice !== null && bestOverlap > segDuration * ASSIGN_VOICE_MAJORITY_FRACTION ? bestVoice : null;
+}
+
 // The answer already on file for a capture, if any — read here so the
 // "Rename voices…" reopen can pre-select each voice's current name rather
 // than starting from "Not sure" again.
@@ -411,6 +440,7 @@ module.exports = {
     readNamingData,
     pendingVoiceNamingStems,
     readVoiceNamesAnswer,
+    assignVoice,
     mostRecentNamedStem,
     mostRecentCaptureStem,
 };
