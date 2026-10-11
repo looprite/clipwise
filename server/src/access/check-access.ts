@@ -737,6 +737,50 @@ async function main(): Promise<void> {
       );
     }
 
+    // 16. Voice data (SAA-227 decision 1): each them segment's voice index and each
+    // voice's total seconds are taken; an embedding, on a voice or on a segment, is
+    // refused and nothing is written, as is a voice index that is not one of the
+    // listed voices or sits on a me segment.
+    const VOICE_SEGS: CapSeg[] = [capSeg(`hello ${WORD}`), capSeg("first voice", "them", 1600, 3000), capSeg("second voice", "them", 3100, 4500)];
+    const withVoices = (segs: Array<CapSeg & { voiceIndex?: number; embedding?: number[] }>, voices: unknown[]) => {
+      const p = capPayload({ segments: segs.map(({ track, startMs, endMs, text }) => ({ track, startMs, endMs, text })), extra: { voices } });
+      return { ...p, segments: segs };
+    };
+    {
+      const p = withVoices(
+        [VOICE_SEGS[0], { ...VOICE_SEGS[1], voiceIndex: 1 }, { ...VOICE_SEGS[2], voiceIndex: 2 }],
+        [{ voiceIndex: 1, totalSeconds: 41.5 }, { voiceIndex: 2, totalSeconds: 18 }],
+      );
+      const r = await capPost(A, p);
+      const rows = await capRows(p.captureId);
+      record(
+        r.status === 201 && rows.length === 1 && (await capCount(rows[0].id, "segments")) === 3,
+        "captures 16a: voice indexes on them segments and each voice's total seconds are taken; the capture is stored with its segments",
+        `${r.status} ${r.json?.error ?? ""} rows=${rows.length}`,
+      );
+    }
+    {
+      const nBefore = await allRecordings();
+      const voicesOk = [{ voiceIndex: 1, totalSeconds: 41.5 }];
+      const cases: Array<[string, ReturnType<typeof withVoices>]> = [
+        ["an embedding on a voice", withVoices([VOICE_SEGS[0], { ...VOICE_SEGS[1], voiceIndex: 1 }], [{ voiceIndex: 1, totalSeconds: 41.5, embedding: [0.12, -0.5, 0.33] }])],
+        ["an embedding on a segment", withVoices([VOICE_SEGS[0], { ...VOICE_SEGS[1], voiceIndex: 1, embedding: [0.12, -0.5, 0.33] }], voicesOk)],
+        ["a voice index on a me segment", withVoices([{ ...VOICE_SEGS[0], voiceIndex: 1 }, VOICE_SEGS[1]], voicesOk)],
+        ["a voice index that is not a listed voice", withVoices([VOICE_SEGS[0], { ...VOICE_SEGS[1], voiceIndex: 2 }], voicesOk)],
+      ];
+      const results: string[] = [];
+      for (const [label, p] of cases) {
+        const r = await capPost(A, p);
+        const written = (await capRows(p.captureId)).length;
+        results.push(`${r.status === 400 && r.json?.error === "invalid_request" && written === 0 ? "ok" : "BAD"} ${label}: ${r.status} ${r.json?.error ?? ""} rows=${written}`);
+      }
+      record(
+        results.every((l) => l.startsWith("ok")) && (await allRecordings()) === nBefore,
+        "captures 16b: an embedding on a voice or a segment, a voice index on a me segment, and an unlisted voice index are each 400 invalid_request, and nothing is written",
+        results.filter((l) => l.startsWith("BAD")).join("; "),
+      );
+    }
+
     // ---- people ------------------------------------------------------------
     const peopleB = await http("GET", `/accounts/${acc}/people`, { token: B.token });
     const emailsB = (peopleB.json?.people ?? []).map((p: any) => p.email);
