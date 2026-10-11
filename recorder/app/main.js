@@ -2488,6 +2488,9 @@ function startPipeline(stem, opts = {}) {
         }
     });
     proc.once('exit', (code, signal) => {
+        // The shadow upload (SAA-227 part B), whatever the exit code: a run that
+        // failed after ingest still left everything the upload reads.
+        uploadCapture(stem);
         if (!pipeline || pipeline.proc !== proc) return;
         if (code === 0) {
             pipeline = null;
@@ -2909,6 +2912,49 @@ function buildCapturePayload(stem) {
         autostop: transcript.autostop,
         identity,
     };
+}
+
+// One POST /captures with the token held now. Resolves { status, error }, with
+// status null when the request never got a reply.
+async function postCapture(server, body) {
+    try {
+        const res = await fetch(`${server}/captures`, {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                authorization: `Bearer ${captureTokens ? captureTokens.access : ''}`,
+            },
+            body,
+        });
+        const reply = await res.json().catch(() => ({}));
+        return { status: res.status, error: reply.error || null };
+    } catch (err) {
+        return { status: null, error: err.cause?.code || err.name };
+    }
+}
+
+// Sends one capture to the server in capture-server.json, if one is set and
+// this app is signed in to it. A 401 gets one refresh and one retry; every
+// reply is logged as its status and error code, nothing more.
+async function uploadCapture(stem) {
+    const server = readCaptureServerUrl();
+    if (!server) return;
+    if (!captureTokens || captureTokens.server !== server) {
+        console.error(`[clipwise-recorder] upload ${stem}: not sent, not signed in to ${server}`);
+        return;
+    }
+    let body;
+    try {
+        body = JSON.stringify(buildCapturePayload(stem));
+    } catch (err) {
+        console.error(`[clipwise-recorder] upload ${stem}: not sent: ${err.message}`);
+        return;
+    }
+    let reply = await postCapture(server, body);
+    if (reply.status === 401 && await refreshCaptureToken()) {
+        reply = await postCapture(server, body);
+    }
+    console.error(`[clipwise-recorder] upload ${stem}: ${reply.status ?? 'no reply'}${reply.error ? ` ${reply.error}` : ''}`);
 }
 
 // --- identity (SAA-114) ---------------------------------------------------
