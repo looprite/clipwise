@@ -2476,6 +2476,8 @@ function startPipeline(stem, opts = {}) {
     fs.closeSync(fd);
     proc.unref();
     pipeline = { stem, state: 'running', proc };
+    // Queued now, not at exit, so that a quit right after Stop still sends it.
+    enqueueUpload(stem);
     renderTray();
 
     proc.once('error', (err) => {
@@ -2488,9 +2490,10 @@ function startPipeline(stem, opts = {}) {
         }
     });
     proc.once('exit', (code, signal) => {
-        // The shadow upload (SAA-227 part B), whatever the exit code: a run that
-        // failed after ingest still left everything the upload reads.
-        uploadCapture(stem);
+        // The upload queue (SAA-227), whatever the exit code: a run that failed
+        // after ingest still left everything the upload reads. Drained after
+        // `pipeline` is updated below, so this capture counts as settled.
+        setImmediate(() => drainUploadQueue('pipeline exit'));
         if (!pipeline || pipeline.proc !== proc) return;
         if (code === 0) {
             pipeline = null;
@@ -2596,6 +2599,12 @@ function startRecovery(reason, opts = {}) {
             );
         } catch {}
         if (recoveryProc === proc) recoveryProc = null;
+        // The captures this pass finished are sent, whether or not their own
+        // pipeline ever queued them: only those whose record says "recovered"
+        // at or after this pass began, never every capture recovery looked at
+        // ("complete" is written for each one already done, on every pass).
+        queueRecoveredCaptures(triggeredAtMs);
+        drainUploadQueue('recovery exit');
         // Read after the process is gone, not during — recovery.ts writes
         // recovery-<stem>.json before this exits, so there is no race. Only
         // withdraw a failure that is still this exact stem: Retry, a new
@@ -2948,44 +2957,222 @@ async function postCapture(server, body) {
             body,
         });
         const reply = await res.json().catch(() => ({}));
-        return { status: res.status, error: reply.error || null };
+        return { status: res.status, error: reply.error || null, recordingId: reply.recordingId || null };
     } catch (err) {
-        return { status: null, error: err.cause?.code || err.name };
+        return { status: null, error: err.cause?.code || err.name, recordingId: null };
     }
 }
 
-// Sends one capture to the server in capture-server.json, if one is set and
-// this app is signed in to it. A 401 gets one refresh and one retry; every
-// reply is logged as its status and error code, nothing more.
-async function uploadCapture(stem) {
-    const server = readCaptureServerUrl();
-    if (!server) return;
-    if (!captureTokens || captureTokens.server !== server) {
-        console.error(`[clipwise-recorder] upload ${stem}: not sent, not signed in to ${server}`);
-        return;
+// --- upload queue (SAA-227 decision 9) ------------------------------------
+//
+// One file per capture in SUPPORT_DIR/upload-queue/<stem>.json, sent oldest
+// first. A capture goes in when its pipeline starts, so a quit right after Stop
+// still leaves it queued; it goes when that pipeline has settled (in this
+// process or, after a relaunch, a detached one that has exited), whether the
+// pipeline or the recovery pass finished it. The queue is drained at launch,
+// after each pipeline, after recovery, and on a backoff from 1 minute doubling
+// to 1 hour. A 401 refreshes the token and tries once more. A 409 or 422 is
+// marked failed and never sent again; any other outcome is tried again later.
+// Nothing expires. Each entry:
+//   { stem, state: queued | sent | failed, queuedAt, attempts, nextAttemptAt,
+//     lastStatus, lastError, recordingId, sentAt }
+// Every log line is the stem, a status and an error code, never call content.
+
+const UPLOAD_QUEUE_DIR = path.join(SUPPORT_DIR, 'upload-queue');
+const UPLOAD_BACKOFF_FIRST_MS = 60 * 1000;
+const UPLOAD_BACKOFF_MAX_MS = 60 * 60 * 1000;
+// A pipeline still running gets looked at again after this, with no attempt counted.
+const UPLOAD_WAIT_FOR_PIPELINE_MS = 60 * 1000;
+
+function uploadQueuePathFor(stem) {
+    return path.join(UPLOAD_QUEUE_DIR, `${stem}.json`);
+}
+
+function readUploadEntry(stem) {
+    try {
+        return JSON.parse(fs.readFileSync(uploadQueuePathFor(stem), 'utf8'));
+    } catch {
+        return null;
     }
+}
+
+function writeUploadEntry(entry) {
+    fs.mkdirSync(UPLOAD_QUEUE_DIR, { recursive: true });
+    const finalPath = uploadQueuePathFor(entry.stem);
+    fs.writeFileSync(`${finalPath}.tmp`, JSON.stringify(entry, null, 2) + '\n');
+    fs.renameSync(`${finalPath}.tmp`, finalPath);
+}
+
+// Oldest first, by when each capture was first queued.
+function listUploadQueue() {
+    let names = [];
+    try { names = fs.readdirSync(UPLOAD_QUEUE_DIR); } catch { return []; }
+    return names
+        .filter((n) => n.endsWith('.json'))
+        .map((n) => readUploadEntry(n.slice(0, -'.json'.length)))
+        .filter(Boolean)
+        .sort((a, b) => String(a.queuedAt).localeCompare(String(b.queuedAt)));
+}
+
+// Into the queue, or back into it: a new answer sends the whole capture again
+// (the server applies it once). A failed capture stays failed, since a 409 or
+// 422 would be the same again. Only while an upload server is set.
+function enqueueUpload(stem) {
+    if (!readCaptureServerUrl()) return;
+    const prior = readUploadEntry(stem);
+    if (prior && prior.state === 'failed') return;
+    const now = new Date().toISOString();
+    try {
+        writeUploadEntry({
+            stem,
+            state: 'queued',
+            queuedAt: prior ? prior.queuedAt : now,
+            attempts: 0,
+            nextAttemptAt: now,
+            lastStatus: prior ? prior.lastStatus : null,
+            lastError: null,
+            recordingId: prior ? prior.recordingId : null,
+            sentAt: prior ? prior.sentAt : null,
+        });
+        console.error(`[clipwise-recorder] upload ${stem}: queued`);
+    } catch (err) {
+        console.error(`[clipwise-recorder] upload ${stem}: could not queue: ${err.code || err.name}`);
+    }
+}
+
+// Whether a capture's pipeline has finished with it: not running in this
+// process, and its record shows no step running, or one whose process is gone
+// (killed mid-step). No record yet means it has not started.
+function pipelineSettled(stem) {
+    if (pipeline && pipeline.stem === stem && pipeline.state === 'running') return false;
+    let doc;
+    try {
+        doc = JSON.parse(fs.readFileSync(path.join(OUTDIR, `pipeline-${stem}.json`), 'utf8'));
+    } catch {
+        return false;
+    }
+    const running = Object.values(doc.steps || {}).some((st) => st && st.state === 'running');
+    if (!running) return true;
+    try {
+        process.kill(doc.pid, 0);
+        return false;
+    } catch {
+        return true;
+    }
+}
+
+function uploadBackoffMs(attempts) {
+    return Math.min(UPLOAD_BACKOFF_MAX_MS, UPLOAD_BACKOFF_FIRST_MS * 2 ** Math.max(0, attempts - 1));
+}
+
+// One try for one queued capture. Returns the entry as it now stands.
+async function sendQueuedCapture(server, entry) {
+    const stem = entry.stem;
+    const retryLater = (status, error) => {
+        const attempts = entry.attempts + 1;
+        const wait = uploadBackoffMs(attempts);
+        console.error(`[clipwise-recorder] upload ${stem}: ${status ?? 'no reply'}${error ? ` ${error}` : ''} (attempt ${attempts}, next in ${Math.round(wait / 1000)} s)`);
+        return { ...entry, attempts, lastStatus: status, lastError: error, nextAttemptAt: new Date(Date.now() + wait).toISOString() };
+    };
+    if (!captureTokens || captureTokens.server !== server) return retryLater(null, 'not_signed_in');
     let body;
     try {
         body = JSON.stringify(buildCapturePayload(stem));
     } catch (err) {
-        console.error(`[clipwise-recorder] upload ${stem}: not sent: ${err.message}`);
-        return;
+        return retryLater(null, `not_built ${err.message}`);
     }
     let reply = await postCapture(server, body);
     if (reply.status === 401 && await refreshCaptureToken()) {
         reply = await postCapture(server, body);
     }
-    console.error(`[clipwise-recorder] upload ${stem}: ${reply.status ?? 'no reply'}${reply.error ? ` ${reply.error}` : ''}`);
+    if (reply.status === 200 || reply.status === 201) {
+        console.error(`[clipwise-recorder] upload ${stem}: ${reply.status}`);
+        return { ...entry, state: 'sent', lastStatus: reply.status, lastError: null, recordingId: reply.recordingId || entry.recordingId, sentAt: new Date().toISOString() };
+    }
+    if (reply.status === 409 || reply.status === 422) {
+        console.error(`[clipwise-recorder] upload ${stem}: ${reply.status} ${reply.error || ''} (failed, not retried)`);
+        return { ...entry, state: 'failed', lastStatus: reply.status, lastError: reply.error };
+    }
+    return retryLater(reply.status, reply.error);
 }
 
-// An identity answer or voice names just written. While this capture's pipeline
-// is still running, the upload at its exit reads the answer from disk and
-// carries it in the first POST. Otherwise that upload has already gone, and the
-// whole capture is sent again with the answer; the server applies it once
-// (captures.ts).
+let uploadDraining = null;
+let uploadDrainAgain = false;
+let uploadTimer = null;
+
+// Sends every queued capture that is due, oldest first, one at a time. A call
+// while a drain runs makes that drain go round once more.
+function drainUploadQueue(reason) {
+    if (uploadDraining) {
+        uploadDrainAgain = true;
+        return uploadDraining;
+    }
+    uploadDraining = (async () => {
+        do {
+            uploadDrainAgain = false;
+            const server = readCaptureServerUrl();
+            if (!server) return;
+            for (const entry of listUploadQueue()) {
+                if (entry.state !== 'queued' || Date.parse(entry.nextAttemptAt) > Date.now()) continue;
+                let next;
+                if (!pipelineSettled(entry.stem)) {
+                    next = { ...entry, nextAttemptAt: new Date(Date.now() + UPLOAD_WAIT_FOR_PIPELINE_MS).toISOString() };
+                    console.error(`[clipwise-recorder] upload ${entry.stem}: waiting for its pipeline`);
+                } else {
+                    next = await sendQueuedCapture(server, entry);
+                }
+                // A newer answer may have queued it again while this was sending.
+                const current = readUploadEntry(entry.stem);
+                if (current && current.nextAttemptAt !== entry.nextAttemptAt && current.state === 'queued') {
+                    uploadDrainAgain = true;
+                    continue;
+                }
+                try { writeUploadEntry(next); } catch (err) {
+                    console.error(`[clipwise-recorder] upload ${entry.stem}: could not record the outcome: ${err.code || err.name}`);
+                }
+            }
+        } while (uploadDrainAgain);
+    })()
+        .catch((err) => console.error(`[clipwise-recorder] upload queue (${reason}): ${err.name}`))
+        .finally(() => {
+            uploadDraining = null;
+            scheduleUploadTimer();
+            renderTray();
+        });
+    return uploadDraining;
+}
+
+// Wakes the queue when its earliest queued capture is next due. None queued, no timer.
+function scheduleUploadTimer() {
+    clearTimeout(uploadTimer);
+    uploadTimer = null;
+    const due = listUploadQueue().filter((e) => e.state === 'queued').map((e) => Date.parse(e.nextAttemptAt)).filter(Number.isFinite);
+    if (due.length === 0) return;
+    uploadTimer = setTimeout(() => drainUploadQueue('backoff'), Math.max(0, Math.min(...due) - Date.now()));
+}
+
+// Queues the captures one recovery pass ran to the end (recover.ts writes
+// last_action "recovered" in recovery-<stem>.json when it does).
+function queueRecoveredCaptures(passStartedAtMs) {
+    let names = [];
+    try { names = fs.readdirSync(OUTDIR); } catch { return; }
+    for (const name of names) {
+        const m = /^recovery-(.+)\.json$/.exec(name);
+        if (!m) continue;
+        let record;
+        try { record = JSON.parse(fs.readFileSync(path.join(OUTDIR, name), 'utf8')); } catch { continue; }
+        if (record.last_action === 'recovered' && Date.parse(record.last_action_at) >= passStartedAtMs) enqueueUpload(m[1]);
+    }
+}
+
+// An identity answer or voice names just written. The capture is queued again
+// with its answer; while its pipeline is still running, the send at its exit
+// carries the answer in the first POST. Otherwise the whole capture goes again
+// and the server applies the answer once (captures.ts).
 function uploadAnswer(stem) {
+    enqueueUpload(stem);
     if (pipeline && pipeline.stem === stem && pipeline.state === 'running') return;
-    uploadCapture(stem);
+    drainUploadQueue('answer');
 }
 
 // --- identity (SAA-114) ---------------------------------------------------
@@ -4024,6 +4211,9 @@ app.whenReady().then(() => {
     // Before the first render, so the tray knows whether to offer sign-in.
     loadCaptureTokens();
     setState('stopped');
+    // Whatever was queued before this launch, including a capture whose app quit
+    // right after Stop.
+    drainUploadQueue('launch');
     registerIdentityIpc();
     registerMeetingsIpc();
     registerConsentIpc();
