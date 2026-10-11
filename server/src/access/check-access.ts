@@ -910,7 +910,12 @@ async function main(): Promise<void> {
       );
       const malformed = await http("GET", "/captures/not-a-uuid/transcript", { token: capToken(A) });
       const absent = await http("GET", `/captures/${randomUUID().toUpperCase()}/jobs`, { token: capToken(A) });
-      record(notFound(malformed) && notFound(absent), "captures 18b: a malformed captureId and one that is not there are the same 404 capture_not_found", `${malformed.status}/${absent.status}`);
+      const badZone = await http("GET", `/captures/${p.captureId}/transcript?tz=Not/AZone`, { token: capToken(A) });
+      record(
+        notFound(malformed) && notFound(absent) && badZone.status === 400 && badZone.json?.error === "invalid_time_zone",
+        "captures 18b: a malformed captureId and one that is not there are the same 404 capture_not_found; a time zone Intl does not know is 400 invalid_time_zone",
+        `${malformed.status}/${absent.status}/${badZone.status} ${badZone.json?.error ?? ""}`,
+      );
 
       const transcript = await own("GET", "/transcript");
       const jobs = await own("GET", "/jobs");
@@ -919,6 +924,20 @@ async function main(): Promise<void> {
           jobs.status === 200 && JSON.stringify(jobs.json?.jobs) === JSON.stringify([{ kind: "extract", state: "queued", attempts: 0 }]),
         "captures 18c: the owner reads the transcript file (two lines, the suggested name) and the capture's jobs (kind, state, attempts)",
         `${transcript.status} lines=${transcript.json?.lines}; jobs ${jobs.status} ${JSON.stringify(jobs.json)}`,
+      );
+
+      // The capture started 2026-10-10T10:00Z: in Kiritimati (UTC+14) that is
+      // October 11, in Pago Pago (UTC-11) October 9. Written out by hand.
+      const east = await own("GET", `/transcript?tz=${encodeURIComponent("Pacific/Kiritimati")}`);
+      const west = await own("GET", `/transcript?tz=${encodeURIComponent("Pacific/Pago_Pago")}`);
+      const headerOf = (r: Reply) => String(r.json?.text ?? "").split("\n")[1] ?? "";
+      record(
+        east.status === 200 && west.status === 200 &&
+          headerOf(east).startsWith("October 11, 2026 · ") && String(east.json?.suggestedFileName).startsWith("2026-10-11 ") &&
+          headerOf(west).startsWith("October 9, 2026 · ") && String(west.json?.suggestedFileName).startsWith("2026-10-09 ") &&
+          headerOf(east) !== headerOf(west) && east.json?.suggestedFileName !== west.json?.suggestedFileName,
+        "captures 18c2: ?tz= dates the file in that zone: Pacific/Kiritimati gives October 11 (2026-10-11 …), Pacific/Pago_Pago October 9 (2026-10-09 …), for the same capture",
+        `east ${east.status} "${headerOf(east)}" ${east.json?.suggestedFileName}; west ${west.status} "${headerOf(west)}" ${west.json?.suggestedFileName}`,
       );
 
       const notTrashed = await own("DELETE", "");

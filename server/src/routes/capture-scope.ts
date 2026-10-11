@@ -15,7 +15,7 @@ import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { db, schema } from "../db/index.js";
 import { CLIPWISE_SOURCE } from "../ingest/clipwise.js";
-import { asyncHandler, HttpError, parseBody, uuidParam } from "../lib/http.js";
+import { asyncHandler, HttpError, parseBody, parseQuery, uuidParam } from "../lib/http.js";
 import { buildTranscriptFile } from "../lib/transcript-read.js";
 
 export const captureScopeRouter = Router();
@@ -39,12 +39,24 @@ async function ownCapture(req: Request): Promise<{ id: string; trashedAt: Date |
 }
 
 // The saved transcript file, built by the same function as the Mac's
-// save-transcript.ts. A trashed capture is not found.
+// save-transcript.ts. A trashed capture is not found. ?tz= is the recorder's IANA
+// time zone, which the date and the file name are written in, so the file is the
+// one the Mac would make; a zone Intl does not know is 400.
+const transcriptQuery = z.object({ tz: z.string().max(64).optional() });
+
 captureScopeRouter.get(
   "/captures/:captureId/transcript",
   asyncHandler(async (req, res) => {
+    const { tz } = parseQuery(transcriptQuery, req);
+    if (tz !== undefined) {
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: tz });
+      } catch {
+        throw new HttpError(400, "invalid_time_zone");
+      }
+    }
     const { id } = await ownCapture(req);
-    const file = await buildTranscriptFile(id);
+    const file = await buildTranscriptFile(id, tz);
     if (!file) throw new HttpError(404, "capture_not_found");
     if (file.lines === 0) throw new HttpError(422, "transcript_empty");
     res.json(file);

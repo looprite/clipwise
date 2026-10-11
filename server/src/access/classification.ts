@@ -61,7 +61,7 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
   // The recorder's own captures (SAA-227, 10-11): a capture token for reads too,
   // and only the caller's own capture; anyone else's is the same 404 as one that
   // is not there.
-  "GET /captures/:captureId/transcript": { access: "owner", requires: "capture", note: "the saved transcript file of the caller's own capture; a trashed one is 404" },
+  "GET /captures/:captureId/transcript": { access: "owner", requires: "capture", note: "the saved transcript file of the caller's own capture, dated in ?tz= (IANA) when given; a trashed one is 404" },
   "POST /captures/:captureId/trash": { access: "owner", requires: "capture", note: "sets trashed_at on the caller's own capture" },
   "POST /captures/:captureId/restore": { access: "owner", requires: "capture", note: "clears trashed_at on the caller's own capture" },
   "DELETE /captures/:captureId": { access: "owner", requires: "capture", note: "deletes the caller's own capture, only from the trash (409 otherwise)" },
