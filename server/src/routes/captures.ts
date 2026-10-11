@@ -3,7 +3,8 @@
 //
 // This is what ingest/clipwise.ts does from the Mac's disk, as an endpoint: one
 // transcript, its segments and speakers, the capture's provenance, and the
-// identity answer if there is one. Differences that are on purpose:
+// identity answer if there is one, and the recording-notice acknowledgement the
+// capture started under. Differences that are on purpose:
 //   - the account and the owner come from the token (a capture token, SAA-244),
 //     never from the body; the server sets source, title placeholder, slug,
 //     status and visibility;
@@ -16,8 +17,9 @@
 // A repeat of a capture already stored:
 //   same content          200 {created:false}; nothing written, except that an
 //                         identity answer or voice names the stored capture does
-//                         not have yet are applied, once. Its voice data is not
-//                         read: the split was made from the first request
+//                         not have yet are applied, once. Its voice data and
+//                         notice stamp are not read: both were taken from the
+//                         first request
 //   different segments    409 capture_content_conflict; the row is unchanged
 //   another member's id   409 capture_id_taken; the row is unchanged
 // "Same content" is a SHA-256 of the segments as sent, without their voice indexes
@@ -175,6 +177,13 @@ const captureSchema = z.object({
   aec: z.unknown().optional(),
   autostop: z.unknown().optional(),
   identity: identitySchema.optional(),
+  // The recording-notice acknowledgement in force when the capture started
+  // (SAA-227 part I): consent.json's version and acknowledged_at, copied into the
+  // manifest at start. Strict, so nothing else rides along with it.
+  notice: z
+    .object({ version: z.number().int().min(1), acknowledgedAt: z.string().datetime({ offset: true }) })
+    .strict()
+    .optional(),
   // Each voice diarize kept, with its total seconds. A segment's voiceIndex must
   // name one of them, and only a `them` segment carries one.
   voices: z.array(voiceSchema).max(64).optional(),
@@ -328,6 +337,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
   const contentHash = contentHashOf(body.segments);
   const identity = (body.identity ?? null) as IdentityAnswer | null;
   const voiceNames = (body.voiceNames ?? null) as VoiceNamesAnswer | null;
+  const notice = body.notice ?? null;
   const slug = captureSlug(body.stem, body.captureId);
   const labelSet = new Set(kept.map((s) => s.track));
   const engine = body.engine;
@@ -375,6 +385,8 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
             content_hash: contentHash,
           },
           identity,
+          // Stored as sent; a capture without one has none, never a guessed one.
+          notice: notice ? { version: notice.version, acknowledged_at: notice.acknowledgedAt } : null,
         },
       })
       .onConflictDoNothing({
@@ -471,6 +483,16 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       await applyIdentity(tx, recording.id, identity);
       await applySpeakerNames(tx, recording.id, identity);
       await applyScope(tx, recording.id, identity);
+    }
+
+    // The member's acknowledgement of that notice version, recorded the first time
+    // a capture carries it. A later capture with the same version adds nothing,
+    // so the first acknowledged_at stands.
+    if (notice) {
+      await tx
+        .insert(schema.noticeAcknowledgements)
+        .values({ memberId: ctx.memberId, noticeVersion: notice.version, acknowledgedAt: new Date(notice.acknowledgedAt) })
+        .onConflictDoNothing({ target: [schema.noticeAcknowledgements.memberId, schema.noticeAcknowledgements.noticeVersion] });
     }
 
     // After identity, as on the Mac (ingest, then diarize): an answer that names

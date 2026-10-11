@@ -967,6 +967,82 @@ async function main(): Promise<void> {
       );
     }
 
+    // ---- the recording-notice acknowledgement (SAA-227 part I) ---------------
+    // 19. A capture's notice stamp is stored on the recording, and the member's
+    // acknowledgement of that version is recorded once.
+    {
+      const acks = async (memberId: string) =>
+        (await pool.query(`select notice_version, acknowledged_at from notice_acknowledgements where member_id = $1 order by notice_version`, [memberId])).rows as Array<{ notice_version: number; acknowledged_at: Date }>;
+      const stampOf = async (captureId: string) => (await capRows(captureId))[0]?.metadata?.notice;
+      const v1 = { version: 1, acknowledgedAt: "2026-10-07T21:18:52.000Z" };
+
+      const pa = capPayload({ extra: { notice: v1 } });
+      const ra = await capPost(A, pa);
+      const afterA = await acks(A.memberId);
+      record(
+        ra.status === 201 && JSON.stringify(await stampOf(pa.captureId)) === JSON.stringify({ version: 1, acknowledged_at: v1.acknowledgedAt }) &&
+          afterA.length === 1 && afterA[0].notice_version === 1 && afterA[0].acknowledged_at.toISOString() === v1.acknowledgedAt &&
+          (await acks(B.memberId)).length === 0,
+        "captures 19a: a stamped capture stores the stamp on the recording and one acknowledgement row for its member (none for anyone else)",
+        `${ra.status} ${ra.json?.error ?? ""} stamp=${JSON.stringify(await stampOf(pa.captureId))} rows=${JSON.stringify(afterA)}`,
+      );
+
+      const pb = capPayload({ extra: { notice: { version: 1, acknowledgedAt: "2026-10-11T09:00:00.000Z" } } });
+      const rb = await capPost(A, pb);
+      const afterB = await acks(A.memberId);
+      record(
+        rb.status === 201 && afterB.length === 1 && afterB[0].acknowledged_at.toISOString() === v1.acknowledgedAt,
+        "captures 19b: a second capture with the same version adds no row, and the first acknowledged_at stands",
+        `${rb.status} rows=${JSON.stringify(afterB)}`,
+      );
+
+      const pc = capPayload({ extra: { notice: { version: 2, acknowledgedAt: "2026-10-11T10:00:00.000Z" } } });
+      const rc = await capPost(A, pc);
+      const afterC = await acks(A.memberId);
+      record(
+        rc.status === 201 && JSON.stringify(afterC.map((r) => r.notice_version)) === JSON.stringify([1, 2]),
+        "captures 19c: a new notice version adds a second row; the first is kept",
+        `${rc.status} versions=${afterC.map((r) => r.notice_version).join(",")}`,
+      );
+
+      const pd = capPayload();
+      const rd = await capPost(A, pd);
+      record(
+        rd.status === 201 && (await stampOf(pd.captureId)) === null && (await acks(A.memberId)).length === 2,
+        "captures 19d: a capture with no stamp is stored with none, and adds no acknowledgement",
+        `${rd.status} stamp=${JSON.stringify(await stampOf(pd.captureId))} rows=${(await acks(A.memberId)).length}`,
+      );
+
+      // A repeat of 19d's capture now carrying a stamp of a version not yet recorded.
+      const before = JSON.stringify([await capRows(pd.captureId), await acks(A.memberId)]);
+      const re = await capPost(A, { ...pd, notice: { version: 3, acknowledgedAt: "2026-10-11T11:00:00.000Z" } });
+      record(
+        re.status === 200 && re.json?.created === false && JSON.stringify([await capRows(pd.captureId), await acks(A.memberId)]) === before,
+        "captures 19e: a same-content repeat carrying a stamp writes nothing: the recording keeps no stamp and no acknowledgement row is added",
+        `${re.status} unchanged=${JSON.stringify([await capRows(pd.captureId), await acks(A.memberId)]) === before}`,
+      );
+
+      const nBefore = await allRecordings();
+      const malformed: Array<[string, unknown]> = [
+        ["version 0", { version: 0, acknowledgedAt: v1.acknowledgedAt }],
+        ["version as a string", { version: "1", acknowledgedAt: v1.acknowledgedAt }],
+        ["acknowledgedAt not a time", { version: 1, acknowledgedAt: "yesterday" }],
+        ["no acknowledgedAt", { version: 1 }],
+        ["an extra key", { version: 1, acknowledgedAt: v1.acknowledgedAt, text: "the notice" }],
+      ];
+      const results: string[] = [];
+      for (const [label, notice] of malformed) {
+        const p = capPayload({ extra: { notice } });
+        const r = await capPost(A, p);
+        results.push(`${r.status === 400 && r.json?.error === "invalid_request" && (await capRows(p.captureId)).length === 0 ? "ok" : "BAD"} ${label}: ${r.status}`);
+      }
+      record(
+        results.every((l) => l.startsWith("ok")) && (await allRecordings()) === nBefore && (await acks(A.memberId)).length === 2,
+        "captures 19f: a malformed stamp (version 0, a string version, a bad time, no time, an extra key) is 400 invalid_request, and nothing is written",
+        results.filter((l) => l.startsWith("BAD")).join("; "),
+      );
+    }
+
     // ---- people ------------------------------------------------------------
     const peopleB = await http("GET", `/accounts/${acc}/people`, { token: B.token });
     const emailsB = (peopleB.json?.people ?? []).map((p: any) => p.email);
