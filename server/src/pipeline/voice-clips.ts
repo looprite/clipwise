@@ -5,6 +5,10 @@
 // database itself (main.js never has DB access — see identity.ts's own
 // file-based answer for the same reason, the other direction).
 //
+// Built from files only: the diarize sidecar and transcript-<stem>.json, keyed by
+// voice index, with no database read (SAA-227 decision 2). This module loads no
+// database code, so it also runs where there is no DATABASE_URL.
+//
 // Written only when diarize actually split the recording (2+ voices). A
 // two-party call never gets this file, and the naming window never shows a
 // step 2 for it.
@@ -17,14 +21,77 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
-import { db, schema } from "../db/index.js";
 
 export type ClipRange = { start: number; end: number };
 
+// voiceIndex is null for a diarized segment that exists but was excluded
+// (host echo, or under minimumVoiceSeconds — see main.swift). assignVoice
+// below no longer treats that differently from no entry at all for a time
+// range (a true diarization gap): neither counts toward any voice's
+// coverage, and both leave a segment unnamed unless some OTHER real voice
+// covers a majority of it regardless.
+export type DiarizeSegment = {
+  start: number;
+  end: number;
+  voiceIndex: number | null;
+};
+
+// Reassign a `them` segment to the diarized voice whose real turns cover
+// MOST of it — majority rule (SAA-199, 2026-09-29), replacing "any positive
+// overlap wins." That rule attributed a segment on a sliver of overlap next
+// to an otherwise-uncovered stretch: 173.79-177.22 on the 09-28 sync, 10%
+// real coverage from one turn ending 0.34s into it, labelled Voice 1 when
+// the content is someone else's. A null result means "leave this segment on
+// `them`" — no real voice covers a majority of it, whether because nothing
+// overlaps it at all (a true gap), only an excluded voice's time range does
+// (host echo, or under minimumVoiceSeconds), or several real voices each
+// cover a minority (a genuine multi-speaker merge inside one whisper
+// segment — see the 430s/442s pair found the same day).
+//
+// No nearest-distance fallback either. Snapping an uncovered segment onto
+// whichever real voice happens to be closest in time is a guess with the
+// same shape as the sliver-overlap rule this replaces — proximity is not
+// coverage. Absent a majority, the segment goes unnamed.
+export const ASSIGN_VOICE_MAJORITY_FRACTION = 0.5;
+// Called by diarize.ts's split and by the naming data below.
+// recorder/app/identity-answer.js carries a copy for the Mac's capture builder
+// (SAA-227 decision 1); check-assign-voice.ts runs both over the same cases.
+export function assignVoice(
+  segStart: number,
+  segEnd: number,
+  diarized: DiarizeSegment[],
+): number | null {
+  const segDuration = segEnd - segStart;
+  if (segDuration <= 0) return null;
+  // Summed per real voiceIndex, not per individual turn: a segment can span
+  // several short turns of the same voice, and each should count toward
+  // that voice's total coverage rather than only the single best turn.
+  // Excluded-voice turns (`d.voiceIndex` null in the type, or `undefined`
+  // at runtime — Swift's JSONEncoder omits a nil Optional key rather than
+  // writing `null`, confirmed empirically) are never a candidate to assign
+  // onto; their time simply isn't counted toward any real voice's total.
+  const overlapByVoice = new Map<number, number>();
+  for (const d of diarized) {
+    if (d.voiceIndex == null) continue;
+    const overlap = Math.min(segEnd, d.end) - Math.max(segStart, d.start);
+    if (overlap <= 0) continue;
+    overlapByVoice.set(d.voiceIndex, (overlapByVoice.get(d.voiceIndex) ?? 0) + overlap);
+  }
+  let bestVoice: number | null = null;
+  let bestOverlap = 0;
+  for (const [voice, overlap] of overlapByVoice) {
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      bestVoice = voice;
+    }
+  }
+  return bestVoice !== null && bestOverlap > segDuration * ASSIGN_VOICE_MAJORITY_FRACTION
+    ? bestVoice
+    : null;
+}
+
 export type NamingVoice = {
   voiceIndex: number;
-  speakerId: string;
   clipPaths: string[];
   // The two longest segments attributed to this voice, not the first two
   // (SAA-195's design comment: on 09-14 the first lines were "Yeah…" and
@@ -76,47 +143,51 @@ function cutClip(tapPcmPath: string, range: ClipRange, outPath: string): void {
   ]);
 }
 
-// Called from diarize.ts right after a successful split, with the same
-// per-voice clip ranges the sidecar carried and the speakerId each voice's
-// new `speakers` row actually got. Best-effort by design, same posture as
-// diarize itself: a clip-cutting failure here must not undo the split or
-// fail the capture, so the caller wraps this the same way it wraps the
-// diarize tool's own execFileSync.
+// The transcript's segments, as transcribe.py writes transcript-<stem>.json.
+type TranscriptSegment = { track: string; start_ms: number; end_ms: number; text: string };
+
+// Called from diarize.ts right after a successful split, with the sidecar the
+// split was made from. Best-effort by design, same posture as diarize itself: a
+// clip-cutting failure here must not undo the split or fail the capture, so the
+// caller wraps this the same way it wraps the diarize tool's own execFileSync.
+//
+// Each voice's lines are the `them` segments assignVoice gives it, read from the
+// transcript file: the same rule, over the same turns, that put those segments on
+// the voice's speaker row.
 export async function generateVoiceNamingData(
   dir: string,
   stem: string,
-  voices: Array<{ voiceIndex: number; clipRanges: ClipRange[] }>,
-  speakerIdByVoice: Map<number, string>,
+  sidecar: { voices: Array<{ voiceIndex: number; clipRanges: ClipRange[] }>; segments: DiarizeSegment[] },
 ): Promise<string> {
   const tapPcmPath = join(dir, `system-${stem}.f32le.pcm`);
   if (!existsSync(tapPcmPath)) {
     throw new Error(`native tap audio not found at ${tapPcmPath}`);
   }
+  const transcript = JSON.parse(readFileSync(join(dir, `transcript-${stem}.json`), "utf8")) as { segments: TranscriptSegment[] };
+  const linesByVoice = new Map<number, Array<{ text: string; start: number; end: number }>>();
+  for (const s of transcript.segments) {
+    if (s.track !== "them") continue;
+    const start = s.start_ms / 1000;
+    const end = s.end_ms / 1000;
+    const voiceIndex = assignVoice(start, end, sidecar.segments);
+    if (voiceIndex === null) continue;
+    linesByVoice.set(voiceIndex, [...(linesByVoice.get(voiceIndex) ?? []), { text: s.text, start, end }]);
+  }
 
   const namingVoices: NamingVoice[] = [];
-  for (const voice of voices) {
-    const speakerId = speakerIdByVoice.get(voice.voiceIndex);
-    if (!speakerId) continue; // unreachable in practice — every voice in `voices` has a row
-
+  for (const voice of sidecar.voices) {
     const clipPaths: string[] = [];
     for (let i = 0; i < voice.clipRanges.length; i++) {
       const outPath = clipPathFor(dir, stem, voice.voiceIndex, i + 1);
       cutClip(tapPcmPath, voice.clipRanges[i], outPath);
       clipPaths.push(outPath);
     }
-
-    const segments = await db
-      .select({ text: schema.segments.text, startSec: schema.segments.startSec, endSec: schema.segments.endSec })
-      .from(schema.segments)
-      .where(eq(schema.segments.speakerId, speakerId));
-    const duration = (s: { startSec: number; endSec: number }) => s.endSec - s.startSec;
-    const lines = segments
+    const duration = (l: { start: number; end: number }) => l.end - l.start;
+    const lines = (linesByVoice.get(voice.voiceIndex) ?? [])
       .slice()
       .sort((a, b) => duration(b) - duration(a))
-      .slice(0, 2)
-      .map((s) => ({ text: s.text, start: s.startSec, end: s.endSec }));
-
-    namingVoices.push({ voiceIndex: voice.voiceIndex, speakerId, clipPaths, lines });
+      .slice(0, 2);
+    namingVoices.push({ voiceIndex: voice.voiceIndex, clipPaths, lines });
   }
 
   const doc: NamingData = {

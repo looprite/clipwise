@@ -23,7 +23,7 @@ const {
     writeLaterMarker, readLaterMarker, deleteLaterMarker,
     pendingIdentityStems, recentPendingIdentityStems,
     buildVoiceNamesDoc, writeVoiceNamesAnswer, readNamingData, pendingVoiceNamingStems,
-    readVoiceNamesAnswer, mostRecentNamedStem, mostRecentCaptureStem,
+    readVoiceNamesAnswer, mostRecentNamedStem, mostRecentCaptureStem, assignVoice,
 } = require('./identity-answer.js');
 const { stopMessageFor } = require('./voice-naming-wait.js');
 // Which meeting the tray's "Save transcript" item acts on (SAA-199).
@@ -2840,9 +2840,9 @@ async function refreshCaptureTokenOnce() {
 
 // The body of POST /captures (server/src/routes/captures.ts captureSchema), from
 // the capture's files on disk: the transcript, the manifest, the classification
-// the pipeline recorded at ingest, and the identity answer when there is one.
-// Throws when a file it needs is missing or unreadable; the thrown error names
-// the file, never what is in it.
+// the pipeline recorded at ingest, the identity answer and the voice names when
+// there are any, and the voices diarize found. Throws when a file it needs is
+// missing or unreadable; the thrown error names the file, never what is in it.
 function buildCapturePayload(stem) {
     const readJson = (name) => {
         try {
@@ -2872,12 +2872,30 @@ function buildCapturePayload(stem) {
     // The prompt writes self.source: null when no name was given
     // (identity-answer.js:138-141); the endpoint takes a string or nothing.
     if (identity && identity.self && identity.self.source === null) delete identity.self.source;
-    const segments = transcript.segments.map((s) => ({
-        track: s.track,
-        startMs: s.start_ms,
-        endMs: s.end_ms,
-        text: s.text,
-    }));
+    let voiceNames;
+    try {
+        voiceNames = readJson(`voice-names-${stem}.json`);
+    } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+    }
+    // What diarize produced (SAA-227 decisions 1 and 4): each voice's index and
+    // total seconds, and each `them` segment's voice by the majority rule. The
+    // server decides whether that is a split. Its turn times, clip ranges and
+    // embeddings stay here. No sidecar, an unreadable one or one that reports an
+    // error means no voice data, as diarize.ts treats it: the capture still goes.
+    let diarized = null;
+    try {
+        const doc = readJson(`diarize-${stem}.json`);
+        if (!doc.error && Array.isArray(doc.voices) && Array.isArray(doc.segments)) diarized = doc;
+    } catch {}
+    const segments = transcript.segments.map((s) => {
+        const seg = { track: s.track, startMs: s.start_ms, endMs: s.end_ms, text: s.text };
+        if (diarized && s.track === 'them') {
+            const voiceIndex = assignVoice(s.start_ms / 1000, s.end_ms / 1000, diarized.segments);
+            if (voiceIndex !== null) seg.voiceIndex = voiceIndex;
+        }
+        return seg;
+    });
     return {
         // Verbatim: manifest ids are uppercase, as are the 107 rows direct
         // ingest has filed under them.
@@ -2911,6 +2929,8 @@ function buildCapturePayload(stem) {
         aec: transcript.aec,
         autostop: transcript.autostop,
         identity,
+        voiceNames,
+        voices: diarized ? diarized.voices.map((v) => ({ voiceIndex: v.voiceIndex, totalSeconds: v.totalSeconds })) : undefined,
     };
 }
 
@@ -2957,11 +2977,12 @@ async function uploadCapture(stem) {
     console.error(`[clipwise-recorder] upload ${stem}: ${reply.status ?? 'no reply'}${reply.error ? ` ${reply.error}` : ''}`);
 }
 
-// An identity answer just written. While this capture's pipeline is still
-// running, the upload at its exit reads the answer from disk and carries it in
-// the first POST. Otherwise that upload has already gone, and the whole capture
-// is sent again with the answer; the server applies it once (captures.ts).
-function uploadIdentityAnswer(stem) {
+// An identity answer or voice names just written. While this capture's pipeline
+// is still running, the upload at its exit reads the answer from disk and
+// carries it in the first POST. Otherwise that upload has already gone, and the
+// whole capture is sent again with the answer; the server applies it once
+// (captures.ts).
+function uploadAnswer(stem) {
     if (pipeline && pipeline.stem === stem && pipeline.state === 'running') return;
     uploadCapture(stem);
 }
@@ -3375,7 +3396,7 @@ function registerIdentityIpc() {
             return;
         }
         startApplyIdentity(capture.stem);
-        uploadIdentityAnswer(capture.stem);
+        uploadAnswer(capture.stem);
         // Answered now, deferred or not (SAA-197) — a marker left from an
         // earlier close no longer describes this capture's state. No-op
         // when there was never one.
@@ -3435,6 +3456,7 @@ function registerIdentityIpc() {
             return;
         }
         startApplyVoiceNames(capture.stem);
+        uploadAnswer(capture.stem);
         finishIdentityWindow();
         // The tray's "Name N voices…" item for this stem should disappear
         // now, not at the next unrelated tray refresh.

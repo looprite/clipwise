@@ -22,7 +22,12 @@ import { join, resolve } from "node:path";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { describeErrorLine } from "../lib/safe-error.js";
-import { generateVoiceNamingData, type ClipRange } from "./voice-clips.js";
+import { assignVoice, generateVoiceNamingData, type ClipRange, type DiarizeSegment } from "./voice-clips.js";
+
+// The majority rule lives in voice-clips.ts, so the naming data can be built
+// without loading the database module (SAA-227 decision 2). Re-exported here,
+// where its callers have always found it.
+export { ASSIGN_VOICE_MAJORITY_FRACTION, assignVoice, type DiarizeSegment } from "./voice-clips.js";
 
 // Not imported from ingest/identity.ts, which declares the same two
 // strings: identity.ts imports isVoiceLabel from this file for its
@@ -48,18 +53,6 @@ type DiarizeVoice = {
   totalSeconds: number;
   embedding: number[];
   clipRanges: ClipRange[];
-};
-
-// voiceIndex is null for a diarized segment that exists but was excluded
-// (host echo, or under minimumVoiceSeconds — see main.swift). assignVoice
-// below no longer treats that differently from no entry at all for a time
-// range (a true diarization gap): neither counts toward any voice's
-// coverage, and both leave a segment unnamed unless some OTHER real voice
-// covers a majority of it regardless.
-export type DiarizeSegment = {
-  start: number;
-  end: number;
-  voiceIndex: number | null;
 };
 
 type DiarizeSidecar = {
@@ -159,61 +152,6 @@ function skip(reason: string, extra: Partial<DiarizationStepResult> = {}): Diari
     hostEcho: null,
     ...extra,
   };
-}
-
-// Reassign a `them` segment to the diarized voice whose real turns cover
-// MOST of it — majority rule (SAA-199, 2026-09-29), replacing "any positive
-// overlap wins." That rule attributed a segment on a sliver of overlap next
-// to an otherwise-uncovered stretch: 173.79-177.22 on the 09-28 sync, 10%
-// real coverage from one turn ending 0.34s into it, labelled Voice 1 when
-// the content is someone else's. A null result means "leave this segment on
-// `them`" — no real voice covers a majority of it, whether because nothing
-// overlaps it at all (a true gap), only an excluded voice's time range does
-// (host echo, or under minimumVoiceSeconds), or several real voices each
-// cover a minority (a genuine multi-speaker merge inside one whisper
-// segment — see the 430s/442s pair found the same day).
-//
-// No nearest-distance fallback either. Snapping an uncovered segment onto
-// whichever real voice happens to be closest in time is a guess with the
-// same shape as the sliver-overlap rule this replaces — proximity is not
-// coverage. Absent a majority, the segment goes unnamed.
-export const ASSIGN_VOICE_MAJORITY_FRACTION = 0.5;
-// Exported for the dry-run comparison this rule was verified against
-// (2026-09-29, against the removed sliver-overlap/nearest-fallback rule and
-// against the Fathom ground-truth file) — not called from outside this
-// module in the pipeline itself.
-export function assignVoice(
-  segStart: number,
-  segEnd: number,
-  diarized: DiarizeSegment[],
-): number | null {
-  const segDuration = segEnd - segStart;
-  if (segDuration <= 0) return null;
-  // Summed per real voiceIndex, not per individual turn: a segment can span
-  // several short turns of the same voice, and each should count toward
-  // that voice's total coverage rather than only the single best turn.
-  // Excluded-voice turns (`d.voiceIndex` null in the type, or `undefined`
-  // at runtime — Swift's JSONEncoder omits a nil Optional key rather than
-  // writing `null`, confirmed empirically) are never a candidate to assign
-  // onto; their time simply isn't counted toward any real voice's total.
-  const overlapByVoice = new Map<number, number>();
-  for (const d of diarized) {
-    if (d.voiceIndex == null) continue;
-    const overlap = Math.min(segEnd, d.end) - Math.max(segStart, d.start);
-    if (overlap <= 0) continue;
-    overlapByVoice.set(d.voiceIndex, (overlapByVoice.get(d.voiceIndex) ?? 0) + overlap);
-  }
-  let bestVoice: number | null = null;
-  let bestOverlap = 0;
-  for (const [voice, overlap] of overlapByVoice) {
-    if (overlap > bestOverlap) {
-      bestOverlap = overlap;
-      bestVoice = voice;
-    }
-  }
-  return bestVoice !== null && bestOverlap > segDuration * ASSIGN_VOICE_MAJORITY_FRACTION
-    ? bestVoice
-    : null;
 }
 
 export async function runDiarizationForCapture(
@@ -338,11 +276,6 @@ export async function runDiarizationForCapture(
     );
   }
 
-  // Populated inside the transaction, read after it commits — by
-  // generateVoiceNamingData, which needs each voice's real speakers.id and
-  // must not run until the split it depends on has actually landed.
-  let speakerIdByVoiceOut = new Map<number, string>();
-
   await db.transaction(async (tx) => {
     // Voice embeddings (sidecar.voices[*].embedding) stay on the Mac, in
     // diarize-<stem>.json, and go no further (SAA-194, addition 2). `db`
@@ -394,19 +327,15 @@ export async function runDiarizationForCapture(
     if (!anySegmentKeptOnThem) {
       await tx.delete(schema.speakers).where(eq(schema.speakers.id, them[0].id));
     }
-
-    speakerIdByVoiceOut = speakerIdByVoice;
   });
 
-  // Best-effort, same posture as the diarize tool call above: a naming-data
-  // failure (ffmpeg missing, disk full, whatever) must not undo the split
-  // that already committed above, and must not fail the capture (SAA-195).
+  // After the split has committed, so the naming window is offered only for a
+  // recording that was actually split. Best-effort, same posture as the diarize
+  // tool call above: a naming-data failure (ffmpeg missing, disk full,
+  // whatever) must not undo the split that already committed above, and must
+  // not fail the capture (SAA-195).
   try {
-    await generateVoiceNamingData(
-      dir, stem,
-      sidecar.voices.map((v) => ({ voiceIndex: v.voiceIndex, clipRanges: v.clipRanges })),
-      speakerIdByVoiceOut,
-    );
+    await generateVoiceNamingData(dir, stem, sidecar);
   } catch (err) {
     const message = describeErrorLine(err);
     console.log(`diarize: naming data generation failed (split still applied): ${message}`);
