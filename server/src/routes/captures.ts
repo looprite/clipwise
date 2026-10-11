@@ -29,7 +29,7 @@
 
 import { createHash } from "node:crypto";
 import type { RequestHandler, Response } from "express";
-import { and, count, eq, sql } from "drizzle-orm";
+import { and, count, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { db, schema } from "../db/index.js";
@@ -46,6 +46,7 @@ import { countObservedFidelity, sourceFidelitySchema } from "../lib/fidelity.js"
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
 import { slugify } from "../lib/slug.js";
 import { BANDS, TRACK_LABELS, TRACK_NAMES, TRACK_VERDICTS } from "../pipeline/classify-capture.js";
+import { voiceLabel } from "../pipeline/diarize.js";
 import { enqueueJob, enqueueReextractForLateNames } from "../jobs/enqueue.js";
 import { wakeWorker } from "../jobs/registry.js";
 
@@ -213,6 +214,57 @@ function deniedTrack(tracks: unknown): "tap" | "mic" | null {
     if (verdict === "dead_denied") return track;
   }
   return null;
+}
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// The diarize split on the server (SAA-227 decision 4), with pipeline/diarize.ts's
+// gates. The Mac did the assignment (assignVoice, majority rule) and sent each
+// `them` segment's voice index; this writes it. No split for one voice or none,
+// for a recording with no `them` row, or when `them` is already named (an answer
+// naming exactly one guest outranks an unassisted voice count). A Voice N row for
+// each voice listed; each segment with a voice index moves to its row; `them` is
+// deleted only when no segment stayed on it, since deleting it would set the
+// remaining segments' speaker to null.
+async function splitThemByVoice(
+  tx: Tx,
+  recordingId: string,
+  voices: z.infer<typeof voiceSchema>[],
+  kept: z.infer<typeof segmentSchema>[],
+): Promise<void> {
+  if (voices.length <= 1) return;
+  const [them] = await tx
+    .select({ id: schema.speakers.id, displayName: schema.speakers.displayName })
+    .from(schema.speakers)
+    .where(and(eq(schema.speakers.recordingId, recordingId), eq(schema.speakers.label, "them")));
+  if (!them || them.displayName) return;
+
+  const speakerByVoice = new Map<number, string>();
+  for (const v of voices) {
+    const [row] = await tx
+      .insert(schema.speakers)
+      .values({ recordingId, label: voiceLabel(v.voiceIndex) })
+      .returning({ id: schema.speakers.id });
+    speakerByVoice.set(v.voiceIndex, row.id);
+  }
+  // orderIndex is the segment's place in `kept`, as inserted above.
+  const orderByVoice = new Map<number, number[]>();
+  let keptOnThem = false;
+  kept.forEach((s, idx) => {
+    if (s.track !== "them") return;
+    if (s.voiceIndex === undefined) {
+      keptOnThem = true;
+      return;
+    }
+    orderByVoice.set(s.voiceIndex, [...(orderByVoice.get(s.voiceIndex) ?? []), idx]);
+  });
+  for (const [voiceIndex, orders] of orderByVoice) {
+    await tx
+      .update(schema.segments)
+      .set({ speakerId: speakerByVoice.get(voiceIndex) })
+      .where(and(eq(schema.segments.recordingId, recordingId), inArray(schema.segments.orderIndex, orders)));
+  }
+  if (!keptOnThem) await tx.delete(schema.speakers).where(eq(schema.speakers.id, them.id));
 }
 
 const contentHashOf = (segments: z.infer<typeof segmentSchema>[]): string =>
@@ -389,6 +441,10 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       await applySpeakerNames(tx, recording.id, identity);
       await applyScope(tx, recording.id, identity);
     }
+
+    // After identity, as on the Mac (ingest, then diarize): an answer that names
+    // the one guest has named `them` by now, and that stops the split.
+    await splitThemByVoice(tx, recording.id, body.voices ?? [], kept);
 
     // Read back from the database, not the ORM's report: what is stored is what
     // was declared (less the deliberate exclusions), or nothing is stored.
