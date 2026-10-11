@@ -454,24 +454,22 @@ export async function applySpeakerNames(
   return mapping;
 }
 
+// The two describe functions below go into logs, so they print counts and
+// speaker labels only, never a name (SAA-227 decision 6). A skip's reason can
+// quote the name already on a speaker, so it is left out too.
 export function describeMapping(mapping: SpeakerMapping): string {
   // `declined` used to mean "nothing below ran" and could short-circuit the
   // whole description. It no longer implies that — `me` can be applied in
   // the same call that declines `them` — so it's reported alongside applied/
   // skipped now, not instead of them.
-  const applied = mapping.applied.length
-    ? mapping.applied.map((a) => `${a.label}→${a.displayName}`).join(", ")
-    : "none";
-  const skipped = mapping.skipped.length
-    ? ` skipped=${mapping.skipped.map((s) => `${s.label} (${s.reason})`).join(", ")}`
-    : "";
-  const declined = mapping.declined ? ` declined=${JSON.stringify(mapping.declined)}` : "";
-  return `applied=${applied}${skipped}${declined}`;
+  const labels = (items: Array<{ label: string }>) =>
+    items.length ? ` (${items.map((i) => i.label).join(", ")})` : "";
+  const skipped = mapping.skipped.length ? ` skipped=${mapping.skipped.length}${labels(mapping.skipped)}` : "";
+  const declined = mapping.declined ? " declined=yes" : "";
+  return `applied=${mapping.applied.length}${labels(mapping.applied)}${skipped}${declined}`;
 }
 
 export function describeRows(rows: AttendeeRow[]): string {
-  if (rows.length === 0) return "none";
-  return rows
-    .map((r) => `${r.name ?? "(unnamed)"}${r.isHost ? " [host]" : ""}`)
-    .join(", ");
+  const hosts = rows.filter((r) => r.isHost).length;
+  return `${rows.length}${hosts ? ` (${hosts} host)` : ""}`;
 }

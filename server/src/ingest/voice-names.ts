@@ -181,12 +181,15 @@ export async function applyVoiceNames(
   return application;
 }
 
+// Goes into logs: counts and voice indexes only, never a name (SAA-227
+// decision 6). A skip's reason can quote the name already on a voice, so it is
+// left out too.
 export function describeVoiceNaming(application: VoiceNamingApplication): string {
   const applied = application.applied.length
-    ? application.applied.map((a) => `Voice${a.voiceIndex}→${a.displayName ?? "(cleared)"}`).join(", ")
-    : "none";
-  const skipped = application.skipped.length
-    ? ` skipped=${application.skipped.map((s) => `Voice${s.voiceIndex} (${s.reason})`).join(", ")}`
+    ? ` (${application.applied.map((a) => `Voice${a.voiceIndex}${a.displayName === null ? " cleared" : ""}`).join(", ")})`
     : "";
-  return `applied=${applied}${skipped}`;
+  const skipped = application.skipped.length
+    ? ` skipped=${application.skipped.length} (${application.skipped.map((s) => `Voice${s.voiceIndex}`).join(", ")})`
+    : "";
+  return `applied=${application.applied.length}${applied}${skipped}`;
 }
