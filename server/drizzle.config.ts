@@ -1,8 +1,15 @@
-import "dotenv/config";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { config } from "dotenv";
 import { defineConfig } from "drizzle-kit";
 import { is } from "drizzle-orm";
 import { PgTable, getTableConfig } from "drizzle-orm/pg-core";
 import * as schema from "./src/db/schema";
+
+// The developer keys file, by name, outside every checkout (SAA-227 part L
+// decision 13). A DATABASE_URL already set wins: scratch-db.sh push sets the
+// scratch branch's.
+config({ path: join(homedir(), ".config", "clipwise", "dev.env") });
 
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL environment variable is required");

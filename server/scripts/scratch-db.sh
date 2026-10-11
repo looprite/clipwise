@@ -26,8 +26,9 @@
 #                                 other src/**/check-*.ts by its file name
 #   scratch-db.sh serve           the server (src/index.ts) on the scratch branch,
 #                                 at http://localhost:3000, after the guard, with
-#                                 ANTHROPIC_API_KEY and VOYAGE_API_KEY from the
-#                                 real server/.env so its worker can extract
+#                                 ANTHROPIC_API_KEY and VOYAGE_API_KEY from
+#                                 ~/.config/clipwise/dev.env so its worker can
+#                                 extract
 #   scratch-db.sh cli <args>      src/auth/cli.ts <args> on the scratch branch,
 #                                 after the guard
 #   scratch-db.sh sql < file      psql on the scratch branch after the guard, the
@@ -507,13 +508,15 @@ cmd_run() {
   esac
 }
 
-# A value from the real server/.env (the main checkout's, not a worktree's), with
-# its quotes taken off. Refuses when the file or the value is missing. Printed
-# only into a variable, never to the terminal.
+# A value from the developer keys file, ~/.config/clipwise/dev.env, outside every
+# checkout (SAA-227 part L decision 13), with its quotes taken off. Refuses when
+# the file or the value is missing. Printed only into a variable, never to the
+# terminal.
+DEV_ENV="$HOME/.config/clipwise/dev.env"
 real_env_value() {
   local real_env v
-  real_env="${CLIPWISE_SERVER_ENV:-$(git -C "$SERVER_DIR" worktree list --porcelain | sed -n '1s/^worktree //p')/server/.env}"
-  [ -f "$real_env" ] || refuse "no server/.env to read $1 from ($real_env)"
+  real_env="$DEV_ENV"
+  [ -f "$real_env" ] || refuse "no developer keys file to read $1 from ($real_env)"
   v="$(envval "$1" "$real_env")"
   v="${v#\"}"; v="${v%\"}"; v="${v#\'}"; v="${v%\'}"
   [ -n "$v" ] || refuse "$1 is not set in $real_env"
