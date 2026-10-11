@@ -51,12 +51,22 @@ import { wakeWorker } from "../jobs/registry.js";
 
 const trackSchema = z.enum(["me", "them"]);
 
-const segmentSchema = z.object({
-  track: trackSchema,
-  startMs: z.number().nonnegative(),
-  endMs: z.number().nonnegative(),
-  text: z.string(),
-});
+// voiceIndex: the diarized voice the Mac assigned a `them` segment to (SAA-227
+// decision 1); absent when no voice covers most of it. Strict, like the voice
+// entries below: what diarize knows beyond the index and the totals (turn times,
+// clip ranges, embeddings) never comes in, and a body carrying it is refused
+// rather than quietly stripped.
+const segmentSchema = z
+  .object({
+    track: trackSchema,
+    startMs: z.number().nonnegative(),
+    endMs: z.number().nonnegative(),
+    text: z.string(),
+    voiceIndex: z.number().int().positive().optional(),
+  })
+  .strict();
+
+const voiceSchema = z.object({ voiceIndex: z.number().int().positive(), totalSeconds: z.number().nonnegative() }).strict();
 
 // The recorder's identity answer (ingest/identity.ts IdentityAnswer), as the
 // prompt writes it.
@@ -149,6 +159,22 @@ const captureSchema = z.object({
   aec: z.unknown().optional(),
   autostop: z.unknown().optional(),
   identity: identitySchema.optional(),
+  // Each voice diarize kept, with its total seconds. A segment's voiceIndex must
+  // name one of them, and only a `them` segment carries one.
+  voices: z.array(voiceSchema).max(64).optional(),
+}).superRefine((body, ctx) => {
+  const listed = new Set((body.voices ?? []).map((v) => v.voiceIndex));
+  if (listed.size !== (body.voices ?? []).length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["voices"], message: "a voiceIndex is listed twice" });
+  }
+  body.segments.forEach((s, i) => {
+    if (s.voiceIndex === undefined) return;
+    if (s.track !== "them") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["segments", i, "voiceIndex"], message: "only a them segment has a voice" });
+    } else if (!listed.has(s.voiceIndex)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["segments", i, "voiceIndex"], message: "not one of the listed voices" });
+    }
+  });
 });
 
 type Stored = {
