@@ -11,9 +11,10 @@
 
 const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
-const { randomUUID } = require('crypto');
+const { randomUUID, randomBytes, createHash } = require('crypto');
 const zlib = require('zlib');
 const fs = require('fs');
+const http = require('http');
 const os = require('os');
 const path = require('path');
 const {
@@ -273,6 +274,11 @@ const SELF_PATH = path.join(SUPPORT_DIR, 'identity-self.json');
 // {"url": "http://localhost:3000"}. No file, or no usable URL in it, means no
 // upload; the direct path runs either way.
 const CAPTURE_SERVER_PATH = path.join(SUPPORT_DIR, 'capture-server.json');
+// The recorder's OAuth client on every instance (server/src/auth/recorder-client.ts):
+// public, PKCE S256, loopback redirect on any port. The capture token it gets is
+// for <server>/capture with the capture scope, and a refresh token.
+const CAPTURE_CLIENT_ID = 'clipwise-recorder';
+const CAPTURE_SCOPES = 'openid offline_access clipwise:capture';
 
 // A GUI-launched Electron inherits a minimal PATH with no Homebrew on it, and
 // the pipeline shells out to python3, ffmpeg and whisper-cli. Launched from a
@@ -1423,6 +1429,15 @@ function renderTray() {
             { type: 'separator' },
             { label: 'Recording notice\u2026',
               click: () => showConsentWindow(blockedStartFresh() ? 'blocked' : 'launch') },
+        );
+    }
+    // The shadow upload's sign-in (SAA-227 part B): only while a server is set
+    // and this app holds no capture token for it.
+    const captureServer = readCaptureServerUrl();
+    if (captureServer && !(captureTokens && captureTokens.server === captureServer)) {
+        items.push(
+            { type: 'separator' },
+            { label: 'Sign in to Clipwise server…', click: signInToCaptureServer },
         );
     }
     items.push(
@@ -2631,6 +2646,96 @@ function readCaptureServerUrl() {
     } catch {
         return null;
     }
+}
+
+// The capture token, once signed in: { server, access, refresh, expiresAt }.
+let captureTokens = null;
+// The loopback listener of a sign-in in progress, if any.
+let captureSignIn = null;
+
+// Sign-in, the way a native app does it (RFC 8252): a listener on 127.0.0.1 at
+// a port the OS picks, the browser to the server's authorize page, then the code
+// it redirects back with exchanged for tokens. The person signs in on the
+// server's own login page; this process never sees a password.
+function signInToCaptureServer() {
+    const server = readCaptureServerUrl();
+    if (!server) return;
+    // A second click starts over rather than leaving the first listener open.
+    if (captureSignIn) captureSignIn.close();
+    const verifier = randomBytes(32).toString('base64url');
+    const state = randomBytes(16).toString('base64url');
+    let redirectUri = null;
+    const listener = http.createServer((req, res) => {
+        const url = new URL(req.url, 'http://127.0.0.1');
+        if (url.pathname !== '/callback' || url.searchParams.get('state') !== state) {
+            res.writeHead(404).end();
+            return;
+        }
+        const code = url.searchParams.get('code');
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+            .end(code ? 'Signed in to Clipwise. You can close this tab.' : 'Sign-in did not finish. You can close this tab.');
+        listener.close();
+        if (captureSignIn === listener) captureSignIn = null;
+        if (!code) {
+            console.error(`[clipwise-recorder] sign-in: ${url.searchParams.get('error') || 'no_code'}`);
+            return;
+        }
+        exchangeCaptureCode(server, code, redirectUri, verifier);
+    });
+    listener.listen(0, '127.0.0.1', () => {
+        redirectUri = `http://127.0.0.1:${listener.address().port}/callback`;
+        const query = new URLSearchParams({
+            response_type: 'code',
+            client_id: CAPTURE_CLIENT_ID,
+            redirect_uri: redirectUri,
+            scope: CAPTURE_SCOPES,
+            state,
+            code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+            code_challenge_method: 'S256',
+            resource: `${server}/capture`,
+        });
+        shell.openExternal(`${server}/api/auth/oauth2/authorize?${query}`);
+    });
+    captureSignIn = listener;
+}
+
+// The token endpoint's reply, read for its status, its error code and the
+// tokens; nothing from it is logged but the first two.
+async function postCaptureTokenForm(server, form) {
+    const res = await fetch(`${server}/api/auth/oauth2/token`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(form),
+    });
+    const body = await res.json().catch(() => ({}));
+    return { status: res.status, body };
+}
+
+async function exchangeCaptureCode(server, code, redirectUri, verifier) {
+    try {
+        const { status, body } = await postCaptureTokenForm(server, {
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: redirectUri,
+            client_id: CAPTURE_CLIENT_ID,
+            code_verifier: verifier,
+            resource: `${server}/capture`,
+        });
+        if (!body.access_token || !body.refresh_token) {
+            console.error(`[clipwise-recorder] sign-in: token ${status} ${body.error || 'no_token'}`);
+            return;
+        }
+        captureTokens = {
+            server,
+            access: body.access_token,
+            refresh: body.refresh_token,
+            expiresAt: Date.now() + Number(body.expires_in) * 1000,
+        };
+        console.error(`[clipwise-recorder] sign-in: signed in to ${server}`);
+    } catch (err) {
+        console.error(`[clipwise-recorder] sign-in: token request failed: ${err.cause?.code || err.name}`);
+    }
+    renderTray();
 }
 
 // --- identity (SAA-114) ---------------------------------------------------
