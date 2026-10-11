@@ -3,8 +3,9 @@
 // calls) and the saved transcript file (SAA-199) read through this, so the
 // file and what Claude sees can't disagree about who said what.
 
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { buildTurns, formatTranscriptFile, suggestedFileName, UNATTRIBUTED } from "./transcript-file.js";
 
 export type TranscriptSegmentRow = {
   id: string;
@@ -52,5 +53,53 @@ export async function readTranscript(recordingId: string): Promise<TranscriptRea
       status: transcript.status,
     },
     segments,
+  };
+}
+
+// The saved transcript file (SAA-199), as text, with what the Save dialog and
+// the recorder's log need. One builder for the Mac's save-transcript.ts and the
+// recorder's GET /captures/:captureId/transcript, so the two give the same bytes.
+// Null when the recording is not there or is in the trash (SAA-154: a trashed
+// recording is not saved, as it is not found by Claude).
+export type TranscriptFile = { text: string; suggestedFileName: string; lines: number; turns: number; unattributedTurns: number };
+
+export async function buildTranscriptFile(recordingId: string): Promise<TranscriptFile | null> {
+  const [recording] = await db
+    .select({
+      title: schema.recordings.title,
+      startedAt: schema.recordings.startedAt,
+      durationSec: schema.recordings.durationSec,
+    })
+    .from(schema.recordings)
+    .where(and(eq(schema.recordings.id, recordingId), isNull(schema.recordings.trashedAt)));
+  if (!recording) return null;
+
+  const [host] = await db
+    .select({ name: schema.attendees.name })
+    .from(schema.attendees)
+    .where(
+      and(
+        eq(schema.attendees.recordingId, recordingId),
+        eq(schema.attendees.isHost, true),
+        isNotNull(schema.attendees.name),
+      ),
+    )
+    .limit(1);
+
+  const { segments } = await readTranscript(recordingId);
+  const input = {
+    title: recording.title,
+    hostName: host?.name ?? null,
+    startedAt: recording.startedAt,
+    durationSec: recording.durationSec,
+    segments,
+  };
+  const turns = buildTurns(segments, host?.name ?? null);
+  return {
+    text: segments.length > 0 ? formatTranscriptFile(input) : "",
+    suggestedFileName: suggestedFileName(input),
+    lines: segments.length,
+    turns: turns.length,
+    unattributedTurns: turns.filter((t) => t.name === UNATTRIBUTED).length,
   };
 }

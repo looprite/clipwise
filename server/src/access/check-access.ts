@@ -303,7 +303,7 @@ async function main(): Promise<void> {
     );
 
     // ---- 2. no token -------------------------------------------------------
-    const fill = (p: string) => p.replace(":accountId", acc).replace(":id", randomUUID()).replace("/*", "/ok");
+    const fill = (p: string) => p.replace(":accountId", acc).replace(":captureId", randomUUID().toUpperCase()).replace(":id", randomUUID()).replace("/*", "/ok");
     for (const key of listed) {
       const [method, path] = key.split(" ");
       const cls = ROUTES[key]?.access;
@@ -879,6 +879,72 @@ async function main(): Promise<void> {
         "Voice 1" in before && late.status === 200 && late.json?.identityApplied === true && JSON.stringify(Object.keys(after).sort()) === JSON.stringify(["me", "them"]) && after.them === `Guest ${tag}` && JSON.stringify(segLabels) === JSON.stringify(["me", "them", "them"]),
         "captures 17e: a late identity answer naming one guest merges the Voice rows back into a named `them`, with every them segment on it",
         `${late.status} before=${JSON.stringify(Object.keys(before))} after=${JSON.stringify(after)} segs=${segLabels.join(",")}`,
+      );
+    }
+
+    // ---- the recorder's own captures (SAA-227, 10-11) ------------------------
+    // 18. The owner's capture token reads the transcript and the jobs, trashes,
+    // restores and deletes permanently (only from the trash). Another member's
+    // capture token gets 404 capture_not_found on every one, and nothing changes.
+    const trashedAtOf = async (id: string) => (await pool.query(`select trashed_at from recordings where account_id = $1 and source_id = $2`, [acc, id])).rows[0]?.trashed_at ?? null;
+    {
+      const p = capPayload();
+      const first = await capPost(A, p);
+      const rid = first.json?.recordingId as string;
+      const own = (method: string, suffix: string, json?: unknown) => http(method, `/captures/${p.captureId}${suffix}`, { token: capToken(A), json });
+      const other = (method: string, suffix: string, json?: unknown) => http(method, `/captures/${p.captureId}${suffix}`, { token: capToken(B), json });
+
+      const notFound = (r: Reply) => r.status === 404 && r.json?.error === "capture_not_found";
+      const before = JSON.stringify(await capRows(p.captureId));
+      const theirs: Array<[string, Reply]> = [
+        ["GET transcript", await other("GET", "/transcript")],
+        ["GET jobs", await other("GET", "/jobs")],
+        ["POST trash", await other("POST", "/trash", {})],
+        ["POST restore", await other("POST", "/restore", {})],
+        ["DELETE", await other("DELETE", "")],
+      ];
+      record(
+        first.status === 201 && theirs.every(([, r]) => notFound(r)) && JSON.stringify(await capRows(p.captureId)) === before,
+        "captures 18a: another member's capture token gets 404 capture_not_found on the transcript, jobs, trash, restore and delete of someone else's capture, and the row is unchanged",
+        theirs.map(([l, r]) => `${l}: ${r.status} ${r.json?.error ?? ""}`).join("; "),
+      );
+      const malformed = await http("GET", "/captures/not-a-uuid/transcript", { token: capToken(A) });
+      const absent = await http("GET", `/captures/${randomUUID().toUpperCase()}/jobs`, { token: capToken(A) });
+      record(notFound(malformed) && notFound(absent), "captures 18b: a malformed captureId and one that is not there are the same 404 capture_not_found", `${malformed.status}/${absent.status}`);
+
+      const transcript = await own("GET", "/transcript");
+      const jobs = await own("GET", "/jobs");
+      record(
+        transcript.status === 200 && transcript.json?.lines === 2 && String(transcript.json?.text).includes(WORD) && String(transcript.json?.suggestedFileName).endsWith("transcript.txt") &&
+          jobs.status === 200 && JSON.stringify(jobs.json?.jobs) === JSON.stringify([{ kind: "extract", state: "queued", attempts: 0 }]),
+        "captures 18c: the owner reads the transcript file (two lines, the suggested name) and the capture's jobs (kind, state, attempts)",
+        `${transcript.status} lines=${transcript.json?.lines}; jobs ${jobs.status} ${JSON.stringify(jobs.json)}`,
+      );
+
+      const notTrashed = await own("DELETE", "");
+      const stillThere = (await capRows(p.captureId)).length;
+      const trash = await own("POST", "/trash", { trashedAt: "2026-10-11T12:00:00.000Z" });
+      const whileTrashed = await own("GET", "/transcript");
+      const trashedAt = await trashedAtOf(p.captureId);
+      const restore = await own("POST", "/restore", {});
+      const restoredAt = await trashedAtOf(p.captureId);
+      record(
+        notTrashed.status === 409 && notTrashed.json?.error === "capture_not_trashed" && stillThere === 1 &&
+          trash.status === 200 && trashedAt instanceof Date && trashedAt.toISOString() === "2026-10-11T12:00:00.000Z" && notFound(whileTrashed) &&
+          restore.status === 200 && restoredAt === null,
+        "captures 18d: delete outside the trash is 409 capture_not_trashed; trash sets trashed_at to the time sent and hides the transcript; restore clears it",
+        `delete ${notTrashed.status}, trash ${trash.status} at ${trashedAt instanceof Date ? trashedAt.toISOString() : trashedAt}, transcript while trashed ${whileTrashed.status}, restore ${restore.status} -> ${restoredAt}`,
+      );
+
+      await own("POST", "/trash", {});
+      const del = await own("DELETE", "");
+      const left = (await capRows(p.captureId)).length;
+      const jobsLeft = (await pool.query(`select count(*)::int as n from jobs where recording_id = $1`, [rid])).rows[0].n;
+      const again = await own("DELETE", "");
+      record(
+        del.status === 200 && left === 0 && jobsLeft === 0 && notFound(again),
+        "captures 18e: from the trash, delete removes the recording and its jobs; a second delete is 404",
+        `${del.status} rows=${left} jobs=${jobsLeft} again=${again.status}`,
       );
     }
 
