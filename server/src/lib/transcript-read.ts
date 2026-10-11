@@ -60,10 +60,11 @@ export async function readTranscript(recordingId: string): Promise<TranscriptRea
 // the recorder's log need. One builder for the Mac's save-transcript.ts and the
 // recorder's GET /captures/:captureId/transcript, so the two give the same bytes.
 // Null when the recording is not there or is in the trash (SAA-154: a trashed
-// recording is not saved, as it is not found by Claude).
+// recording is not saved, as it is not found by Claude). The date and the file
+// name are in timeZone (an IANA name) when one is given, else this process's own.
 export type TranscriptFile = { text: string; suggestedFileName: string; lines: number; turns: number; unattributedTurns: number };
 
-export async function buildTranscriptFile(recordingId: string): Promise<TranscriptFile | null> {
+export async function buildTranscriptFile(recordingId: string, timeZone?: string): Promise<TranscriptFile | null> {
   const [recording] = await db
     .select({
       title: schema.recordings.title,
@@ -96,8 +97,8 @@ export async function buildTranscriptFile(recordingId: string): Promise<Transcri
   };
   const turns = buildTurns(segments, host?.name ?? null);
   return {
-    text: segments.length > 0 ? formatTranscriptFile(input) : "",
-    suggestedFileName: suggestedFileName(input),
+    text: segments.length > 0 ? formatTranscriptFile(input, timeZone) : "",
+    suggestedFileName: suggestedFileName(input, timeZone),
     lines: segments.length,
     turns: turns.length,
     unattributedTurns: turns.filter((t) => t.name === UNATTRIBUTED).length,

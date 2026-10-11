@@ -937,6 +937,8 @@ function saveTranscriptLabel(meeting) {
 // then picks where it goes, in a Save dialog opening on Downloads.
 function saveTranscript(meeting) {
     if (savingTranscript || meeting.state !== 'ready') return;
+    // The server's copy, beside this one and not waiting on it (step 11 above).
+    saveTranscriptFromServer(meeting.stem);
     savingTranscript = true;
     renderTray();
     sendMeetingsData();
@@ -1080,6 +1082,8 @@ async function changeTrash(action, rawStems) {
         if (stems.length === 0) { sendMeetingsData(); return; }
     }
 
+    // The same on the server, beside the direct path and not waiting on it.
+    trashOnServer(action, stems);
     trashBusy = true;
     sendMeetingsData();
     let results;
@@ -3162,6 +3166,84 @@ function queueRecoveredCaptures(passStartedAtMs) {
         let record;
         try { record = JSON.parse(fs.readFileSync(path.join(OUTDIR, name), 'utf8')); } catch { continue; }
         if (record.last_action === 'recovered' && Date.parse(record.last_action_at) >= passStartedAtMs) enqueueUpload(m[1]);
+    }
+}
+
+// --- shadow calls to the capture-scope routes (SAA-227 step 11) ------------
+//
+// Save transcript and trash, restore, delete permanently, over the server's
+// routes for the owner's own captures (routes/capture-scope.ts), as functions L
+// will select. While capture-server.json is set and this app is signed in, the
+// Recent Meetings actions also call them, beside the direct path and never
+// waiting on its result; the direct path still decides what happens on this Mac.
+// The log holds the stem, a status and, for a transcript, the SHA-256 of the
+// server's file, never its text.
+
+// The capture's id on the server: the manifest's recording_id, as sent.
+function captureIdFor(stem) {
+    try {
+        return JSON.parse(fs.readFileSync(path.join(OUTDIR, `manifest-${stem}.json`), 'utf8')).recording_id || null;
+    } catch {
+        return null;
+    }
+}
+
+// One request to a capture-scope route with the token held now; a 401 refreshes
+// the token and tries once more. Resolves { status, json }, status null with no reply.
+async function captureServerRequest(server, method, route, json) {
+    const once = async () => {
+        try {
+            const res = await fetch(`${server}${route}`, {
+                method,
+                headers: {
+                    ...(json !== undefined ? { 'content-type': 'application/json' } : {}),
+                    authorization: `Bearer ${captureTokens ? captureTokens.access : ''}`,
+                },
+                body: json !== undefined ? JSON.stringify(json) : undefined,
+            });
+            return { status: res.status, json: await res.json().catch(() => ({})) };
+        } catch (err) {
+            return { status: null, json: { error: err.cause?.code || err.name } };
+        }
+    };
+    let reply = await once();
+    if (reply.status === 401 && await refreshCaptureToken()) reply = await once();
+    return reply;
+}
+
+// The server, when the shadow calls should go; null otherwise.
+function shadowServer() {
+    const server = readCaptureServerUrl();
+    return server && captureTokens && captureTokens.server === server ? server : null;
+}
+
+// The saved transcript file the server makes for this capture, dated in this
+// Mac's time zone, so that it is the file save-transcript.ts makes here. Only its
+// SHA-256 is logged.
+async function saveTranscriptFromServer(stem) {
+    const server = shadowServer();
+    const captureId = captureIdFor(stem);
+    if (!server || !captureId) return;
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const reply = await captureServerRequest(server, 'GET', `/captures/${captureId}/transcript?tz=${encodeURIComponent(tz)}`);
+    const text = reply.status === 200 && typeof reply.json.text === 'string' ? reply.json.text : null;
+    const hash = text !== null ? createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex') : null;
+    console.error(`[clipwise-recorder] save-transcript ${stem}: server ${reply.status ?? 'no reply'}${hash ? ` sha256=${hash}` : ` ${reply.json.error || ''}`}`);
+}
+
+// Trash, restore or delete permanently on the server, one capture at a time.
+async function trashOnServer(action, stems) {
+    const server = shadowServer();
+    if (!server) return;
+    for (const stem of stems) {
+        const captureId = captureIdFor(stem);
+        if (!captureId) continue;
+        const reply = action === 'trash'
+            ? await captureServerRequest(server, 'POST', `/captures/${captureId}/trash`, {})
+            : action === 'restore'
+                ? await captureServerRequest(server, 'POST', `/captures/${captureId}/restore`, {})
+                : await captureServerRequest(server, 'DELETE', `/captures/${captureId}`);
+        console.error(`[clipwise-recorder] trash ${action} ${stem}: server ${reply.status ?? 'no reply'}${reply.json.error ? ` ${reply.json.error}` : ''}`);
     }
 }
 
