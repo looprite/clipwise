@@ -26,6 +26,8 @@
 #                                 other src/**/check-*.ts by its file name
 #   scratch-db.sh serve           the server (src/index.ts) on the scratch branch,
 #                                 at http://localhost:3000, after the guard
+#   scratch-db.sh cli <args>      src/auth/cli.ts <args> on the scratch branch,
+#                                 after the guard
 #   scratch-db.sh down            delete the branch and its files, then read back
 #
 # Exit codes: 0 ok, 1 a step failed (the branch is left up), 2 refused before
@@ -514,6 +516,15 @@ cmd_serve() {
   exit "${PIPESTATUS[0]}"
 }
 
+cmd_cli() {
+  [ $# -gt 0 ] || refuse "usage: scratch-db.sh cli <command> (see src/auth/cli.ts)"
+  scratch_ready
+  say "cli: src/auth/cli.ts $1"
+  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED -- \
+    npx --no-install tsx src/auth/cli.ts "$@" 2>&1 | scrub
+  exit "${PIPESTATUS[0]}"
+}
+
 # ---- reading what drizzle-kit said ----
 # Its exit status is 0 when it stops at a confirmation (measured; it is 1 when it
 # cannot connect), so whether a push applied is decided from its text: it prints
@@ -644,8 +655,9 @@ case "${1:-}" in
   up) shift; cmd_up "$@" ;;
   run) shift; cmd_run "$@" ;;
   serve) shift; cmd_serve "$@" ;;
+  cli) shift; cmd_cli "$@" ;;
   push) shift; cmd_push "$@" ;;
   push-check) shift; cmd_push_check "$@" ;;
   down) cmd_down ;;
-  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | down" >&2; exit 2 ;;
+  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | cli <command> | down" >&2; exit 2 ;;
 esac
