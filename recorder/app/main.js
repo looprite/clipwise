@@ -2677,6 +2677,34 @@ function readCaptureServerUrl() {
     }
 }
 
+// Which path a capture takes (SAA-227 part L), from capture-server.json's `mode`:
+//   direct  the pipeline ingests and extracts on this Mac; nothing is sent
+//   shadow  direct, and each capture is also sent to the server
+//   server  the database-free pipeline on this Mac; the server does the rest
+// No file means direct. A file with a usable URL and no mode means shadow, which
+// is what such a file meant before the key existed. Shadow and server need the
+// URL; without one, or with a mode that is none of the three, it is direct, and
+// `reason` says why. Read on each use, as the URL is.
+const CAPTURE_MODES = new Set(['direct', 'shadow', 'server']);
+
+function readCaptureMode() {
+    let doc;
+    try {
+        doc = JSON.parse(fs.readFileSync(CAPTURE_SERVER_PATH, 'utf8'));
+    } catch (err) {
+        return { mode: 'direct', server: null, reason: err.code === 'ENOENT' ? 'no capture-server.json' : `capture-server.json unreadable (${err.code || err.name})` };
+    }
+    const server = readCaptureServerUrl();
+    const asked = doc && doc.mode !== undefined ? doc.mode : null;
+    if (asked !== null && !CAPTURE_MODES.has(asked)) {
+        return { mode: 'direct', server: null, reason: `capture-server.json mode ${JSON.stringify(asked)} is not direct, shadow or server` };
+    }
+    if (asked === 'direct') return { mode: 'direct', server: null, reason: 'mode direct' };
+    if (!server) return { mode: 'direct', server: null, reason: `capture-server.json has no usable url${asked ? ` for mode ${asked}` : ''}` };
+    if (asked === null) return { mode: 'shadow', server, reason: 'url and no mode' };
+    return { mode: asked, server, reason: `mode ${asked}` };
+}
+
 // The capture token, once signed in: { server, access, refresh, expiresAt }.
 let captureTokens = null;
 // The loopback listener of a sign-in in progress, if any.
@@ -4386,6 +4414,10 @@ app.whenReady().then(() => {
     // having tested anything. The plist decides what the app launches as; this
     // decides what it is a moment later. They only mean something together.
     tray = new Tray(iconFor('stopped'));
+    {
+        const { mode, server, reason } = readCaptureMode();
+        console.error(`[clipwise-recorder] capture mode: ${mode}${server ? ` server=${server}` : ''} (${reason})`);
+    }
     // Before the first render, so the tray knows whether to offer sign-in.
     loadCaptureTokens();
     setState('stopped');
