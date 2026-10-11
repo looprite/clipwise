@@ -7,14 +7,21 @@
 // A capture is finished again when its record has a step that is not ok or
 // skipped, and no live process is working on it: a step left `running` by a
 // process that has gone (killed mid-step) counts, one whose process is alive
-// does not. Not retried: a capture in the trash, and one the classifier refused
-// (classify failed), which a second run would refuse the same way. Only captures
-// with a capture-pipeline record are looked at, never every capture on disk.
+// does not. A capture with a manifest and no pipeline record at all (the app
+// went before its pipeline started) is run too, as recover.ts runs one with no
+// recording row (SAA-227 part L decision 10). Not retried: a capture in the
+// trash, and one the classifier refused (classify failed), which a second run
+// would refuse the same way. A record the direct pipeline wrote (no
+// `pipeline: "capture"`) is left alone: only one mode runs at a time.
 //
-// For each capture it ran, it writes recovery-<stem>.json as recover.ts does
-// (attempts, last_action "recovered" or "failed", last_action_at), which is what
-// the recorder reads to queue a recovered capture for upload (main.js
-// queueRecoveredCaptures). It loads no database code and needs no API key.
+// The same budget as recover.ts (decision 9): at most 3 attempts per capture,
+// at least 10 minutes apart, the attempt written before the run so that a
+// process killed mid-run still counts it.
+//
+// For each capture it looked at, it writes recovery-<stem>.json as recover.ts
+// does (attempts, last_action, last_action_at), which is what the recorder reads
+// to queue a recovered capture for upload (main.js queueRecoveredCaptures, on
+// "recovered" only). It loads no database code and needs no API key.
 //
 // Usage:
 //   tsx src/pipeline/capture-recover.ts <capture_dir>
@@ -38,38 +45,49 @@ function alive(pid: number | null): boolean {
   }
 }
 
+// recover.ts's budget (DEFAULT_MAX_ATTEMPTS, RETRY_COOLDOWN_MS), with its reasons.
+const MAX_ATTEMPTS = 3;
+const RETRY_COOLDOWN_MS = 10 * 60 * 1000;
+
 type Attempts = {
   stem: string;
   recording_id: string;
   attempts: number;
+  first_attempt_at?: string | null;
+  last_attempt_at?: string | null;
   last_error: string | null;
-  last_action: "recovered" | "failed" | null;
+  last_action: "recovered" | "failed" | "budget_exhausted" | "cooling_down" | null;
   last_action_at: string | null;
 };
 
 function readAttempts(dir: string, stem: string, recordingId: string): Attempts {
   try {
     const prior = JSON.parse(readFileSync(join(dir, `recovery-${stem}.json`), "utf8")) as Attempts;
-    if (prior.recording_id === recordingId) return prior;
+    if (prior.recording_id === recordingId && typeof prior.attempts === "number") return prior;
   } catch {}
-  return { stem, recording_id: recordingId, attempts: 0, last_error: null, last_action: null, last_action_at: null };
+  return { stem, recording_id: recordingId, attempts: 0, first_attempt_at: null, last_attempt_at: null, last_error: null, last_action: null, last_action_at: null };
 }
 
 // The stems this pass should finish, with why.
 export function unfinishedCaptures(dir: string): Array<{ stem: string; why: string }> {
   const out: Array<{ stem: string; why: string }> = [];
   for (const name of readdirSync(dir)) {
-    const m = /^pipeline-(.+)\.json$/.exec(name);
+    const m = /^manifest-(.+)\.json$/.exec(name);
     if (!m) continue;
     const stem = m[1];
+    if (isTrashed(dir, stem)) continue;
+    const recordPath = join(dir, `pipeline-${stem}.json`);
+    if (!existsSync(recordPath)) {
+      out.push({ stem, why: "never started" });
+      continue;
+    }
     let doc: CaptureSidecar;
     try {
-      doc = JSON.parse(readFileSync(join(dir, name), "utf8"));
+      doc = JSON.parse(readFileSync(recordPath, "utf8"));
     } catch {
       continue;
     }
     if (doc.pipeline !== "capture" || !doc.steps) continue;
-    if (!existsSync(join(dir, `manifest-${stem}.json`)) || isTrashed(dir, stem)) continue;
     const steps = Object.entries(doc.steps);
     if (steps.every(([, s]) => s.state === "ok" || s.state === "skipped")) continue;
     if (doc.steps.classify?.state === "failed") continue;
@@ -90,10 +108,41 @@ async function main(): Promise<void> {
   const todo = unfinishedCaptures(dir);
   log(`${todo.length} unfinished capture(s)`);
   for (const { stem, why } of todo) {
-    log(`${stem}: finishing (${why})`);
-    const recordingId = (JSON.parse(readFileSync(join(dir, `manifest-${stem}.json`), "utf8")) as { recording_id: string }).recording_id;
+    let recordingId: string | undefined;
+    try {
+      recordingId = (JSON.parse(readFileSync(join(dir, `manifest-${stem}.json`), "utf8")) as { recording_id?: string }).recording_id;
+    } catch {
+      log(`${stem}: manifest unreadable — skipping`);
+      continue;
+    }
+    if (!recordingId) {
+      log(`${stem}: manifest has no recording_id — skipping`);
+      continue;
+    }
     const a = readAttempts(dir, stem, recordingId);
+    const held = (action: "budget_exhausted" | "cooling_down", detail: string): void => {
+      log(`${stem}: ${action.replace("_", " ")} (${why}) — ${detail}`);
+      a.last_action = action;
+      a.last_action_at = new Date().toISOString();
+      writeFileSync(join(dir, `recovery-${stem}.json`), JSON.stringify(a, null, 2) + "\n");
+    };
+    if (a.attempts >= MAX_ATTEMPTS) {
+      held("budget_exhausted", `${a.attempts}/${MAX_ATTEMPTS} attempts used; last error: ${a.last_error ?? "none recorded"}`);
+      continue;
+    }
+    const sinceLast = a.last_attempt_at ? Date.now() - Date.parse(a.last_attempt_at) : Infinity;
+    if (Number.isFinite(sinceLast) && sinceLast >= 0 && sinceLast < RETRY_COOLDOWN_MS) {
+      held("cooling_down", `attempted ${Math.round(sinceLast / 1000)}s ago (${a.attempts}/${MAX_ATTEMPTS} used)`);
+      continue;
+    }
+    log(`${stem}: finishing (${why})`);
+    const startedAt = new Date().toISOString();
     a.attempts += 1;
+    a.first_attempt_at = a.first_attempt_at ?? startedAt;
+    a.last_attempt_at = startedAt;
+    // Written before the run, as recover.ts does: a process killed mid-run must
+    // still have used the attempt.
+    writeFileSync(join(dir, `recovery-${stem}.json`), JSON.stringify(a, null, 2) + "\n");
     try {
       await runCapturePipelineWithoutDatabase(dir, stem);
       a.last_action = "recovered";
