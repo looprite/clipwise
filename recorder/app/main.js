@@ -269,6 +269,11 @@ const MEETINGS_HTML = path.join(__dirname, 'meetings.html');
 const IDENTITY_REVEAL_GRACE_MS = 400;
 const SELF_PATH = path.join(SUPPORT_DIR, 'identity-self.json');
 
+// The Clipwise server the shadow upload sends each capture to (SAA-227 part B):
+// {"url": "http://localhost:3000"}. No file, or no usable URL in it, means no
+// upload; the direct path runs either way.
+const CAPTURE_SERVER_PATH = path.join(SUPPORT_DIR, 'capture-server.json');
+
 // A GUI-launched Electron inherits a minimal PATH with no Homebrew on it, and
 // the pipeline shells out to python3, ffmpeg and whisper-cli. Launched from a
 // terminal this changes nothing.
@@ -2607,6 +2612,25 @@ function dismissPipelineFailure() {
     if (!pipeline || pipeline.state !== 'failed') return;
     pipeline = null;
     renderTray();
+}
+
+// --- shadow upload (SAA-227 part B) ---------------------------------------
+//
+// Alongside the direct path, not instead of it: the pipeline still ingests and
+// extracts on this Mac, and a finished capture is also sent to POST /captures
+// on the server named in capture-server.json.
+
+// The server's origin, or null when the upload is off. Read on each use, so
+// writing or removing the file takes effect without a restart.
+function readCaptureServerUrl() {
+    try {
+        const doc = JSON.parse(fs.readFileSync(CAPTURE_SERVER_PATH, 'utf8'));
+        const url = new URL(doc.url);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+        return url.origin;
+    } catch {
+        return null;
+    }
 }
 
 // --- identity (SAA-114) ---------------------------------------------------
