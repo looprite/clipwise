@@ -68,14 +68,15 @@ function identifyingLine(row) {
     return parts.join(' · ');
 }
 
-// -> rows, newest first. `now` is injectable for checks.
-function listMeetings(dir, now = Date.now(), days = DAYS) {
+// -> rows, newest first. `now` is injectable for checks; `opts` goes to
+// classifyCapture.
+function listMeetings(dir, now = Date.now(), days = DAYS, opts = {}) {
     const cutoff = now - days * 24 * 60 * 60 * 1000;
     const rows = [];
     for (const stem of captureStems(dir)) {
         const startedAtMs = stemTimeMs(stem);
         if (!Number.isFinite(startedAtMs) || startedAtMs < cutoff || startedAtMs > now + 60 * 1000) continue;
-        const c = classifyCapture(dir, stem, now);
+        const c = classifyCapture(dir, stem, now, opts);
         const manifest = readJson(path.join(dir, `manifest-${stem}.json`));
         const appRaw = manifest && manifest.trigger_app ? cleanName(manifest.trigger_app.name) : null;
         const identity = readJson(path.join(dir, `identity-${stem}.json`));

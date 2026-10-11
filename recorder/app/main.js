@@ -940,13 +940,15 @@ function saveTranscriptLabel(meeting) {
     return meeting.state === 'ready' ? base : `${base} (not ready yet)`;
 }
 
-// The file is built by a server-side script (main.js has no database access),
-// from the same read get_transcript uses, into a temporary path; the person
-// then picks where it goes, in a Save dialog opening on Downloads.
+// The file is built into a temporary path, by a server-side script from the same
+// read get_transcript uses (main.js has no database access), or in server mode
+// by the server itself; the person then picks where it goes, in a Save dialog
+// opening on Downloads.
 function saveTranscript(meeting) {
     if (savingTranscript || meeting.state !== 'ready') return;
+    const server = readCaptureMode().mode === 'server';
     // The server's copy, beside this one and not waiting on it (step 11 above).
-    saveTranscriptFromServer(meeting.stem);
+    if (!server) saveTranscriptFromServer(meeting.stem);
     savingTranscript = true;
     renderTray();
     sendMeetingsData();
@@ -957,6 +959,20 @@ function saveTranscript(meeting) {
         renderTray();
         sendMeetingsData();
     };
+    const failed = (why) => {
+        console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: failed — ${why}`);
+        notify('Clipwise: transcript not saved', `Couldn't build the transcript for ${meeting.stem}: ${why}`);
+    };
+    if (server) {
+        buildTranscriptFromServer(meeting.stem, tmp)
+            .then((meta) => offerTranscriptSave(meeting, tmp, meta), (err) => failed(err.message))
+            .catch((e) => {
+                console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: ${String(e)}`);
+                notify('Clipwise: transcript not saved', String(e.message || e));
+            })
+            .finally(done);
+        return;
+    }
     execFile(
         TSX_BIN,
         [SAVE_TRANSCRIPT_ENTRY, OUTDIR, '--stem', meeting.stem, '--out', tmp],
@@ -965,24 +981,10 @@ function saveTranscript(meeting) {
             try {
                 const line = String(stdout || '').split('\n').find(l => l.startsWith('SAVE_TRANSCRIPT_META '));
                 if (err || !line) {
-                    const why = String(stderr || (err && err.message) || 'no result').trim().split('\n').pop();
-                    console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: failed — ${why}`);
-                    notify('Clipwise: transcript not saved', `Couldn't build the transcript for ${meeting.stem}: ${why}`);
+                    failed(String(stderr || (err && err.message) || 'no result').trim().split('\n').pop());
                     return;
                 }
-                const meta = JSON.parse(line.slice('SAVE_TRANSCRIPT_META '.length));
-                app.focus({ steal: true });
-                const { canceled, filePath } = await dialog.showSaveDialog({
-                    title: 'Save transcript',
-                    defaultPath: path.join(app.getPath('downloads'), meta.suggestedFileName),
-                    filters: [{ name: 'Text', extensions: ['txt'] }],
-                });
-                if (canceled || !filePath) return;
-                fs.copyFileSync(tmp, filePath);
-                console.error(
-                    `[clipwise-recorder] save-transcript ${meeting.stem}: saved ${meta.turns} turns ` +
-                    `(${meta.unattributedTurns} unattributed) -> ${filePath}`);
-                notify('Clipwise: transcript saved', path.basename(filePath));
+                await offerTranscriptSave(meeting, tmp, JSON.parse(line.slice('SAVE_TRANSCRIPT_META '.length)));
             } catch (e) {
                 console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: ${String(e)}`);
                 notify('Clipwise: transcript not saved', String(e.message || e));
@@ -990,6 +992,43 @@ function saveTranscript(meeting) {
                 done();
             }
         });
+}
+
+// Server mode: the file the server builds for this capture (GET
+// /captures/:captureId/transcript, the same builder as save-transcript.ts), in this
+// Mac's time zone, written to `tmp`. Resolves the same fields save-transcript.ts
+// reports; only the text's SHA-256 is logged.
+async function buildTranscriptFromServer(stem, tmp) {
+    const server = shadowServer();
+    if (!server) throw new Error('not signed in to the capture server');
+    const captureId = captureIdFor(stem);
+    if (!captureId) throw new Error(`manifest-${stem}.json has no recording_id`);
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const reply = await captureServerRequest(server, 'GET', `/captures/${captureId}/transcript?tz=${encodeURIComponent(tz)}`);
+    if (reply.status !== 200 || typeof reply.json.text !== 'string') {
+        throw new Error(`server ${reply.status ?? 'no reply'} ${reply.json.error || ''}`.trim());
+    }
+    const hash = createHash('sha256').update(Buffer.from(reply.json.text, 'utf8')).digest('hex');
+    console.error(`[clipwise-recorder] save-transcript ${stem}: server 200 sha256=${hash}`);
+    fs.writeFileSync(tmp, reply.json.text, 'utf8');
+    return reply.json;
+}
+
+// The Save dialog for a transcript file built at `tmp`, and the copy to where the
+// person picks.
+async function offerTranscriptSave(meeting, tmp, meta) {
+    app.focus({ steal: true });
+    const { canceled, filePath } = await dialog.showSaveDialog({
+        title: 'Save transcript',
+        defaultPath: path.join(app.getPath('downloads'), meta.suggestedFileName),
+        filters: [{ name: 'Text', extensions: ['txt'] }],
+    });
+    if (canceled || !filePath) return;
+    fs.copyFileSync(tmp, filePath);
+    console.error(
+        `[clipwise-recorder] save-transcript ${meeting.stem}: saved ${meta.turns} turns ` +
+        `(${meta.unattributedTurns} unattributed) -> ${filePath}`);
+    notify('Clipwise: transcript saved', path.basename(filePath));
 }
 
 // --- recent meetings window (SAA-217) -------------------------------------
@@ -1007,7 +1046,7 @@ const STEM_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$/;
 function sendMeetingsData() {
     if (!meetingsWindow || meetingsWindow.isDestroyed()) return;
     meetingsWindow.webContents.send('meetings:data', {
-        rows: listMeetings(OUTDIR),
+        rows: listMeetings(OUTDIR, undefined, undefined, captureStateOpts()),
         trashed: listTrashed(OUTDIR),
         saving: savingTranscript,
         busy: trashBusy,
@@ -1064,7 +1103,7 @@ async function changeTrash(action, rawStems) {
     // Re-checked at click time: what the window showed may be stale.
     let stems;
     if (action === 'trash') {
-        stems = unique.filter((s) => !isTrashed(OUTDIR, s) && classifyCapture(OUTDIR, s).state !== 'pending');
+        stems = unique.filter((s) => !isTrashed(OUTDIR, s) && classifyCapture(OUTDIR, s, undefined, captureStateOpts()).state !== 'pending');
     } else {
         stems = unique.filter((s) => isTrashed(OUTDIR, s));
     }
@@ -1154,7 +1193,7 @@ function registerMeetingsIpc() {
         const stem = payload && payload.stem;
         if (typeof stem !== 'string' || !STEM_PATTERN.test(stem)) return;
         // Re-classified at click time: what the row showed may be stale.
-        const c = classifyCapture(OUTDIR, stem);
+        const c = classifyCapture(OUTDIR, stem, undefined, captureStateOpts());
         if (c.state !== 'ready' || isTrashed(OUTDIR, stem)) {
             notify('Clipwise: nothing to save', `The capture ${stem} has no transcript to save yet.`);
             sendMeetingsData();
@@ -1556,7 +1595,7 @@ function renderTray() {
     // "Save transcript — <meeting>, <weekday time>" (SAA-199): the most recent
     // meeting with a transcript, named in the label so it is visible which one
     // will be saved. See last-meeting.js for which captures count.
-    const meeting = lastMeeting(OUTDIR);
+    const meeting = lastMeeting(OUTDIR, undefined, captureStateOpts());
     items.push({ type: 'separator' });
     items.push({ label: 'Recent meetings…', click: openMeetingsWindow });
     if (meeting) {
@@ -3038,6 +3077,12 @@ const UPLOAD_BACKOFF_FIRST_MS = 60 * 1000;
 const UPLOAD_BACKOFF_MAX_MS = 60 * 60 * 1000;
 // A pipeline still running gets looked at again after this, with no attempt counted.
 const UPLOAD_WAIT_FOR_PIPELINE_MS = 60 * 1000;
+
+// What last-meeting.js needs to classify a capture the database-free pipeline
+// handled: where its queue entry, with its server job state, is.
+function captureStateOpts() {
+    return { uploadQueueDir: UPLOAD_QUEUE_DIR };
+}
 
 function uploadQueuePathFor(stem) {
     return path.join(UPLOAD_QUEUE_DIR, `${stem}.json`);
