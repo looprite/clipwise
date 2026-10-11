@@ -1470,8 +1470,8 @@ function renderTray() {
     ];
     if (pipelineNote) items.push({ label: pipelineNote, enabled: false });
     if (permNote) items.push({ label: permNote, enabled: false });
-    // The three most recent uploads, while the upload server is set.
-    if (readCaptureServerUrl()) {
+    // The three most recent uploads, unless the mode is direct.
+    if (readCaptureMode().server) {
         for (const entry of listUploadQueue().slice(-3).reverse()) items.push({ label: uploadTrayLabel(entry), enabled: false });
     }
     // The live prompt, carried here as well as in the notification. These are
@@ -1496,9 +1496,9 @@ function renderTray() {
               click: () => showConsentWindow(blockedStartFresh() ? 'blocked' : 'launch') },
         );
     }
-    // The shadow upload's sign-in (SAA-227 part B): only while a server is set
+    // The sign-in (SAA-227 part B): only in shadow or server mode
     // and this app holds no capture token for it.
-    const captureServer = readCaptureServerUrl();
+    const captureServer = readCaptureMode().server;
     if (captureServer && !(captureTokens && captureTokens.server === captureServer)) {
         items.push(
             { type: 'separator' },
@@ -2769,7 +2769,7 @@ let captureSignIn = null;
 // it redirects back with exchanged for tokens. The person signs in on the
 // server's own login page; this process never sees a password.
 function signInToCaptureServer() {
-    const server = readCaptureServerUrl();
+    const server = readCaptureMode().server;
     if (!server) return;
     // A second click starts over rather than leaving the first listener open.
     if (captureSignIn) captureSignIn.close();
@@ -2905,6 +2905,8 @@ function refreshCaptureToken() {
 async function refreshCaptureTokenOnce() {
     const tokens = captureTokens;
     if (!tokens) return false;
+    // Direct mode calls no server, this one included; the stored tokens are kept.
+    if (readCaptureMode().mode === 'direct') return false;
     let reply;
     try {
         reply = await postCaptureTokenForm(tokens.server, {
@@ -3121,9 +3123,9 @@ function listUploadQueue() {
 
 // Into the queue, or back into it: a new answer sends the whole capture again
 // (the server applies it once). A failed capture stays failed, since a 409 or
-// 422 would be the same again. Only while an upload server is set.
+// 422 would be the same again. Only in shadow or server mode.
 function enqueueUpload(stem) {
-    if (!readCaptureServerUrl()) return;
+    if (!readCaptureMode().server) return;
     const prior = readUploadEntry(stem);
     if (prior && prior.state === 'failed') return;
     const now = new Date().toISOString();
@@ -3215,7 +3217,7 @@ function drainUploadQueue(reason) {
     uploadDraining = (async () => {
         do {
             uploadDrainAgain = false;
-            const server = readCaptureServerUrl();
+            const server = readCaptureMode().server;
             if (!server) return;
             for (const entry of listUploadQueue()) {
                 if (entry.state !== 'queued' || Date.parse(entry.nextAttemptAt) > Date.now()) continue;
@@ -3395,9 +3397,9 @@ async function captureServerRequest(server, method, route, json) {
     return reply;
 }
 
-// The server, when the shadow calls should go; null otherwise.
+// The server, when calls to it should go (shadow or server mode, signed in); null otherwise.
 function shadowServer() {
-    const server = readCaptureServerUrl();
+    const server = readCaptureMode().server;
     return server && captureTokens && captureTokens.server === server ? server : null;
 }
 
