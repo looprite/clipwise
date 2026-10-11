@@ -28,6 +28,9 @@
 #                                 at http://localhost:3000, after the guard
 #   scratch-db.sh cli <args>      src/auth/cli.ts <args> on the scratch branch,
 #                                 after the guard
+#   scratch-db.sh sql < file      psql on the scratch branch after the guard, the
+#                                 statements from stdin inside BEGIN READ ONLY
+#                                 ... ROLLBACK
 #   scratch-db.sh down            delete the branch and its files, then read back
 #
 # Exit codes: 0 ok, 1 a step failed (the branch is left up), 2 refused before
@@ -525,6 +528,35 @@ cmd_cli() {
   exit "${PIPESTATUS[0]}"
 }
 
+# psql against the scratch branch, the connection given as PG* variables taken
+# apart from DATABASE_URL, so the URL is on no command line.
+PSQL_JS='
+const u = new URL(process.env.DATABASE_URL);
+const env = {
+  PATH: process.env.PATH, HOME: process.env.HOME,
+  PGHOST: u.hostname, PGPORT: u.port || "5432", PGDATABASE: u.pathname.slice(1),
+  PGUSER: decodeURIComponent(u.username), PGPASSWORD: decodeURIComponent(u.password),
+};
+if (u.searchParams.get("sslmode")) env.PGSSLMODE = u.searchParams.get("sslmode");
+if (u.searchParams.get("channel_binding")) env.PGCHANNELBINDING = u.searchParams.get("channel_binding");
+// verify-full needs a root certificate; without one named, the system trust store.
+env.PGSSLROOTCERT = u.searchParams.get("sslrootcert") || "system";
+const r = require("child_process").spawnSync("psql", ["-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1"], { env, stdio: "inherit" });
+process.exit(r.status ?? 1);
+'
+
+cmd_sql() {
+  [ $# -eq 0 ] || refuse "usage: scratch-db.sh sql < statements.sql"
+  scratch_ready
+  say "sql: statements from stdin, inside BEGIN READ ONLY ... ROLLBACK"
+  {
+    printf '%s\n' "BEGIN READ ONLY;" "SELECT 'read only at start: ' || current_setting('transaction_read_only');"
+    cat
+    printf '\n%s\n' "SELECT 'read only at end: ' || current_setting('transaction_read_only');" "ROLLBACK;"
+  } | clean_exec "$F" DATABASE_URL -- node -e "$PSQL_JS" 2>&1 | scrub
+  exit "${PIPESTATUS[1]}"
+}
+
 # ---- reading what drizzle-kit said ----
 # Its exit status is 0 when it stops at a confirmation (measured; it is 1 when it
 # cannot connect), so whether a push applied is decided from its text: it prints
@@ -656,8 +688,9 @@ case "${1:-}" in
   run) shift; cmd_run "$@" ;;
   serve) shift; cmd_serve "$@" ;;
   cli) shift; cmd_cli "$@" ;;
+  sql) shift; cmd_sql "$@" ;;
   push) shift; cmd_push "$@" ;;
   push-check) shift; cmd_push_check "$@" ;;
   down) cmd_down ;;
-  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | cli <command> | down" >&2; exit 2 ;;
+  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | cli <command> | sql | down" >&2; exit 2 ;;
 esac
