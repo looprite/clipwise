@@ -15,6 +15,8 @@
 //      one span with no moments (logs its label)
 //   B. a span whose first reply has the wrong shape (warns with the reply)
 //   C. a span whose every reply has the wrong shape (throws)
+//   D. the identity and voice-naming describe lines (describeRows,
+//      describeMapping, describeVoiceNaming), with planted names
 //
 //   scripts/scratch-db.sh run check-log-content
 
@@ -23,6 +25,8 @@ import { inspect } from "node:util";
 import { db, schema } from "../db/index.js";
 import { dropAccount, endPool, makeAccount, makeRecording, refuseUnlessScratch } from "./fixtures-for-checks.js";
 import { runExtraction } from "./extract.js";
+import { applyIdentity, applySpeakerNames, describeMapping, describeRows, type IdentityAnswer } from "../ingest/identity.js";
+import { applyVoiceNames, describeVoiceNaming, type VoiceNamesAnswer } from "../ingest/voice-names.js";
 import { defaultPass2Moments, makeStubModel } from "./stub-model.js";
 
 const PHRASE = "PURPLE-ELEPHANT-4417";
@@ -137,6 +141,49 @@ async function main(): Promise<void> {
     check("C positive control: it threw", thrown !== null, "no error");
     check("C no log line holds the phrase", !logs.lines.some((l) => l.includes(PHRASE)), logs.lines.filter((l) => l.includes(PHRASE)).join("\n     "));
     check("C the thrown error message holds no phrase", !message.includes(PHRASE), message);
+
+    // D. the identity and voice-naming log lines (SAA-227 decision 6): the real
+    // apply functions write planted names, then each describe function's output
+    // is logged the way its callers log it. A second pass makes the skip branches
+    // run, whose reasons quote the name already there.
+    // Voice naming gets its own recording: a one-guest identity answer merges
+    // Voice rows back into `them`, which would leave nothing to name.
+    const d = await makeRecording(fx, { segments });
+    const e = await makeRecording(fx, { segments });
+    await db.insert(schema.speakers).values([
+      { recordingId: e, label: "Voice 1" },
+      { recordingId: e, label: "Voice 2" },
+    ]);
+    const answer: IdentityAnswer = { self: { name: `${PHRASE} Host` }, guests: [{ name: `${PHRASE} Guest` }] };
+    const voices = (n: number): VoiceNamesAnswer => ({
+      answered_at: `2026-10-11T00:00:0${n}Z`,
+      voices: [{ voiceIndex: 1, name: `${PHRASE} Voice ${n}` }, { voiceIndex: 2, name: null }, { voiceIndex: 3, name: `${PHRASE} Nobody` }],
+    });
+    const inputs: string[] = [];
+    logs = captureLogs();
+    try {
+      for (const n of [1, 2]) {
+        const rows = await applyIdentity(db, d, answer);
+        const mapping = await applySpeakerNames(db, d, answer);
+        const naming = await applyVoiceNames(db, e, voices(n));
+        inputs.push(JSON.stringify(n === 1 ? rows.inserted : rows.skipped), JSON.stringify(mapping), JSON.stringify(naming));
+        console.log(`apply-identity: inserted=${describeRows(rows.inserted)} already_present=${describeRows(rows.skipped)}`);
+        console.log(`apply-identity: speaker names ${describeMapping(mapping)}`);
+        console.log(`apply-voice-names: ${describeVoiceNaming(naming)}`);
+      }
+    } finally {
+      logs.stop();
+    }
+    const describeLines = logs.lines.filter((l) => /^apply-(identity|voice-names): /.test(l));
+    check(
+      "D positive control: the planted names reached every describe input (inserted, already present, applied, skipped)",
+      inputs.length === 6 && inputs.every((s) => s.includes(PHRASE)) && /already named/.test(inputs[4]) && /already named/.test(inputs[5]),
+      inputs.map((s) => (s.includes(PHRASE) ? "has" : "lacks")).join(" "),
+    );
+    check("D positive control: six describe lines were logged", describeLines.length === 6, `lines=${describeLines.length}`);
+    const dHits = logs.lines.filter((l) => l.includes(PHRASE));
+    say(`     D lines holding the phrase: ${dHits.length}`);
+    check("D no log line holds the phrase", dHits.length === 0, dHits.join("\n     "));
 
     await db.delete(schema.moments).where(inArray(schema.moments.recordingId, [a, b, c]));
   } finally {
