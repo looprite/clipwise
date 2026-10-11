@@ -230,6 +230,8 @@ const CAPTURE_PIPELINE_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'capture
 // Spawned on launch and after a pipeline run fails. It decides what is
 // outstanding from the database, not from the sidecars in OUTDIR.
 const RECOVER_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'recover.ts');
+// Its counterpart for the database-free pipeline, driven by files (SAA-227).
+const CAPTURE_RECOVER_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'capture-recover.ts');
 // Applies an identity answer to a capture that has already been ingested. The
 // ordinary case never needs it — see startApplyIdentity.
 const APPLY_IDENTITY_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'apply-identity.ts');
@@ -2573,10 +2575,12 @@ function startRecovery(reason, opts = {}) {
         return;
     }
     const logPath = path.join(OUTDIR, 'recovery.log');
+    // In server mode, the file-driven recovery of the database-free pipeline.
+    const entry = readCaptureMode().mode === 'server' ? CAPTURE_RECOVER_ENTRY : RECOVER_ENTRY;
     let fd;
     try {
         fd = fs.openSync(logPath, 'a');
-        fs.writeSync(fd, `\n[clipwise-recorder] ${new Date().toISOString()} recovery start (${reason})\n`);
+        fs.writeSync(fd, `\n[clipwise-recorder] ${new Date().toISOString()} recovery start (${reason}) ${path.basename(entry)}\n`);
     } catch (err) {
         console.error(`recovery log ${logPath}: ${String(err)}`);
         return;
@@ -2594,7 +2598,7 @@ function startRecovery(reason, opts = {}) {
     // it writing to a closed pipe (EPIPE) if that happens — a mid-write crash
     // in exactly the process this exists to make crashes safe from. The
     // withdrawal check below reads a file after the fact instead (SAA-183).
-    const proc = spawn(TSX_BIN, [RECOVER_ENTRY, OUTDIR], {
+    const proc = spawn(TSX_BIN, [entry, OUTDIR], {
         cwd: SERVER_DIR,
         env: { ...process.env, PATH: PIPELINE_PATH },
         stdio: ['ignore', fd, fd],
