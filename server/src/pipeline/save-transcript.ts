@@ -13,17 +13,10 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { and, eq, isNotNull, isNull } from "drizzle-orm";
 
-import { db, pool, schema } from "../db/index.js";
+import { pool } from "../db/index.js";
 import { describeErrorLine } from "../lib/safe-error.js";
-import { readTranscript } from "../lib/transcript-read.js";
-import {
-  buildTurns,
-  formatTranscriptFile,
-  suggestedFileName,
-  UNATTRIBUTED,
-} from "../lib/transcript-file.js";
+import { buildTranscriptFile } from "../lib/transcript-read.js";
 
 function usage(): never {
   process.stderr.write(
@@ -56,51 +49,21 @@ async function main(): Promise<void> {
 
   const recordingId = recordingFlag ?? recordingIdFromCapture(dir!, stem!);
 
-  const [recording] = await db
-    .select({
-      title: schema.recordings.title,
-      startedAt: schema.recordings.startedAt,
-      durationSec: schema.recordings.durationSec,
-    })
-    .from(schema.recordings)
-    // A trashed recording is not saved (SAA-154): not found, like to Claude.
-    .where(and(eq(schema.recordings.id, recordingId), isNull(schema.recordings.trashedAt)));
-  if (!recording) throw new Error(`recording ${recordingId} not found`);
+  const file = await buildTranscriptFile(recordingId);
+  // A trashed recording is not saved (SAA-154): not found, like to Claude.
+  if (!file) throw new Error(`recording ${recordingId} not found`);
+  if (file.lines === 0) throw new Error(`recording ${recordingId} has no transcript lines`);
+  writeFileSync(out!, file.text, "utf8");
 
-  const [host] = await db
-    .select({ name: schema.attendees.name })
-    .from(schema.attendees)
-    .where(
-      and(
-        eq(schema.attendees.recordingId, recordingId),
-        eq(schema.attendees.isHost, true),
-        isNotNull(schema.attendees.name),
-      ),
-    )
-    .limit(1);
-
-  const { segments } = await readTranscript(recordingId);
-  if (segments.length === 0) throw new Error(`recording ${recordingId} has no transcript lines`);
-
-  const input = {
-    title: recording.title,
-    hostName: host?.name ?? null,
-    startedAt: recording.startedAt,
-    durationSec: recording.durationSec,
-    segments,
-  };
-  writeFileSync(out!, formatTranscriptFile(input), "utf8");
-
-  const turns = buildTurns(segments, host?.name ?? null);
   process.stdout.write(
     "SAVE_TRANSCRIPT_META " +
       JSON.stringify({
         ok: true,
         recordingId,
-        suggestedFileName: suggestedFileName(input),
-        lines: segments.length,
-        turns: turns.length,
-        unattributedTurns: turns.filter((t) => t.name === UNATTRIBUTED).length,
+        suggestedFileName: file.suggestedFileName,
+        lines: file.lines,
+        turns: file.turns,
+        unattributedTurns: file.unattributedTurns,
       }) +
       "\n",
   );

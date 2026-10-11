@@ -9,6 +9,9 @@
 //     that have write routes use requireMemberOrCaptureWrites instead: reads
 //     take that MCP token, every other method takes the recorder's capture
 //     token (SAA-244);
+//   - the recorder's own captures (/captures/:captureId/...) take a capture
+//     token for every method, reads included, and act only on the caller's own
+//     (SAA-227, 10-11);
 //   - the older routes keep :accountId in the URL, which sameAccountOnly checks
 //     against the caller's own account — it no longer decides which account;
 //   - starting a Google Calendar connection also needs an admin.
@@ -28,6 +31,7 @@ import { mcpMethodNotAllowed, mcpPost } from "./mcp/server.js";
 import { accountsRouter } from "./routes/accounts.js";
 import { momentsRouter } from "./routes/moments.js";
 import { capturesPost } from "./routes/captures.js";
+import { captureScopeRouter } from "./routes/capture-scope.js";
 import { oauthRouter } from "./routes/oauth.js";
 import { peopleRouter } from "./routes/people.js";
 import { recordingsRouter } from "./routes/recordings.js";
@@ -109,6 +113,9 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   // The recorder hands over a finished capture. A capture token (SAA-244); the
   // account and the owner come from it.
   app.post("/captures", requireCapture, capturesPost);
+  // What the recorder does with a stored capture of its owner's: the transcript,
+  // trash, restore, delete permanently and job status (routes/capture-scope.ts).
+  app.use("/captures/:captureId", requireCapture);
 
   // Guards for routes that live in routers mounted at "/" with fully
   // qualified paths.
@@ -120,6 +127,7 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   mount("/accounts/:accountId/moments", [requireMemberOrCaptureWrites, sameAccountOnly], momentsRouter);
   mount("/accounts", [requireMember], accountsRouter);
   mount("/", [], transcriptRouter);
+  mount("/", [], captureScopeRouter);
   mount("/", [], oauthRouter);
 
   app.use(errorHandler);

@@ -58,6 +58,15 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
     note: "stores a finished capture as a recording owned by the caller (account and owner from the token); a repeat of the caller's own capture is idempotent, another member's capture id is 409",
   },
 
+  // The recorder's own captures (SAA-227, 10-11): a capture token for reads too,
+  // and only the caller's own capture; anyone else's is the same 404 as one that
+  // is not there.
+  "GET /captures/:captureId/transcript": { access: "owner", requires: "capture", note: "the saved transcript file of the caller's own capture; a trashed one is 404" },
+  "POST /captures/:captureId/trash": { access: "owner", requires: "capture", note: "sets trashed_at on the caller's own capture" },
+  "POST /captures/:captureId/restore": { access: "owner", requires: "capture", note: "clears trashed_at on the caller's own capture" },
+  "DELETE /captures/:captureId": { access: "owner", requires: "capture", note: "deletes the caller's own capture, only from the trash (409 otherwise)" },
+  "GET /captures/:captureId/jobs": { access: "owner", requires: "capture", note: "kind, state and attempts of the caller's own capture's jobs; no error text" },
+
   "GET /accounts/me": { access: "member", requires: "mcp", note: "the caller's own account and membership" },
 
   "GET /accounts/:accountId/people": { access: "member", requires: "mcp", note: "people on recordings the caller can see, plus unattached ones" },
