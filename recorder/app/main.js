@@ -1442,7 +1442,7 @@ function renderTray() {
     if (captureServer && !(captureTokens && captureTokens.server === captureServer)) {
         items.push(
             { type: 'separator' },
-            { label: 'Sign in to Clipwise server…', click: signInToCaptureServer },
+            { label: 'Sign in to Clipwise…', click: signInToCaptureServer },
         );
     }
     items.push(
