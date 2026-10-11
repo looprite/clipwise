@@ -1418,6 +1418,10 @@ function renderTray() {
     ];
     if (pipelineNote) items.push({ label: pipelineNote, enabled: false });
     if (permNote) items.push({ label: permNote, enabled: false });
+    // The three most recent uploads, while the upload server is set.
+    if (readCaptureServerUrl()) {
+        for (const entry of listUploadQueue().slice(-3).reverse()) items.push({ label: uploadTrayLabel(entry), enabled: false });
+    }
     // The live prompt, carried here as well as in the notification. These are
     // the same three answers; only the last one writes anything durable.
     if (detectPending) {
@@ -3091,7 +3095,7 @@ async function sendQueuedCapture(server, entry) {
     }
     if (reply.status === 200 || reply.status === 201) {
         console.error(`[clipwise-recorder] upload ${stem}: ${reply.status}`);
-        return { ...entry, state: 'sent', lastStatus: reply.status, lastError: null, recordingId: reply.recordingId || entry.recordingId, sentAt: new Date().toISOString() };
+        return { ...entry, state: 'sent', lastStatus: reply.status, lastError: null, recordingId: reply.recordingId || entry.recordingId, sentAt: new Date().toISOString(), jobState: null };
     }
     if (reply.status === 409 || reply.status === 422) {
         console.error(`[clipwise-recorder] upload ${stem}: ${reply.status} ${reply.error || ''} (failed, not retried)`);
@@ -3141,9 +3145,92 @@ function drainUploadQueue(reason) {
         .finally(() => {
             uploadDraining = null;
             scheduleUploadTimer();
+            scheduleJobPoll(0);
             renderTray();
         });
     return uploadDraining;
+}
+
+// --- job status in the tray (SAA-227 decision 11) ---------------------------
+//
+// Each sent capture's jobs on the server (GET /captures/:captureId/jobs), folded
+// into one state on its queue entry: running while any job is queued or running,
+// failed when none is and one failed, done when all are done. Asked only while
+// some sent capture's state is not settled (unknown or running), every
+// JOB_POLL_MS; with none, no timer and no request, so an idle Mac never wakes
+// the server's database. Never past JOB_POLL_LIMIT_MS after the capture was
+// sent: then its state is "stale" (status unknown) and it is not asked about
+// again, so a stalled job cannot keep this Mac querying the server. The worst
+// extraction on record took 438 s. A new send of a capture (an answer) makes its
+// state unknown again, which starts the asking, and the limit, again.
+
+const JOB_POLL_MS = 20 * 1000;
+const JOB_POLL_LIMIT_MS = 15 * 60 * 1000;
+const JOB_SETTLED = new Set(['done', 'failed', 'none', 'gone', 'stale']);
+let jobPollTimer = null;
+let jobPolling = false;
+
+function jobStateOf(jobs) {
+    if (jobs.length === 0) return 'none';
+    if (jobs.some((j) => j.state === 'queued' || j.state === 'running')) return 'running';
+    if (jobs.some((j) => j.state === 'failed')) return 'failed';
+    return 'done';
+}
+
+function unsettledUploads() {
+    return listUploadQueue().filter((e) => e.state === 'sent' && !JOB_SETTLED.has(e.jobState));
+}
+
+function scheduleJobPoll(delayMs) {
+    if (jobPollTimer || jobPolling) return;
+    if (unsettledUploads().length === 0) return;
+    jobPollTimer = setTimeout(() => { jobPollTimer = null; pollJobStates(); }, delayMs);
+}
+
+async function pollJobStates() {
+    const server = shadowServer();
+    if (!server) return;
+    jobPolling = true;
+    try {
+        for (const entry of unsettledUploads()) {
+            if (!(Date.now() - Date.parse(entry.sentAt) <= JOB_POLL_LIMIT_MS)) {
+                writeUploadEntry({ ...entry, jobState: 'stale' });
+                console.error(`[clipwise-recorder] upload ${entry.stem}: jobs not asked any more (sent over 15 min ago), status unknown`);
+                continue;
+            }
+            const captureId = captureIdFor(entry.stem);
+            if (!captureId) continue;
+            const reply = await captureServerRequest(server, 'GET', `/captures/${captureId}/jobs`);
+            let jobState = entry.jobState;
+            if (reply.status === 200 && Array.isArray(reply.json.jobs)) jobState = jobStateOf(reply.json.jobs);
+            else if (reply.status === 404) jobState = 'gone';
+            console.error(`[clipwise-recorder] upload ${entry.stem}: jobs ${reply.status ?? 'no reply'} ${jobState ?? 'unknown'}`);
+            // A send that happened meanwhile wins: its state starts unknown again.
+            const current = readUploadEntry(entry.stem);
+            if (!current || current.state !== 'sent' || current.sentAt !== entry.sentAt) continue;
+            if (jobState !== entry.jobState) writeUploadEntry({ ...current, jobState });
+        }
+    } finally {
+        jobPolling = false;
+        renderTray();
+        scheduleJobPoll(JOB_POLL_MS);
+    }
+}
+
+// The tray's line for one queued capture: upload state from the queue, job state
+// from the server.
+function uploadTrayLabel(entry) {
+    const when = stemRelativeTime(entry.stem);
+    if (entry.state === 'queued') return `${entry.attempts > 0 ? 'Upload waiting to retry' : 'Upload queued'} — ${when}`;
+    if (entry.state === 'failed') return `Upload refused (${entry.lastStatus}) — ${when}`;
+    const job = {
+        done: 'Uploaded, ready',
+        failed: 'Uploaded, processing failed',
+        none: 'Uploaded',
+        gone: 'Uploaded, no longer on the server',
+        stale: 'Uploaded, status unknown',
+    }[entry.jobState] || 'Uploaded, processing';
+    return `${job} — ${when}`;
 }
 
 // Wakes the queue when its earliest queued capture is next due. None queued, no timer.
