@@ -224,6 +224,8 @@ if (BUILD_INFO) {
 }
 const TSX_BIN = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
 const PIPELINE_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'cli.ts');
+// The database-free capture pipeline (SAA-227), which server mode runs instead.
+const CAPTURE_PIPELINE_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'capture-cli.ts');
 // Finds captures whose processing never finished and finishes them (SAA-136).
 // Spawned on launch and after a pipeline run fails. It decides what is
 // outstanding from the database, not from the sidecars in OUTDIR.
@@ -2462,18 +2464,22 @@ function autostopFinish(s, cause) {
 // that has already ended should still become moments even if the user quits
 // while it is being transcribed. The exit listener still fires for as long as
 // this process is alive, which is what drives the tray.
+//
+// In server mode it is the database-free pipeline (capture-cli.ts), which needs
+// no database and no API key; the upload at its exit hands the rest to the server.
 function startPipeline(stem, opts = {}) {
     if (!stem) return;
     const logPath = path.join(OUTDIR, `pipeline-${stem}.log`);
-    const args = [PIPELINE_ENTRY, OUTDIR, '--stem', stem];
-    if (opts.force) args.push('--force-extract');
+    const server = readCaptureMode().mode === 'server';
+    const args = [server ? CAPTURE_PIPELINE_ENTRY : PIPELINE_ENTRY, OUTDIR, '--stem', stem];
+    if (opts.force && !server) args.push('--force-extract');
     let fd;
     try {
         fd = fs.openSync(logPath, 'a');
         fs.writeSync(
             fd,
             `\n[clipwise-recorder] ${new Date().toISOString()} pipeline start ` +
-            `stem=${stem}${opts.force ? ' force-extract' : ''}\n`,
+            `stem=${stem}${server ? ' capture' : ''}${opts.force && !server ? ' force-extract' : ''}\n`,
         );
     } catch (err) {
         console.error(`pipeline log ${logPath}: ${String(err)}`);
