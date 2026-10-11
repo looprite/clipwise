@@ -781,6 +781,107 @@ async function main(): Promise<void> {
       );
     }
 
+    // 17. Voice names and repeats (SAA-227 decisions 3 and 5).
+    const splitPayload = () =>
+      withVoices([VOICE_SEGS[0], { ...VOICE_SEGS[1], voiceIndex: 1 }, { ...VOICE_SEGS[2], voiceIndex: 2 }], [{ voiceIndex: 1, totalSeconds: 41.5 }, { voiceIndex: 2, totalSeconds: 18 }]);
+    const voiceNamesDoc = (at: string, voices: Array<{ voiceIndex: number; name: string | null }>, rename = false) => ({ voice_names_version: 1, answered_at: at, voices, ...(rename ? { rename: true } : {}) });
+    const speakerNames = async (rid: string) =>
+      Object.fromEntries((await pool.query(`select label, display_name from speakers where recording_id = $1`, [rid])).rows.map((r) => [r.label, r.display_name]));
+    const reextracts = async (rid: string) => (await pool.query(`select count(*)::int as n from jobs where recording_id = $1 and kind = 're_extract'`, [rid])).rows[0].n as number;
+    // As if the worker had finished the first extraction: a late name then needs a re-extract.
+    const markExtracted = async (rid: string) => {
+      await pool.query(`update jobs set state = 'done' where recording_id = $1`, [rid]);
+      await pool.query(`update recordings set status = 'ready', metadata = metadata || jsonb_build_object('current_extraction_run', gen_random_uuid()::text) where id = $1`, [rid]);
+    };
+
+    // 17a. A first POST carrying voices and voice names stores the names on the Voice rows.
+    {
+      const p = { ...splitPayload(), voiceNames: voiceNamesDoc("2026-10-11T11:00:00.000Z", [{ voiceIndex: 1, name: `Vee ${tag}` }, { voiceIndex: 2, name: `Wes ${tag}` }]) };
+      const r = await capPost(A, p);
+      const names = r.status === 201 ? await speakerNames(r.json.recordingId) : {};
+      record(
+        r.status === 201 && names["Voice 1"] === `Vee ${tag}` && names["Voice 2"] === `Wes ${tag}` && !("them" in names),
+        "captures 17a: a first POST carrying voices and voice names stores the names on the Voice rows",
+        `${r.status} ${r.json?.error ?? ""} ${JSON.stringify(Object.keys(names))}`,
+      );
+    }
+
+    // 17b. Names on a repeat are applied once and queue one re-extract.
+    // 17c. Changed names follow apply-voice-names' rules: an already-named voice is
+    //      skipped without rename (nothing written, no re-extract); a rename overwrites,
+    //      and a rename to "Not sure" clears.
+    {
+      const p = splitPayload();
+      const first = await capPost(A, p);
+      const rid = first.json?.recordingId as string;
+      await markExtracted(rid);
+      const answer = voiceNamesDoc("2026-10-11T11:10:00.000Z", [{ voiceIndex: 1, name: `Vee ${tag}` }, { voiceIndex: 2, name: null }]);
+      const late = await capPost(A, { ...p, voiceNames: answer });
+      const afterLate = await speakerNames(rid);
+      const jobsAfterLate = await reextracts(rid);
+      const again = await capPost(A, { ...p, voiceNames: answer });
+      record(
+        first.status === 201 && late.status === 200 && late.json?.voiceNamesApplied === true && afterLate["Voice 1"] === `Vee ${tag}` && afterLate["Voice 2"] === null && jobsAfterLate === 1 &&
+          again.status === 200 && again.json?.voiceNamesApplied === false && (await reextracts(rid)) === 1 && JSON.stringify(await speakerNames(rid)) === JSON.stringify(afterLate),
+        "captures 17b: voice names on a repeat are applied and queue one re-extract; the same answer again is not applied again and queues nothing",
+        `${first.status}/${late.status}/${again.status} applied=${late.json?.voiceNamesApplied}/${again.json?.voiceNamesApplied} jobs=${jobsAfterLate} names=${JSON.stringify(afterLate)}`,
+      );
+
+      await pool.query(`update jobs set state = 'done' where recording_id = $1`, [rid]);
+      const noRename = await capPost(A, { ...p, voiceNames: voiceNamesDoc("2026-10-11T11:20:00.000Z", [{ voiceIndex: 1, name: `Other ${tag}` }]) });
+      const afterNoRename = await speakerNames(rid);
+      const jobsAfterNoRename = await reextracts(rid);
+      const rename = await capPost(A, { ...p, voiceNames: voiceNamesDoc("2026-10-11T11:30:00.000Z", [{ voiceIndex: 1, name: null }, { voiceIndex: 2, name: `Wes ${tag}` }], true) });
+      const afterRename = await speakerNames(rid);
+      record(
+        noRename.status === 200 && afterNoRename["Voice 1"] === `Vee ${tag}` && jobsAfterNoRename === 1 &&
+          rename.status === 200 && rename.json?.voiceNamesApplied === true && afterRename["Voice 1"] === null && afterRename["Voice 2"] === `Wes ${tag}` && (await reextracts(rid)) === 2,
+        "captures 17c: a different name for a named voice is skipped without rename (no re-extract); a rename clears one voice and names another, and queues a re-extract",
+        `noRename=${noRename.status} ${JSON.stringify(afterNoRename)} jobs=${jobsAfterNoRename}; rename=${rename.status} ${JSON.stringify(afterRename)} jobs=${await reextracts(rid)}`,
+      );
+    }
+
+    // 17d. The same segments with different voice data: 200 and nothing written.
+    {
+      const p = splitPayload();
+      const first = await capPost(A, p);
+      const rid = first.json?.recordingId as string;
+      const snapshot = async () =>
+        JSON.stringify([
+          (await pool.query(`select id, label, display_name from speakers where recording_id = $1 order by id`, [rid])).rows,
+          (await pool.query(`select id, speaker_id from segments where recording_id = $1 order by id`, [rid])).rows,
+          await capRows(p.captureId),
+          (await pool.query(`select id, kind, state from jobs where recording_id = $1 order by id`, [rid])).rows,
+        ]);
+      const before = await snapshot();
+      const other = withVoices(
+        [VOICE_SEGS[0], { ...VOICE_SEGS[1], voiceIndex: 3 }, { ...VOICE_SEGS[2], voiceIndex: 3 }],
+        [{ voiceIndex: 1, totalSeconds: 4 }, { voiceIndex: 2, totalSeconds: 5 }, { voiceIndex: 3, totalSeconds: 60 }],
+      );
+      const r = await capPost(A, { ...other, captureId: p.captureId, stem: p.stem });
+      record(
+        first.status === 201 && r.status === 200 && r.json?.created === false && (await snapshot()) === before,
+        "captures 17d: the same segments with different voice data are 200 created:false, and no speaker, segment, recording or job row changes",
+        `${first.status}/${r.status} ${r.json?.error ?? ""} unchanged=${(await snapshot()) === before}`,
+      );
+    }
+
+    // 17e. A late identity answer naming one guest merges the Voice rows back into `them`.
+    {
+      const p = splitPayload();
+      const first = await capPost(A, p);
+      const rid = first.json?.recordingId as string;
+      const before = await speakerNames(rid);
+      const late = await capPost(A, { ...p, identity: { answered_at: "2026-10-11T11:40:00.000Z", self: { name: `Host ${tag}` }, guests: [{ name: `Guest ${tag}` }], scope: "work" } });
+      const after = await speakerNames(rid);
+      const segLabels = (await pool.query(`select sp.label from segments s left join speakers sp on sp.id = s.speaker_id where s.recording_id = $1 order by s.order_index`, [rid])).rows.map((x) => x.label);
+      record(
+        "Voice 1" in before && late.status === 200 && late.json?.identityApplied === true && JSON.stringify(Object.keys(after).sort()) === JSON.stringify(["me", "them"]) && after.them === `Guest ${tag}` && JSON.stringify(segLabels) === JSON.stringify(["me", "them", "them"]),
+        "captures 17e: a late identity answer naming one guest merges the Voice rows back into a named `them`, with every them segment on it",
+        `${late.status} before=${JSON.stringify(Object.keys(before))} after=${JSON.stringify(after)} segs=${segLabels.join(",")}`,
+      );
+    }
+
     // ---- people ------------------------------------------------------------
     const peopleB = await http("GET", `/accounts/${acc}/people`, { token: B.token });
     const emailsB = (peopleB.json?.people ?? []).map((p: any) => p.email);

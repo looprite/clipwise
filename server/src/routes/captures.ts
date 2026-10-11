@@ -15,17 +15,19 @@
 //
 // A repeat of a capture already stored:
 //   same content          200 {created:false}; nothing written, except that an
-//                         identity answer the first request did not carry is
-//                         applied, once
+//                         identity answer or voice names the stored capture does
+//                         not have yet are applied, once. Its voice data is not
+//                         read: the split was made from the first request
 //   different segments    409 capture_content_conflict; the row is unchanged
 //   another member's id   409 capture_id_taken; the row is unchanged
-// "Same content" is a SHA-256 of the segments as sent (metadata.capture.content_hash).
+// "Same content" is a SHA-256 of the segments as sent, without their voice indexes
+// (metadata.capture.content_hash).
 //
 // The extraction job is queued in the same transaction as the capture, so a stored
 // capture always has one. The end of the request is afterStore(): answer 201, then
-// wake the worker. A repeat creates no job, except that an identity answer which
-// names a speaker after extraction has started or finished queues a re-extract
-// (jobs/enqueue.ts has the cases).
+// wake the worker. A repeat creates no job, except that an identity answer or
+// voice names that name a speaker after extraction has started or finished queue
+// a re-extract (jobs/enqueue.ts has the cases).
 
 import { createHash } from "node:crypto";
 import type { RequestHandler, Response } from "express";
@@ -42,6 +44,7 @@ import {
   storeIdentityMetadata,
   type IdentityAnswer,
 } from "../ingest/identity.js";
+import { applyVoiceNames, storeVoiceNamesMetadata, voiceNamesAlreadyApplied, type VoiceNamesAnswer } from "../ingest/voice-names.js";
 import { countObservedFidelity, sourceFidelitySchema } from "../lib/fidelity.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
 import { slugify } from "../lib/slug.js";
@@ -82,6 +85,18 @@ const identitySchema = z.object({
     .optional(),
   guests: z.array(z.object({ name: z.string().max(256).nullable().optional() })).max(50).nullable().optional(),
   scope: z.enum(["work", "personal"]).nullable().optional(),
+});
+
+// The recorder's voice-naming answer (ingest/voice-names.ts VoiceNamesAnswer), as
+// identity-answer.js buildVoiceNamesDoc writes it. answered_at is required: it is
+// what makes a repeat of the same answer a no-op (voiceNamesAlreadyApplied).
+const voiceNamesSchema = z.object({
+  voice_names_version: z.number().int().optional(),
+  recording_id: z.string().max(64).optional(),
+  stem: z.string().max(200).optional(),
+  answered_at: z.string().max(64),
+  voices: z.array(z.object({ voiceIndex: z.number().int().positive(), name: z.string().max(256).nullable().optional() })).max(64),
+  rename: z.boolean().optional(),
 });
 
 // capture.tracks is the capture manifest's `tracks`, as the recorder writes it:
@@ -163,6 +178,9 @@ const captureSchema = z.object({
   // Each voice diarize kept, with its total seconds. A segment's voiceIndex must
   // name one of them, and only a `them` segment carries one.
   voices: z.array(voiceSchema).max(64).optional(),
+  // Names for the voices, once the person has given them (SAA-227 decision 3).
+  // Applied after the split on a first request, and on a repeat.
+  voiceNames: voiceNamesSchema.optional(),
 }).superRefine((body, ctx) => {
   const listed = new Set((body.voices ?? []).map((v) => v.voiceIndex));
   if (listed.size !== (body.voices ?? []).length) {
@@ -309,6 +327,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
   const sourceId = body.captureId;
   const contentHash = contentHashOf(body.segments);
   const identity = (body.identity ?? null) as IdentityAnswer | null;
+  const voiceNames = (body.voiceNames ?? null) as VoiceNamesAnswer | null;
   const slug = captureSlug(body.stem, body.captureId);
   const labelSet = new Set(kept.map((s) => s.track));
   const engine = body.engine;
@@ -383,8 +402,10 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       const storedHash = (existing.metadata as { capture?: { content_hash?: unknown } } | null)?.capture?.content_hash;
       if (storedHash !== contentHash) throw new HttpError(409, "capture_content_conflict");
 
+      // The voice data on a repeat is not read: the split was made from the first
+      // request, and a repeat with the same segments writes nothing for it.
       let identityApplied = false;
-      let reextractJobId: string | null = null;
+      let namesWritten = false;
       if (identity && !identityAlreadyApplied(existing.metadata, identity)) {
         await applyIdentity(tx, existing.id, identity);
         const mapping = await applySpeakerNames(tx, existing.id, identity);
@@ -392,11 +413,21 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
         await storeIdentityMetadata(tx, existing.id, identity);
         identityApplied = true;
         // Only a speaker name actually written changes what extraction would see.
-        if (mapping.applied.length > 0) {
-          reextractJobId = await enqueueReextractForLateNames(tx, existing);
-        }
+        namesWritten ||= mapping.applied.length > 0;
       }
-      return { kind: "repeat" as const, recordingId: existing.id, identityApplied, reextractJobId };
+      // After identity, so a one-guest answer that merged the Voice rows back
+      // leaves these names nothing to land on, as on the Mac. applyVoiceNames
+      // keeps apply-voice-names' rules: an already-named voice is skipped unless
+      // the answer is a rename, and a rename to "Not sure" clears the name.
+      let voiceNamesApplied = false;
+      if (voiceNames && !voiceNamesAlreadyApplied(existing.metadata, voiceNames)) {
+        const naming = await applyVoiceNames(tx, existing.id, voiceNames);
+        await storeVoiceNamesMetadata(tx, existing.id, voiceNames);
+        voiceNamesApplied = true;
+        namesWritten ||= naming.applied.length > 0;
+      }
+      const reextractJobId = namesWritten ? await enqueueReextractForLateNames(tx, existing) : null;
+      return { kind: "repeat" as const, recordingId: existing.id, identityApplied, voiceNamesApplied, reextractJobId };
     }
 
     const [transcript] = await tx
@@ -445,6 +476,12 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
     // After identity, as on the Mac (ingest, then diarize): an answer that names
     // the one guest has named `them` by now, and that stops the split.
     await splitThemByVoice(tx, recording.id, body.voices ?? [], kept);
+    // Names given while the capture waited to be sent land on the Voice rows just
+    // made. Stored, so a repeat carrying the same answer is a no-op.
+    if (voiceNames) {
+      await applyVoiceNames(tx, recording.id, voiceNames);
+      await storeVoiceNamesMetadata(tx, recording.id, voiceNames);
+    }
 
     // Read back from the database, not the ORM's report: what is stored is what
     // was declared (less the deliberate exclusions), or nothing is stored.
@@ -482,7 +519,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
     afterStore(res, outcome.stored, outcome.jobId);
     return;
   }
-  res.status(200).json({ created: false, recordingId: outcome.recordingId, identityApplied: outcome.identityApplied });
+  res.status(200).json({ created: false, recordingId: outcome.recordingId, identityApplied: outcome.identityApplied, voiceNamesApplied: outcome.voiceNamesApplied });
   logQueued(outcome.reextractJobId, outcome.recordingId, "re_extract");
   if (outcome.reextractJobId) wakeWorker();
 });
