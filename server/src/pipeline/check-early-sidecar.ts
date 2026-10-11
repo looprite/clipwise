@@ -194,14 +194,16 @@ const CASES: Case[] = [
     },
   },
   {
-    name: "diarize.ts: the binary is only reached through sidecarForCapture, and mtime is read as bigint nanoseconds",
+    name: "diarize.ts: the binary is only reached through sidecarForCapture; voice-clips.ts (where the sidecar readers live) reads mtime as bigint nanoseconds",
     run: () => {
-      const src = readFileSync(resolve(import.meta.dirname, "..", "..", "src", "pipeline", "diarize.ts"), "utf8");
+      const read = (file: string) => readFileSync(resolve(import.meta.dirname, "..", "..", "src", "pipeline", file), "utf8");
+      const src = read("diarize.ts");
       const calls = src.split("execFileSync(diarizeBin").length - 1;
       const within = /sidecarForCapture\([^)]*\(\) => \{[\s\S]*?execFileSync\(diarizeBin/.test(src);
       if (calls !== 1 || !within) return `execFileSync(diarizeBin appears ${calls} time(s); inside sidecarForCapture callback: ${within}`;
-      if (!/statSync\(path, \{ bigint: true \}\)/.test(src) || !/String\(st\.mtimeNs\)/.test(src)) return "no bigint mtimeNs comparison";
-      if (/mtimeMs/.test(src)) return "diarize.ts reads mtimeMs";
+      const readers = read("voice-clips.ts");
+      if (!/statSync\(path, \{ bigint: true \}\)/.test(readers) || !/String\(st\.mtimeNs\)/.test(readers)) return "no bigint mtimeNs comparison in voice-clips.ts";
+      if (/mtimeMs/.test(src) || /mtimeMs/.test(readers)) return "diarize.ts or voice-clips.ts reads mtimeMs";
       return null;
     },
   },
