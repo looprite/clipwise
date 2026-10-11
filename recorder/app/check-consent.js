@@ -5,7 +5,7 @@
 //   node recorder/app/check-consent.js --naive   "the file exists" in place of
 //                                                 "the file says it was agreed to"
 //
-// Four groups:
+// Five groups:
 //   1. The record on disk, against a temp directory: what counts as agreed to,
 //      and that writing it is atomic, idempotent and works on a fresh install
 //      (no directory yet).
@@ -19,6 +19,10 @@
 //      capture child can be spawned, capture children are spawned nowhere else,
 //      the window text is the approved text, and build-app.sh copies both new
 //      files into the bundle (a bundle without them fails to launch).
+//   5. The notice stamp (SAA-227 part I): consent.js's noticeStamp is the
+//      file's version and acknowledged_at and nothing else, or null when not
+//      agreed to; buildManifest stamps it; the gate returns before any manifest
+//      is built or written; and the capture body sends it.
 //
 // --naive swaps in a reader that accepts any existing file. It must FAIL the
 // garbled, empty, wrong-shape and older-version cases; if it didn't, those
@@ -174,6 +178,31 @@ const CASES = [
         /if \(!consent\.isAcknowledged\(SUPPORT_DIR\)\) showConsentWindow\('launch'\)/.test(SRC)],
     ['build-app.sh copies consent.js into the bundle', () => /cp "\$APP_SRC\/consent\.js" "\$C\/Resources\/app\/consent\.js"/.test(BUILD)],
     ['build-app.sh copies consent.html into the bundle', () => /cp "\$APP_SRC\/consent\.html" "\$C\/Resources\/app\/consent\.html"/.test(BUILD)],
+
+    // 5. the notice stamp a capture carries (SAA-227 part I)
+    ['stamp: agreed to -> version and acknowledged_at, equal to consent.json', () => withDir(d => {
+        consent.recordAcknowledgement(d, new Date('2026-10-07T21:18:52Z'));
+        const file = JSON.parse(fs.readFileSync(consent.consentPath(d), 'utf8'));
+        return JSON.stringify(consent.noticeStamp(d)) === JSON.stringify({ version: file.version, acknowledged_at: file.acknowledged_at }); })],
+    ['stamp: only those two fields, whatever else the file holds', () => withDir(d => {
+        put(d, JSON.stringify({ version: consent.STATEMENT_VERSION, acknowledged_at: '2026-10-07T21:18:52.000Z', note: 'x' }));
+        return JSON.stringify(Object.keys(consent.noticeStamp(d))) === JSON.stringify(['version', 'acknowledged_at']); })],
+    ['stamp: not agreed to (no file, or an older version) -> null', () => withDir(d => {
+        const none = consent.noticeStamp(d) === null;
+        put(d, good(0));
+        return none && consent.noticeStamp(d) === null; })],
+    ['manifest: buildManifest stamps consent.noticeStamp(SUPPORT_DIR)', () => {
+        const a = SRC.indexOf('\nfunction buildManifest(');
+        const b = SRC.indexOf('\n}\n', a);
+        return a >= 0 && SRC.slice(a, b).includes('notice: consent.noticeStamp(SUPPORT_DIR),'); }],
+    ['manifest: a capture the gate blocks writes none (the gate returns before buildManifest and the manifest write)', () => {
+        const g = startBody.indexOf('consent.isAcknowledged(SUPPORT_DIR)');
+        const r = startBody.indexOf('return;', g);
+        const m = startBody.indexOf('buildManifest(');
+        const w = startBody.indexOf('fs.writeFileSync(paths.manifest');
+        return g >= 0 && r > g && m > r && w > m; }],
+    ['builder: the capture body sends the manifest\'s stamp as notice', () =>
+        /notice: manifest\.notice\s*\?\s*\{ version: manifest\.notice\.version, acknowledgedAt: manifest\.notice\.acknowledged_at \}/.test(SRC)],
 ];
 
 console.log(`rule: ${useNaive ? 'NAIVE (any existing file counts as agreed to)' : 'consent.js'}`);

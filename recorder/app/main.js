@@ -491,6 +491,10 @@ function buildManifest(stamp, startedAt, dev, paths, trigger) {
         // the app that triggered a capture is on the record somewhere other
         // than a variable that dies with the process.
         trigger_app: trigger ? { key: trigger.key, name: trigger.name } : null,
+        // The recording-notice acknowledgement in force when this capture started
+        // (SAA-227 part I), copied from consent.json. startRecording's gate has
+        // already passed, so it is never null for a capture made by this build.
+        notice: consent.noticeStamp(SUPPORT_DIR),
         tracks: [
             {
                 track: 'system',
@@ -2943,6 +2947,11 @@ function buildCapturePayload(stem) {
             permissions: manifest.permissions || {},
             triggerApp: manifest.trigger_app || null,
         },
+        // The acknowledgement the capture started under, from its manifest; a
+        // manifest from before part I has none, and none is sent.
+        notice: manifest.notice
+            ? { version: manifest.notice.version, acknowledgedAt: manifest.notice.acknowledged_at }
+            : undefined,
         content: transcript.content,
         aec: transcript.aec,
         autostop: transcript.autostop,
