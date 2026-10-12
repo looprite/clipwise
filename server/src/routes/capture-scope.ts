@@ -1,6 +1,6 @@
 // What the recorder may do with its owner's own captures, with the one token it
 // holds (SAA-227, 10-11 "Changed from 10-09"): read the transcript, trash,
-// restore, delete permanently, and see the capture's jobs. Each takes a capture
+// restore, delete permanently, and see the capture's jobs and calendar match. Each takes a capture
 // token (app.ts mounts requireCapture on /captures/:captureId). The capture is
 // named by its captureId, as POST /captures names it, and must be the caller's
 // own: anyone else's, a malformed id and one that is not there all get the same
@@ -10,11 +10,12 @@
 // writes it. The files on the Mac are the recorder's business.
 
 import { Router, type Request } from "express";
-import { and, asc, eq, isNotNull } from "drizzle-orm";
+import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
+import { normalizeEmail } from "../auth/membership.js";
 import { db, schema } from "../db/index.js";
-import { CLIPWISE_SOURCE } from "../ingest/clipwise.js";
+import { CLIPWISE_SOURCE, titlePlaceholderFor } from "../ingest/clipwise.js";
 import { asyncHandler, HttpError, parseBody, parseQuery, uuidParam } from "../lib/http.js";
 import { buildTranscriptFile } from "../lib/transcript-read.js";
 
@@ -105,6 +106,31 @@ captureScopeRouter.delete(
 
 // The capture's jobs, oldest first, for the tray. Kind, state and attempts only:
 // no error text.
+//
+// And its calendar match, once a match job is done and found one (SAA-227
+// decisions 15 and 29), for Recent Meetings: the event's title, if it replaced
+// the placeholder, and each invitee by name, or by address when Google has no
+// name. The owner's own address is left out (who else was on the call). Only the
+// owner's own capture is served, and those addresses were on the owner's invite.
+// null until then, and when the match found nothing.
+async function calendarOf(recordingId: string, ownerEmail: string): Promise<{ title: string | null; invitees: { name: string }[] } | null> {
+  const [rec] = await db
+    .select({ title: schema.recordings.title, stem: sql<string | null>`${schema.recordings.metadata}->'capture'->>'stem'` })
+    .from(schema.recordings)
+    .where(eq(schema.recordings.id, recordingId));
+  if (!rec) return null;
+  const rows = await db
+    .select({ email: schema.invitees.email, name: schema.invitees.name })
+    .from(schema.invitees)
+    .where(eq(schema.invitees.recordingId, recordingId))
+    .orderBy(asc(schema.invitees.email));
+  const invitees = rows
+    .filter((r) => normalizeEmail(r.email) !== ownerEmail)
+    .map((r) => ({ name: r.name?.trim() || r.email }));
+  const title = rec.title && rec.title !== titlePlaceholderFor(rec.stem ?? "") ? rec.title : null;
+  return title || invitees.length > 0 ? { title, invitees } : null;
+}
+
 captureScopeRouter.get(
   "/captures/:captureId/jobs",
   asyncHandler(async (req, res) => {
@@ -114,6 +140,7 @@ captureScopeRouter.get(
       .from(schema.jobs)
       .where(eq(schema.jobs.recordingId, id))
       .orderBy(asc(schema.jobs.createdAt));
-    res.json({ jobs });
+    const matched = jobs.some((j) => j.kind === "match" && j.state === "done");
+    res.json({ jobs, calendar: matched ? await calendarOf(id, accessOf(req).email) : null });
   }),
 );

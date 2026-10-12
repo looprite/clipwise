@@ -24,6 +24,8 @@
 //   m2  X's match uses X's connection only: Y's token is never sent, and the
 //       title and invitees are X's event's
 //   m3  X's capture: match and extract both run to done, the recording ready
+//   m4  the recorder's jobs route then returns the title and the invitee, by
+//       address (Google gave no name)
 //   bk  `match-backlog` (src/jobs/cli.ts) lists only a capture made before its
 //       owner connected, queues one match job for it with --queue, and a second
 //       run queues nothing new
@@ -80,6 +82,7 @@ import { eq, sql } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
 import { makeStubEmbedder, makeStubModel, waitFor } from "../extract/stub-model.js";
 import { dropAccount, endPool, makeAccount, makeRecording, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
+import { captureScopeRouter } from "../routes/capture-scope.js";
 import { capturesPost } from "../routes/captures.js";
 import { encrypt } from "../lib/crypto.js";
 import { errorHandler } from "../lib/http.js";
@@ -230,6 +233,7 @@ async function main(): Promise<void> {
     next();
   });
   app.post("/captures", capturesPost);
+  app.use(captureScopeRouter);
   app.use(errorHandler);
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
@@ -406,7 +410,8 @@ async function main(): Promise<void> {
       try {
         const kindsOf = async (recordingId: string) => (await jobsOf(recordingId)).map((j) => j.kind).sort();
         const capZ = String((await post(payload(), Z)).json.recordingId);
-        const capX = String((await post(payload(), X)).json.recordingId);
+        const pX = payload();
+        const capX = String((await post(pX, X)).json.recordingId);
         const kz = await kindsOf(capZ);
         const kx = await kindsOf(capX);
         check("m1 an owner with no calendar connected gets no match job, though other members have one", JSON.stringify(kz) === JSON.stringify(["extract"]), JSON.stringify(kz));
@@ -427,6 +432,19 @@ async function main(): Promise<void> {
           "m3 match and extract both run to done for one capture, on one attempt each, and the recording is ready",
           jobs.length === 2 && jobs.every((j) => j.state === "done" && j.attempts === 1) && JSON.stringify(jobs.map((j) => j.kind).sort()) === JSON.stringify(["extract", "match"]) && rec.status === "ready",
           JSON.stringify({ jobs: jobs.map((j) => [j.kind, j.state, j.attempts, j.errorClass]), status: rec.status }),
+        );
+
+        // What the recorder polls (decisions 15 and 29): the jobs, and the match's
+        // title and invitees. X's invitee has no name in Google, so the address
+        // stands in for it.
+        const polled = await fetch(`${base}/captures/${String(pX.captureId)}/jobs`, { headers: { "x-check-member": X } });
+        const polledJson = (await polled.json()) as { jobs?: unknown[]; calendar?: unknown };
+        check(
+          "m4 the recorder's jobs route returns the match's title and each invitee, by address when Google has no name",
+          polled.status === 200 &&
+            polledJson.jobs?.length === 2 &&
+            JSON.stringify(polledJson.calendar) === JSON.stringify({ title: "X's meeting", invitees: [{ name: eventFor[tokenOf("x")].invitee }] }),
+          JSON.stringify({ status: polled.status, jobs: polledJson.jobs?.length, calendar: polledJson.calendar === undefined ? "absent" : polledJson.calendar === null ? null : "present" }),
         );
       } finally {
         globalThis.fetch = realFetch;

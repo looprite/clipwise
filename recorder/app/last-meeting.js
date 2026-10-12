@@ -206,4 +206,45 @@ function lastMeeting(dir, now = Date.now(), opts = {}) {
     return null;
 }
 
-module.exports = { lastMeeting, classifyCapture, captureStems, isTrashed, trashedStems, calendarTitle, stemTimeMs, readJson };
+// --- a sent capture's server jobs (main.js pollJobStates) --------------------
+//
+// The jobs as GET /captures/:captureId/jobs lists them, folded into the one state
+// the queue entry keeps: running while any is queued or running, failed when none
+// is and one failed, done when all are done, none when there are none. Only the
+// extraction jobs count (SAA-227 decision 18): the calendar match is extra, and a
+// failed or slow match never makes a capture failed or keeps it from ready.
+function jobStateOf(jobs) {
+    const extraction = jobs.filter((j) => j.kind !== 'match');
+    if (extraction.length === 0) return 'none';
+    if (extraction.some((j) => j.state === 'queued' || j.state === 'running')) return 'running';
+    if (extraction.some((j) => j.state === 'failed')) return 'failed';
+    return 'done';
+}
+
+// Whether a match job is still to finish, so the asking goes on for its title.
+function matchPendingOf(jobs) {
+    return jobs.some((j) => j.kind === 'match' && (j.state === 'queued' || j.state === 'running'));
+}
+
+// The server's calendar match for a capture (the jobs reply's `calendar`: the
+// title, and each invitee's name or address), written where calendarTitle and
+// Recent Meetings' participants read it, in the shape they read (SAA-227
+// decision 15). Written whole to a .tmp beside it, then renamed. Anything not of
+// that shape writes nothing. -> whether it wrote.
+function writeCalendarMatchFile(dir, stem, calendar) {
+    if (!calendar || typeof calendar !== 'object' || !Array.isArray(calendar.invitees)) return false;
+    const title = typeof calendar.title === 'string' && calendar.title.trim() ? calendar.title : null;
+    const invitees = calendar.invitees
+        .filter((i) => i && typeof i.name === 'string' && i.name.trim())
+        .map((i) => ({ name: i.name }));
+    if (!title && invitees.length === 0) return false;
+    const file = path.join(dir, `calendar-match-${stem}.json`);
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ title, invitees }, null, 2) + '\n');
+    fs.renameSync(`${file}.tmp`, file);
+    return true;
+}
+
+module.exports = {
+    lastMeeting, classifyCapture, captureStems, isTrashed, trashedStems, calendarTitle, stemTimeMs, readJson,
+    jobStateOf, matchPendingOf, writeCalendarMatchFile,
+};

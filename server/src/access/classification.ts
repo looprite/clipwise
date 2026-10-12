@@ -68,7 +68,7 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
   "POST /captures/:captureId/trash": { access: "owner", requires: "capture", note: "sets trashed_at on the caller's own capture" },
   "POST /captures/:captureId/restore": { access: "owner", requires: "capture", note: "clears trashed_at on the caller's own capture" },
   "DELETE /captures/:captureId": { access: "owner", requires: "capture", note: "deletes the caller's own capture, only from the trash (409 otherwise)" },
-  "GET /captures/:captureId/jobs": { access: "owner", requires: "capture", note: "kind, state and attempts of the caller's own capture's jobs; no error text" },
+  "GET /captures/:captureId/jobs": { access: "owner", requires: "capture", note: "kind, state and attempts of the caller's own capture's jobs, no error text; and its calendar match once one is done: title and invitee names (an address when there is no name)" },
 
   "GET /accounts/me": { access: "member", requires: "mcp", note: "the caller's own account and membership" },
 
