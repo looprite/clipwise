@@ -90,12 +90,13 @@ async function userCount(email: string): Promise<number> {
 }
 
 async function cleanup(): Promise<void> {
-  const like = `%-${tag}@clipwise.test`;
   try {
-    await pool.query(`delete from auth_session where "userId" in (select id from auth_user where email like $1)`, [like]);
-    await pool.query(`delete from auth_account where "userId" in (select id from auth_user where email like $1)`, [like]);
-    await pool.query(`delete from auth_user where email like $1`, [like]);
-    await pool.query(`delete from account_members where email like $1`, [like]);
+    for (const like of [`%-${tag}@clipwise.test`, `%-${tag}@outside.test`]) {
+      await pool.query(`delete from auth_session where "userId" in (select id from auth_user where email like $1)`, [like]);
+      await pool.query(`delete from auth_account where "userId" in (select id from auth_user where email like $1)`, [like]);
+      await pool.query(`delete from auth_user where email like $1`, [like]);
+      await pool.query(`delete from account_members where email like $1`, [like]);
+    }
     await pool.query(`delete from "oauthClient" where name like $1`, [`check-${tag}%`]);
   } catch (err) {
     process.stderr.write(`check-auth: cleanup problem: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -246,6 +247,99 @@ async function main(): Promise<void> {
       record(r.status >= 400 && r.status < 500 && !r.cookie, "with AUTH_PASSWORD_ENABLED off a correct password still gets no session", `status ${r.status}`);
     } finally {
       await nsrv.close();
+    }
+
+    // --- Google sign-in -----------------------------------------------------
+    // An instance with Google configured and the domain restricted. The client
+    // ID and secret are placeholders: nothing here reaches Google. Building the
+    // authorization URL needs no network, and a Google sign-up creates its user
+    // through internalAdapter.createUser with an oauth source
+    // (better-auth oauth2/link-account.mjs:275-281), which is what the cases
+    // below call.
+    const off = await call(srv.base, "POST", "/api/auth/sign-in/social", { body: { provider: "google", callbackURL: "/" } });
+    record(off.status === 404, "without GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET there is no Google sign-in", `status ${off.status}`);
+
+    const googleAuth = createAuth({
+      ...cfg,
+      allowedDomain: "clipwise.test",
+      google: { clientId: "check-client.apps.googleusercontent.com", clientSecret: "check-placeholder" },
+      ipAddressHeader: "x-test-ip",
+    });
+    const gapp = express();
+    mountAuth(gapp, googleAuth, "x-test-ip");
+    gapp.use(express.json());
+    const gsrv = await listen(gapp);
+    const gip = { "x-test-ip": "198.51.100.120" };
+    try {
+      const start = await call(gsrv.base, "POST", "/api/auth/sign-in/social", {
+        body: { provider: "google", callbackURL: "/" },
+        headers: gip,
+      });
+      const startUrl = (start.json as { url?: string } | null)?.url;
+      const u = startUrl ? new URL(startUrl) : null;
+      record(u?.host === "accounts.google.com", "with Google configured, sign-in starts at Google", `status ${start.status}`);
+      record(u?.searchParams.get("hd") === "clipwise.test", "it asks Google for the allowed domain (hd)", `hd ${u?.searchParams.get("hd")}`);
+      const scopes = (u?.searchParams.get("scope") ?? "").split(" ").sort().join(" ");
+      record(scopes === "email openid profile", "it asks only for identity (openid, email, profile)", `scope ${scopes}`);
+      record(
+        u?.searchParams.get("redirect_uri") === `${cfg.baseURL}/api/auth/callback/google`,
+        "Google returns to /api/auth/callback/google",
+        `redirect_uri ${u?.searchParams.get("redirect_uri")}`,
+      );
+
+      const gctx = await googleAuth.$context;
+      const googleSource = { method: "oauth", oauth: { providerId: "google" } };
+      const createdByGoogle = async (email: string): Promise<boolean> => {
+        try {
+          await gctx.internalAdapter.createUser({ email, name: "Google User", emailVerified: true }, googleSource);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const outsideEmail = `outside-${tag}@outside.test`;
+      await addMember({ email: outsideEmail, role: "member", name: null });
+      record(
+        !(await createdByGoogle(outsideEmail)) && (await userCount(outsideEmail)) === 0,
+        "a Google-created user outside the allowed domain is refused at creation, even as a member",
+      );
+
+      const nonMemberEmail = emailFor("google-nonmember");
+      record(
+        !(await createdByGoogle(nonMemberEmail)) && (await userCount(nonMemberEmail)) === 0,
+        "a Google-created user inside the domain who is not a member is refused at creation",
+      );
+
+      const googleMemberEmail = emailFor("google-member");
+      await addMember({ email: googleMemberEmail, role: "member", name: null });
+      record(
+        (await createdByGoogle(googleMemberEmail)) && (await userCount(googleMemberEmail)) === 1,
+        "and a member inside the domain is created (the control for the two refusals)",
+      );
+
+      // Explicit linking: a signed-in password user asks to link Google.
+      // Implicit linking stays off; this call is the only way a password login
+      // gains Google.
+      const linkEmail = emailFor("google-link");
+      await addMember({ email: linkEmail, role: "member", name: null });
+      await createPasswordLogin(linkEmail, "Link", PASSWORD);
+      const linker = await signIn(gsrv.base, linkEmail, PASSWORD, gip);
+      const link = await call(gsrv.base, "POST", "/api/auth/link-social", {
+        body: { provider: "google", callbackURL: "/" },
+        cookie: linker.cookie,
+        headers: gip,
+      });
+      const linkUrl = (link.json as { url?: string } | null)?.url;
+      record(
+        linker.status === 200 && !!linkUrl && new URL(linkUrl).host === "accounts.google.com",
+        "a signed-in password user can start linking Google",
+        `sign-in ${linker.status}, link ${link.status}`,
+      );
+      const anon = await call(gsrv.base, "POST", "/api/auth/link-social", { body: { provider: "google", callbackURL: "/" }, headers: gip });
+      record(anon.status === 401, "and linking without a session is refused", `status ${anon.status}`);
+    } finally {
+      await gsrv.close();
     }
 
     // --- OAuth for claude.ai / Claude Code ---------------------------------

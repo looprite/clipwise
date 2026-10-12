@@ -41,6 +41,9 @@ export type AuthConfig = {
   // route; an identifier that a capture token names and /mcp does not accept.
   captureResource: string;
   passwordEnabled: boolean;
+  // Google sign-in, on only when both the client ID and secret are set. The
+  // same OAuth client as the calendar connection (routes/oauth.ts).
+  google: { clientId: string; clientSecret: string } | null;
   // When set, only emails on this domain may sign in (in addition to being
   // members). Null leaves the member list as the only gate.
   allowedDomain: string | null;
@@ -58,12 +61,16 @@ export function authConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AuthCon
   }
   const baseURL = (env.BETTER_AUTH_URL ?? "").replace(/\/$/, "");
   if (!baseURL) throw new Error("BETTER_AUTH_URL is required (the public origin of this instance)");
+  const googleClientId = env.GOOGLE_CLIENT_ID?.trim() ?? "";
+  const googleClientSecret = env.GOOGLE_CLIENT_SECRET?.trim() ?? "";
   return {
     secret,
     baseURL,
     mcpResource: env.MCP_RESOURCE_URL ?? `${baseURL}/mcp`,
     captureResource: `${baseURL}/capture`,
     passwordEnabled: env.AUTH_PASSWORD_ENABLED === "true",
+    google:
+      googleClientId && googleClientSecret ? { clientId: googleClientId, clientSecret: googleClientSecret } : null,
     allowedDomain: env.AUTH_ALLOWED_EMAIL_DOMAIN?.trim().toLowerCase() || null,
     ipAddressHeader: env.AUTH_IP_HEADER?.trim().toLowerCase() || null,
     accessTokenSeconds: Number(env.AUTH_ACCESS_TOKEN_SECONDS ?? 600),
@@ -97,6 +104,23 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
       disableSignUp: true,
       minPasswordLength: 12,
     },
+
+    // Google sign-in asks for identity only (the provider's default scopes:
+    // openid, email, profile); calendar access is a separate grant. hd asks
+    // Google for the allowed domain and is checked against the id token's hd
+    // claim (@better-auth/core social-providers/google.mjs:114, :120-123); the
+    // domain rule at user creation below still applies on top of it. A user
+    // created by a password login gains Google only through the explicit link
+    // call while signed in, because implicit linking is off.
+    socialProviders: cfg.google
+      ? {
+          google: {
+            clientId: cfg.google.clientId,
+            clientSecret: cfg.google.clientSecret,
+            ...(cfg.allowedDomain ? { hd: cfg.allowedDomain } : {}),
+          },
+        }
+      : {},
 
     // Off in development by default in Better Auth; on here always. In-memory
     // counters are per process, which is right for one instance.
