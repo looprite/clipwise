@@ -27,7 +27,7 @@ const {
 } = require('./identity-answer.js');
 const { stopMessageFor } = require('./voice-naming-wait.js');
 // Which meeting the tray's "Save transcript" item acts on (SAA-199).
-const { lastMeeting, classifyCapture, stemTimeMs, isTrashed } = require('./last-meeting.js');
+const { lastMeeting, classifyCapture, stemTimeMs, isTrashed, jobStateOf, matchPendingOf, writeCalendarMatchFile } = require('./last-meeting.js');
 // The recent-meetings window's rows (SAA-217).
 const { listMeetings, listTrashed } = require('./meetings.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
@@ -3150,15 +3150,19 @@ function drainUploadQueue(reason) {
 // --- job status in the tray (SAA-227 decision 11) ---------------------------
 //
 // Each sent capture's jobs on the server (GET /captures/:captureId/jobs), folded
-// into one state on its queue entry: running while any job is queued or running,
-// failed when none is and one failed, done when all are done. Asked only while
-// some sent capture's state is not settled (unknown or running), every
-// JOB_POLL_MS; with none, no timer and no request, so an idle Mac never wakes
-// the server's database. Never past JOB_POLL_LIMIT_MS after the capture was
-// sent: then its state is "stale" (status unknown) and it is not asked about
-// again, so a stalled job cannot keep this Mac querying the server. The worst
-// extraction on record took 438 s. A new send of a capture (an answer) makes its
-// state unknown again, which starts the asking, and the limit, again.
+// into one state on its queue entry by last-meeting.js jobStateOf, which counts
+// the extraction jobs only (part F decision 18): running while any is queued or
+// running, failed when none is and one failed, done when all are done. Asked only
+// while some sent capture's state is not settled (unknown or running), or its
+// calendar match is still to finish (matchPending), every JOB_POLL_MS; with none,
+// no timer and no request, so an idle Mac never wakes the server's database. A
+// finished match's title and invitees come back in the same reply and are written
+// to calendar-match-<stem>.json for Recent Meetings (decision 15). Never past
+// JOB_POLL_LIMIT_MS after the capture was sent: then a state still unsettled is
+// "stale" (status unknown), a match still pending is given up on, and it is not
+// asked about again, so a stalled job cannot keep this Mac querying the server.
+// The worst extraction on record took 438 s. A new send of a capture (an answer)
+// makes its state unknown again, which starts the asking, and the limit, again.
 
 const JOB_POLL_MS = 20 * 1000;
 const JOB_POLL_LIMIT_MS = 15 * 60 * 1000;
@@ -3166,15 +3170,8 @@ const JOB_SETTLED = new Set(['done', 'failed', 'none', 'gone', 'stale']);
 let jobPollTimer = null;
 let jobPolling = false;
 
-function jobStateOf(jobs) {
-    if (jobs.length === 0) return 'none';
-    if (jobs.some((j) => j.state === 'queued' || j.state === 'running')) return 'running';
-    if (jobs.some((j) => j.state === 'failed')) return 'failed';
-    return 'done';
-}
-
 function unsettledUploads() {
-    return listUploadQueue().filter((e) => e.state === 'sent' && !JOB_SETTLED.has(e.jobState));
+    return listUploadQueue().filter((e) => e.state === 'sent' && (!JOB_SETTLED.has(e.jobState) || e.matchPending === true));
 }
 
 function scheduleJobPoll(delayMs) {
@@ -3190,21 +3187,39 @@ async function pollJobStates() {
     try {
         for (const entry of unsettledUploads()) {
             if (!(Date.now() - Date.parse(entry.sentAt) <= JOB_POLL_LIMIT_MS)) {
-                writeUploadEntry({ ...entry, jobState: 'stale' });
-                console.error(`[clipwise-recorder] upload ${entry.stem}: jobs not asked any more (sent over 15 min ago), status unknown`);
+                if (JOB_SETTLED.has(entry.jobState)) {
+                    writeUploadEntry({ ...entry, matchPending: false });
+                    console.error(`[clipwise-recorder] upload ${entry.stem}: calendar match not asked any more (sent over 15 min ago)`);
+                } else {
+                    writeUploadEntry({ ...entry, jobState: 'stale', matchPending: false });
+                    console.error(`[clipwise-recorder] upload ${entry.stem}: jobs not asked any more (sent over 15 min ago), status unknown`);
+                }
                 continue;
             }
             const captureId = captureIdFor(entry.stem);
             if (!captureId) continue;
             const reply = await captureServerRequest(server, 'GET', `/captures/${captureId}/jobs`);
             let jobState = entry.jobState;
-            if (reply.status === 200 && Array.isArray(reply.json.jobs)) jobState = jobStateOf(reply.json.jobs);
-            else if (reply.status === 404) jobState = 'gone';
-            console.error(`[clipwise-recorder] upload ${entry.stem}: jobs ${reply.status ?? 'no reply'} ${jobState ?? 'unknown'}`);
+            let matchPending = entry.matchPending === true;
+            let wroteMatch = false;
+            if (reply.status === 200 && Array.isArray(reply.json.jobs)) {
+                jobState = jobStateOf(reply.json.jobs);
+                matchPending = matchPendingOf(reply.json.jobs);
+                try {
+                    wroteMatch = writeCalendarMatchFile(OUTDIR, entry.stem, reply.json.calendar);
+                } catch (err) {
+                    console.error(`[clipwise-recorder] upload ${entry.stem}: calendar match not written: ${err.code || err.name}`);
+                }
+            } else if (reply.status === 404) {
+                jobState = 'gone';
+                matchPending = false;
+            }
+            // Ids, states and whether a match was written; never the title or a name.
+            console.error(`[clipwise-recorder] upload ${entry.stem}: jobs ${reply.status ?? 'no reply'} ${jobState ?? 'unknown'}${matchPending ? ', match pending' : ''}${wroteMatch ? ', calendar match written' : ''}`);
             // A send that happened meanwhile wins: its state starts unknown again.
             const current = readUploadEntry(entry.stem);
             if (!current || current.state !== 'sent' || current.sentAt !== entry.sentAt) continue;
-            if (jobState !== entry.jobState) writeUploadEntry({ ...current, jobState });
+            if (jobState !== entry.jobState || matchPending !== (entry.matchPending === true)) writeUploadEntry({ ...current, jobState, matchPending });
         }
     } finally {
         jobPolling = false;

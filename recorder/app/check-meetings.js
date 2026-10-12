@@ -257,6 +257,56 @@ check('without the processing capture, the tray item is the newest ready meeting
         stopMessageFor(direct({ transcribe: ok({}), ingest: { state: 'failed' }, diarize: { state: 'pending' } })) === CANT);
 }
 
+// ---- the server's calendar match (SAA-227 part F, decisions 15, 18 and 29) ----
+// Two captures the capture pipeline handled and sent, neither with an identity
+// answer. Each reply is one GET /captures/:captureId/jobs can return: the server
+// sends `calendar` only once a match job is done. main.js pollJobStates writes
+// the calendar with writeCalendarMatchFile and keeps jobStateOf's state on the
+// queue entry; the window and the tray read both back.
+//   M  extraction done, the match done, with its calendar. Bob has no name in
+//      Google, so the server sent his address.
+//   F  extraction done, the match failed (its retries used up), no calendar.
+{
+    const lm = require('./last-meeting.js');
+    const c4 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-meetings-calendar-check-'));
+    const Q = path.join(c4, 'upload-queue');
+    fs.mkdirSync(Q);
+    const cw = (name, doc) => fs.writeFileSync(path.join(c4, name), JSON.stringify(doc));
+    const has = typeof lm.writeCalendarMatchFile === 'function' && typeof lm.jobStateOf === 'function';
+    // As pollJobStates handles a reply: the calendar written, the folded state kept.
+    const sent = (stem, n, reply) => {
+        cw(`manifest-${stem}.json`, { started_at: stem, recording_id: `A1B2C3D4-0000-4000-8000-00000000000${n}`, tracks: [{ duration_s: 1800 }] });
+        cw(`pipeline-${stem}.json`, { pipeline: 'capture', updated_at: new Date(NOW - 3600e3).toISOString(), steps: { transcribe: { state: 'ok' }, classify: { state: 'ok' } } });
+        cw(`transcript-${stem}.json`, { segments: [{}, {}, {}] });
+        const wrote = has ? lm.writeCalendarMatchFile(c4, stem, reply.calendar) : false;
+        const jobState = has ? lm.jobStateOf(reply.jobs) : '(no jobStateOf in last-meeting.js)';
+        fs.writeFileSync(path.join(Q, `${stem}.json`), JSON.stringify({ stem, state: 'sent', sentAt: new Date(NOW - 3000e3).toISOString(), recordingId: `rid-${n}`, jobState }));
+        return { wrote, jobState };
+    };
+    const M = '2026-03-06T16-00-00Z';
+    const F = '2026-03-06T17-00-00Z';
+    const m = sent(M, 1, {
+        jobs: [{ kind: 'extract', state: 'done', attempts: 1 }, { kind: 'match', state: 'done', attempts: 1 }],
+        calendar: { title: 'Made-Up Planning', invitees: [{ name: 'Ann Example' }, { name: 'bob@example.test' }] },
+    });
+    const f = sent(F, 2, {
+        jobs: [{ kind: 'extract', state: 'done', attempts: 1 }, { kind: 'match', state: 'failed', attempts: 3 }],
+        calendar: null,
+    });
+    const rows = listMeetings(c4, NOW, undefined, { uploadQueueDir: Q });
+    const rowM = rows.find((r) => r.stem === M);
+    const rowF = rows.find((r) => r.stem === F);
+    const tray = lastMeeting(c4, NOW, { uploadQueueDir: Q });
+
+    check('server calendar match: a capture with no identity answer shows the event title and its invitees as participants, the one with no name by address',
+        m.wrote === true && !!rowM && rowM.title === 'Made-Up Planning' && rowM.participants.join(',') === 'Ann Example,bob@example.test',
+        JSON.stringify({ wrote: m.wrote, title: rowM && rowM.title, participants: rowM && rowM.participants }));
+    check('a failed match job does not show the capture as failed: extraction done is ready, in the window and the tray',
+        f.jobState === 'done' && f.wrote === false && !!rowF && rowF.state === 'ready' && rowF.canSave === true && rowF.title === null && !!tray && tray.state === 'ready' && tray.stem === F,
+        JSON.stringify({ jobState: f.jobState, wrote: f.wrote, row: rowF && rowF.state, title: rowF && rowF.title, tray: tray && [tray.state, tray.stem === F ? 'F' : tray.stem] }));
+    fs.rmSync(c4, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);
