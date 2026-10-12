@@ -219,6 +219,44 @@ check('without the processing capture, the tray item is the newest ready meeting
     fs.rmSync(t3, { recursive: true, force: true });
 }
 
+// ---- the naming window's stop message (SAA-195, SAA-227) ---------------------
+// stopMessageFor reads only the pipeline record. A capture-pipeline record
+// (pipeline: "capture") has no ingest step and no model_revision; a direct
+// record is read as it always was.
+{
+    const { stopMessageFor } = require('./voice-naming-wait.js');
+    const ONE = 'Only one other voice on this call — nothing to name.';
+    const CANT = "Couldn't separate the voices on this call.";
+    const cap = (steps) => ({ pipeline: 'capture', steps });
+    const ok = (detail) => ({ state: 'ok', detail });
+
+    check('capture: the classifier refused it (diarize never ran) -> couldn\'t separate',
+        stopMessageFor(cap({ transcribe: ok({}), classify: { state: 'failed' }, diarize: { state: 'pending' } })) === CANT);
+    check('capture: diarize ran and found one voice, no naming data -> one other voice',
+        stopMessageFor(cap({ transcribe: ok({}), classify: ok({}), diarize: ok({ voices_found: 1, naming_data: false }) })) === ONE);
+    check('capture: diarize ran and found no voice -> one other voice',
+        stopMessageFor(cap({ transcribe: ok({}), classify: ok({}), diarize: ok({ voices_found: 0, naming_data: false }) })) === ONE);
+    check('capture: diarize found three voices but no naming data (them excluded, or naming_error) -> couldn\'t separate',
+        stopMessageFor(cap({ transcribe: ok({}), classify: ok({}), diarize: ok({ voices_found: 3, naming_data: false, naming_error: 'ffmpeg missing' }) })) === CANT);
+    check('capture: diarize skipped (the tool could not run) -> couldn\'t separate',
+        stopMessageFor(cap({ transcribe: ok({}), classify: ok({}), diarize: { state: 'skipped', detail: { reason: 'diarize tool failed' } } })) === CANT);
+    check('capture: still running (diarize pending, nothing failed) -> keep waiting',
+        stopMessageFor(cap({ transcribe: { state: 'running' }, classify: { state: 'pending' }, diarize: { state: 'pending' } })) === null);
+    check('capture: transcribe failed before diarize -> couldn\'t separate, as before',
+        stopMessageFor(cap({ transcribe: { state: 'failed' }, classify: { state: 'pending' }, diarize: { state: 'pending' } })) === CANT);
+
+    // A direct record (no `pipeline` key) is unchanged: diarize "ok" means it split
+    // and naming data is still coming, so the window keeps waiting; a skip with a
+    // model_revision is the one-voice case; ingest failing is couldn't-separate.
+    const direct = (steps) => ({ db_recording_id: 'r', steps });
+    check('direct: diarize ok (a split, naming data on its way) -> keep waiting, unchanged',
+        stopMessageFor(direct({ transcribe: ok({}), ingest: ok({}), diarize: ok({ voices_found: 3 }) })) === null);
+    check('direct: diarize skipped with a model_revision -> one other voice, unchanged',
+        stopMessageFor(direct({ transcribe: ok({}), ingest: ok({}), diarize: { state: 'skipped', detail: { model_revision: 'm1' } } })) === ONE);
+    check('direct: ingest failed before diarize -> couldn\'t separate, unchanged',
+        stopMessageFor(direct({ transcribe: ok({}), ingest: { state: 'failed' }, diarize: { state: 'pending' } })) === CANT);
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);
