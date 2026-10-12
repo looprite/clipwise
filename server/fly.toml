@@ -32,11 +32,14 @@ kill_timeout = 15
   # Fly sets this header to the client's address. Without it every request
   # behind Fly's proxy shares one sign-in rate-limit bucket (src/auth/mount.ts).
   AUTH_IP_HEADER = "fly-client-ip"
-  # Decided 2026-10-08 (SAA-227): password sign-in stays on in production, and
-  # only looprite.ai emails may become users. The code reads the string "true"
-  # (src/auth/auth.ts) and lower-cases the domain. The domain is checked when a
-  # login is created, not on each sign-in (src/auth/auth.ts, user.create.before).
-  AUTH_PASSWORD_ENABLED = "true"
+  # Decided 2026-10-12 (SAA-227, K decision 6): password sign-in is off in
+  # production now that Google sign-in is proven here, the recorder's included.
+  # It stays in the code for scratch, checks and self-hosting. Only looprite.ai
+  # emails may become users (decided 2026-10-08). The code reads the string
+  # "true" (src/auth/auth.ts) and lower-cases the domain. The domain is checked
+  # when a login is created, not on each sign-in (src/auth/auth.ts,
+  # user.create.before).
+  AUTH_PASSWORD_ENABLED = "false"
   AUTH_ALLOWED_EMAIL_DOMAIN = "looprite.ai"
 
 [http_service]
