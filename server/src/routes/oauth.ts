@@ -23,7 +23,7 @@ const CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readon
 // calendar connection, by one local user). Single-use: deleted on lookup.
 // Cost of the simpler choice: a connect attempt started right before a
 // server restart has to be retried.
-const pendingStates = new Map<string, { accountId: string; expiresAt: number }>();
+const pendingStates = new Map<string, { accountId: string; memberId: string; expiresAt: number }>();
 const STATE_TTL_MS = 10 * 60 * 1000;
 
 // A connect that's started and never completed (closed tab, denied
@@ -31,12 +31,12 @@ const STATE_TTL_MS = 10 * 60 * 1000;
 // user, unbounded in principle. Swept on every new entry rather than on a
 // timer, so there's no extra scheduled thing running for a flow used this
 // rarely.
-function setState(state: string, accountId: string): void {
+function setState(state: string, accountId: string, memberId: string): void {
   const now = Date.now();
   for (const [key, value] of pendingStates) {
     if (value.expiresAt < now) pendingStates.delete(key);
   }
-  pendingStates.set(state, { accountId, expiresAt: now + STATE_TTL_MS });
+  pendingStates.set(state, { accountId, memberId, expiresAt: now + STATE_TTL_MS });
 }
 
 function oauthConfig(): { clientId: string; redirectUri: string } {
@@ -67,7 +67,7 @@ oauthRouter.get(
 
     const { clientId, redirectUri } = oauthConfig();
     const state = randomBytes(16).toString("hex");
-    setState(state, accountId);
+    setState(state, accountId, accessOf(req).memberId);
 
     const url = new URL(GOOGLE_AUTH_ENDPOINT);
     url.searchParams.set("client_id", clientId);
@@ -133,11 +133,12 @@ oauthRouter.get(
         `  excluded: ${selection.excluded.map((e) => `${e.id} (${e.reason})`).join("; ") || "(none)"}`,
     );
 
-    // UNIQUE(account_id, calendar_email) is exactly the conflict target
+    // UNIQUE(member_id, calendar_email) is exactly the conflict target
     // here — race-free in one statement, and consistent with how
     // applyCalendarMatch upserts invitees against its own unique index.
     const values = {
       accountId: pending.accountId,
+      memberId: pending.memberId,
       calendarEmail,
       accessToken: encrypt(tokens.accessToken),
       refreshToken: encrypt(tokens.refreshToken),
@@ -149,7 +150,7 @@ oauthRouter.get(
       .insert(schema.calendarConnections)
       .values(values)
       .onConflictDoUpdate({
-        target: [schema.calendarConnections.accountId, schema.calendarConnections.calendarEmail],
+        target: [schema.calendarConnections.memberId, schema.calendarConnections.calendarEmail],
         set: values,
       });
 
