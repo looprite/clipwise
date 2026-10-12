@@ -24,6 +24,9 @@
 //   m2  X's match uses X's connection only: Y's token is never sent, and the
 //       title and invitees are X's event's
 //   m3  X's capture: match and extract both run to done, the recording ready
+//   bk  `match-backlog` (src/jobs/cli.ts) lists only a capture made before its
+//       owner connected, queues one match job for it with --queue, and a second
+//       run queues nothing new
 // Worker
 //   a   queued, running, done; the recording ready with its current run; no null
 //       embedding in it
@@ -76,7 +79,7 @@ import { Client } from "pg";
 import { eq, sql } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
 import { makeStubEmbedder, makeStubModel, waitFor } from "../extract/stub-model.js";
-import { dropAccount, endPool, makeAccount, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
+import { dropAccount, endPool, makeAccount, makeRecording, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
 import { capturesPost } from "../routes/captures.js";
 import { encrypt } from "../lib/crypto.js";
 import { errorHandler } from "../lib/http.js";
@@ -327,6 +330,29 @@ async function main(): Promise<void> {
       check("c2 an answer that writes no speaker name (no host name, two guests) queues nothing even while running", rn.json.identityApplied === true && (await reCount(noNames.recordingId)) === 0, JSON.stringify(await speakersOf(noNames.recordingId)));
     }
 
+    // src/jobs/cli.ts as its own process (cases r and bk). Its lines go into the
+    // capture, so the end-of-run phrase scan covers them.
+    const cli = (...args: string[]): Promise<{ code: number | null; out: string; err: string }> =>
+      new Promise((done) => {
+        const child = spawn(process.execPath, ["--import", "tsx", "src/jobs/cli.ts", ...args], {
+          cwd: resolve(import.meta.dirname, "..", ".."),
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        children.push(child);
+        let out = "";
+        let err = "";
+        child.stdout!.on("data", (c) => (out += c));
+        child.stderr!.on("data", (c) => (err += c));
+        child.once("close", (code) => {
+          for (const line of `${out}${err}`.split("\n").filter(Boolean)) {
+            captured.push(line);
+            realWrite(`    cli| ${line}\n`);
+          }
+          done({ code, out, err });
+        });
+      });
+
     // ---- calendar match ----------------------------------------------------------
     if (wanted("m1", "m2", "m3")) {
       await clearJobs();
@@ -406,6 +432,78 @@ async function main(): Promise<void> {
         globalThis.fetch = realFetch;
         // X is the member every other case posts as: with X still connected, every
         // later capture would queue a match job and send it to the real Google.
+        await db.delete(schema.calendarConnections).where(eq(schema.calendarConnections.accountId, fx.accountId));
+        await clearJobs();
+      }
+    }
+
+    // ---- bk: the match backlog (SAA-227 decisions 12 and 23) ----------------------
+    // Four recordings in this account: one captured before its owner connected (the
+    // only eligible one), one whose owner never connects, one captured after its
+    // owner connected (it already has a match job), and one from before the
+    // cut-over (it carries a transcript_source_path), whose owner is connected.
+    if (wanted("bk")) {
+      await clearJobs();
+      const member = async (who: string): Promise<string> => {
+        const [m] = await db
+          .insert(schema.accountMembers)
+          .values({ accountId: fx.accountId, email: `${who}-${fx.tag}@clipwise.test`, role: "member", joinedAt: new Date() })
+          .returning({ id: schema.accountMembers.id });
+        return m.id;
+      };
+      const connect = (memberId: string, who: string) =>
+        db.insert(schema.calendarConnections).values({
+          accountId: fx.accountId,
+          memberId,
+          calendarEmail: `bk-${who}-${fx.tag}@clipwise.test`,
+          accessToken: "check-not-used",
+          refreshToken: "check-not-used",
+          tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+          searchedCalendarIds: [],
+        });
+      try {
+        const late = await member("check-jobs-bk-late");
+        const never = await member("check-jobs-bk-never");
+        const early = await member("check-jobs-bk-early");
+        await connect(early, "early");
+        const recLate = String((await post(payload(), late)).json.recordingId);
+        const recNever = String((await post(payload(), never)).json.recordingId);
+        const recEarly = String((await post(payload(), early)).json.recordingId);
+        const recPre = await makeRecording(fx, { segments: 1 });
+        await db.update(schema.recordings).set({ ownerMemberId: late, metadata: { transcript_source_path: "/check/transcript-pre.json" } }).where(eq(schema.recordings.id, recPre));
+        await connect(late, "late");
+
+        const names: Record<string, string> = { [recLate]: "late", [recNever]: "never", [recEarly]: "early", [recPre]: "pre-cutover" };
+        const listedIds = (out: string): string[] => [...out.matchAll(/^ {2}([0-9a-f-]{36}) owner=/gm)].map((m) => m[1]);
+        const ours = (out: string): string[] => listedIds(out).filter((id) => id in names).map((id) => names[id]);
+        const matchJobs = async (rec: string) => (await jobsOf(rec)).filter((j) => j.kind === "match");
+        const counts = async () => ({ late: (await matchJobs(recLate)).length, never: (await matchJobs(recNever)).length, early: (await matchJobs(recEarly)).length, pre: (await matchJobs(recPre)).length });
+
+        const dry = await cli("match-backlog");
+        const afterDry = await counts();
+        check(
+          "bk the listing names only the recording captured before its owner connected; not the never-connected, the already-matched or the pre-cut-over one; and it queues nothing",
+          dry.code === 0 && JSON.stringify(ours(dry.out)) === JSON.stringify(["late"]) && JSON.stringify(afterDry) === JSON.stringify({ late: 0, never: 0, early: 1, pre: 0 }),
+          JSON.stringify({ code: dry.code, listed: ours(dry.out), matchJobs: afterDry, err: dry.err.trim() }),
+        );
+
+        const first = await cli("match-backlog", "--queue");
+        const afterFirst = await counts();
+        const lateJob = (await matchJobs(recLate))[0];
+        check(
+          "bk --queue queues one match job for that recording and for no other of the four, and says how many it queued",
+          first.code === 0 && first.out.includes(`queued ${listedIds(first.out).length} match job(s)`) && JSON.stringify(afterFirst) === JSON.stringify({ late: 1, never: 0, early: 1, pre: 0 }) && lateJob?.state === "queued",
+          JSON.stringify({ code: first.code, listed: ours(first.out), matchJobs: afterFirst, err: first.err.trim() }),
+        );
+
+        const second = await cli("match-backlog", "--queue");
+        const afterSecond = await counts();
+        check(
+          "bk a second run lists none of the four and queues nothing new",
+          second.code === 0 && ours(second.out).length === 0 && second.out.includes(`queued ${listedIds(second.out).length} match job(s)`) && JSON.stringify(afterSecond) === JSON.stringify(afterFirst),
+          JSON.stringify({ code: second.code, listed: ours(second.out), matchJobs: afterSecond, err: second.err.trim() }),
+        );
+      } finally {
         await db.delete(schema.calendarConnections).where(eq(schema.calendarConnections.accountId, fx.accountId));
         await clearJobs();
       }
@@ -867,26 +965,6 @@ async function main(): Promise<void> {
     // ---- r: the jobs CLI ------------------------------------------------------
     if (wanted("r")) {
       await clearJobs();
-      const cli = (...args: string[]): Promise<{ code: number | null; out: string; err: string }> =>
-        new Promise((done) => {
-          const child = spawn(process.execPath, ["--import", "tsx", "src/jobs/cli.ts", ...args], {
-            cwd: resolve(import.meta.dirname, "..", ".."),
-            env: process.env,
-            stdio: ["ignore", "pipe", "pipe"],
-          });
-          children.push(child);
-          let out = "";
-          let err = "";
-          child.stdout!.on("data", (c) => (out += c));
-          child.stderr!.on("data", (c) => (err += c));
-          child.once("close", (code) => {
-            for (const line of `${out}${err}`.split("\n").filter(Boolean)) {
-              captured.push(line);
-              realWrite(`    r| ${line}\n`);
-            }
-            done({ code, out, err });
-          });
-        });
 
       // A job failed on all three attempts, then retried.
       const { recordingId } = await fresh();
