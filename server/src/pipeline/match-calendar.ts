@@ -1,14 +1,16 @@
-// Matches a capture to a calendar event (SAA-115 step 3, before the
-// writes). Runs as the pipeline's first step, ahead of transcribe — see
-// run-capture.ts — so a matched event's attendee names are reachable
-// before transcription runs, not only written to the database at ingest.
+// Matches a stored recording to an event on its owner's calendar and applies
+// the match (SAA-115 step 3; SAA-227 part F). Runs on the server as a match job
+// (jobs/worker.ts), queued by POST /captures beside extraction when the owner
+// has a calendar connected. Extraction reads nothing a match writes, so the two
+// run in no set order.
 //
 // The matching rule below is settled and measured against 22 real captures
 // (2026-09-17 dry run): start alignment, never overlap or containment,
 // never originalStartTime, 10-minute threshold. Not being revisited here.
 
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { LeaseLostError } from "../extract/extract.js";
 import { decrypt, encrypt } from "../lib/crypto.js";
 import {
   type CalendarEvent,
@@ -16,8 +18,7 @@ import {
   listEvents,
   refreshAccessToken,
 } from "../lib/google-calendar.js";
-import { writeCalendarMatch, type CalendarMatch } from "../ingest/calendar-match.js";
-import type { CaptureIdentity } from "../ingest/clipwise.js";
+import { applyCalendarMatch, type CalendarMatch, type CalendarMatchApplication } from "../ingest/calendar-match.js";
 
 export const MATCH_THRESHOLD_MS = 10 * 60 * 1000; // settled 2026-09-17, margin both sides
 
@@ -45,11 +46,6 @@ export function matchEvent(
   return best;
 }
 
-export type MatchResult = {
-  matched: boolean;
-  detail: Record<string, unknown>;
-};
-
 export type CalendarErrorDetail = { calendar_id: string; status: number | null; message: string };
 
 export type ResolvedConnection = {
@@ -74,6 +70,7 @@ export type ResolvedConnection = {
 // placeholder duplication taught earlier in this change.
 export async function resolveCalendarConnection(
   ownerMemberId: string,
+  signal?: AbortSignal,
 ): Promise<ResolvedConnection | { reason: "not_connected" }> {
   // First check, deliberately: this is what keeps every capture whose owner
   // has no calendar connected completely unaffected.
@@ -87,7 +84,7 @@ export async function resolveCalendarConnection(
 
   let accessToken = decrypt(connection.accessToken);
   if (connection.tokenExpiresAt.getTime() <= Date.now()) {
-    const refreshed = await refreshAccessToken(decrypt(connection.refreshToken));
+    const refreshed = await refreshAccessToken(decrypt(connection.refreshToken), signal);
     accessToken = refreshed.accessToken;
     await db
       .update(schema.calendarConnections)
@@ -115,6 +112,7 @@ export async function fetchEventsForWindow(
   accessToken: string,
   windowStart: Date,
   windowEnd: Date,
+  signal?: AbortSignal,
 ): Promise<{ events: CalendarEvent[]; calendarErrors: CalendarErrorDetail[] }> {
   const searchedCalendarIds = connection.searchedCalendarIds ?? [];
 
@@ -127,7 +125,7 @@ export async function fetchEventsForWindow(
   // calendar doesn't discard results already fetched from the others.
   const settled = await Promise.allSettled(
     searchedCalendarIds.map((calendarId) =>
-      listEvents(accessToken, calendarId, windowStart, windowEnd).then((events) => ({
+      listEvents(accessToken, calendarId, windowStart, windowEnd, signal).then((events) => ({
         calendarId,
         events,
       })),
@@ -142,7 +140,7 @@ export async function fetchEventsForWindow(
   // that can be caught, so it's recorded distinctly rather than collapsed
   // into an ordinary no-match — a capture that legitimately has no event
   // and a capture whose calendar access silently broke must not read the
-  // same in the sidecar.
+  // same (matchRecording fails the job when every calendar failed).
   const calendarErrors: CalendarErrorDetail[] = [];
   for (let i = 0; i < settled.length; i++) {
     const outcome = settled[i];
@@ -163,43 +161,66 @@ export async function fetchEventsForWindow(
   return { events, calendarErrors };
 }
 
-export async function matchCaptureToCalendar(
-  dir: string,
-  stem: string,
-  capture: CaptureIdentity,
-  ownerMemberId: string,
-): Promise<MatchResult> {
-  const resolved = await resolveCalendarConnection(ownerMemberId);
-  if ("reason" in resolved) {
-    return { matched: false, detail: { reason: resolved.reason } };
+// Every searched calendar failed to answer, so "no event" would be a guess. The
+// match job fails and is tried again on the worker's attempts (SAA-227 decision
+// 20). The message is counts only: Google's reply stays out of it.
+export class CalendarFetchError extends Error {
+  constructor(failed: number, total: number) {
+    super(`${failed} of ${total} calendar(s) could not be read`);
+    this.name = "CalendarFetchError";
   }
+}
+
+export type RecordingMatch =
+  | { matched: false; reason: "not_connected" | "no_owner" | "no_start_time" | "no_searchable_calendars" | "no_event_in_range" }
+  | { matched: true; inviteeCount: number; application: CalendarMatchApplication };
+
+// Matches one stored recording against its owner's calendar, and applies what
+// it finds on the server (SAA-227 decisions 10 and 19): the invitees, the
+// recurring event id, and the title while it is still the placeholder
+// (ingest/calendar-match.ts). Only the owner's connection is used (decision 8).
+//
+// signal aborts the Google calls in flight (the job's own). With a lease guard
+// the apply is fenced like extraction's promotion: in one transaction the job's
+// row is locked FOR UPDATE and must still hold this lease in state running.
+export async function matchRecording(
+  recordingId: string,
+  opts: { signal?: AbortSignal; leaseGuard?: { jobId: string; leaseToken: string } } = {},
+): Promise<RecordingMatch> {
+  const [recording] = await db
+    .select({
+      accountId: schema.recordings.accountId,
+      ownerMemberId: schema.recordings.ownerMemberId,
+      startedAt: schema.recordings.startedAt,
+      stem: sql<string | null>`${schema.recordings.metadata}->'capture'->>'stem'`,
+    })
+    .from(schema.recordings)
+    .where(eq(schema.recordings.id, recordingId));
+  if (!recording) throw new Error("the recording does not exist");
+  if (!recording.ownerMemberId) return { matched: false, reason: "no_owner" };
+
+  const resolved = await resolveCalendarConnection(recording.ownerMemberId, opts.signal);
+  if ("reason" in resolved) return { matched: false, reason: resolved.reason };
   const { connection, accessToken } = resolved;
 
   const searchedCalendarIds = connection.searchedCalendarIds ?? [];
-  if (searchedCalendarIds.length === 0) {
-    return { matched: false, detail: { reason: "no_searchable_calendars" } };
-  }
+  if (searchedCalendarIds.length === 0) return { matched: false, reason: "no_searchable_calendars" };
 
-  const captureStartedAt = new Date(capture.startedAt);
+  // POST /captures always sets it; a row without one has nothing to align on.
+  const captureStartedAt = recording.startedAt;
+  if (!captureStartedAt) return { matched: false, reason: "no_start_time" };
   const windowStart = new Date(captureStartedAt.getTime() - WINDOW_MS);
   const windowEnd = new Date(captureStartedAt.getTime() + WINDOW_MS);
 
-  const { events, calendarErrors } = await fetchEventsForWindow(
-    connection,
-    accessToken,
-    windowStart,
-    windowEnd,
-  );
+  const { events, calendarErrors } = await fetchEventsForWindow(connection, accessToken, windowStart, windowEnd, opts.signal);
+  opts.signal?.throwIfAborted();
 
   const result = matchEvent(captureStartedAt, events);
   if (!result) {
-    return {
-      matched: false,
-      detail: {
-        reason: "no_event_in_range",
-        ...(calendarErrors.length ? { calendar_errors: calendarErrors } : {}),
-      },
-    };
+    if (calendarErrors.length === searchedCalendarIds.length) {
+      throw new CalendarFetchError(calendarErrors.length, searchedCalendarIds.length);
+    }
+    return { matched: false, reason: "no_event_in_range" };
   }
 
   const { event, offsetMs } = result;
@@ -227,15 +248,19 @@ export async function matchCaptureToCalendar(
     invitees,
     offset_ms: offsetMs,
   };
-  writeCalendarMatch(dir, stem, match);
 
-  return {
-    matched: true,
-    detail: {
-      event_id: event.id,
-      offset_ms: offsetMs,
-      invitee_count: invitees.length,
-      ...(calendarErrors.length ? { calendar_errors: calendarErrors } : {}),
-    },
-  };
+  const guard = opts.leaseGuard;
+  const application = await db.transaction(async (tx) => {
+    if (guard) {
+      const held = await tx
+        .select({ id: schema.jobs.id })
+        .from(schema.jobs)
+        .where(and(eq(schema.jobs.id, guard.jobId), eq(schema.jobs.leaseToken, guard.leaseToken), eq(schema.jobs.state, "running")))
+        .for("update");
+      if (held.length === 0) throw new LeaseLostError();
+    }
+    return applyCalendarMatch(tx, recording.accountId, recordingId, recording.stem ?? "", match);
+  });
+
+  return { matched: true, inviteeCount: invitees.length, application };
 }

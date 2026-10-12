@@ -1,7 +1,8 @@
 // Regression check for matchEvent() (SAA-115) against the real numbers
 // measured in the 2026-09-17 dry run — five matches and two named
 // non-matches, from 22 real captures. Validates the matching rule without
-// needing live Google access.
+// needing live Google access. Also: a match job's signal reaches the Google
+// call (SAA-227 part F).
 //
 // Usage:
 //   tsx src/pipeline/check-match-calendar.ts
@@ -10,7 +11,7 @@
 // doesn't, and the mismatching case is printed.
 
 import { matchEvent } from "./match-calendar.js";
-import type { CalendarEvent } from "../lib/google-calendar.js";
+import { listEvents, type CalendarEvent } from "../lib/google-calendar.js";
 
 function event(id: string, startIso: string, recurringEventId?: string): CalendarEvent {
   return { id, start: { dateTime: startIso }, recurringEventId };
@@ -37,7 +38,7 @@ const CASES: Case[] = [
   { name: "Slack call, must not match (20m02s)", eventStartIso: "2026-09-14T17:00:00Z", offsetMs: 1202000, expectMatch: false },
 ];
 
-function main(): number {
+async function main(): Promise<number> {
   let failures = 0;
   for (const c of CASES) {
     const ev = event("evt-" + c.name, c.eventStartIso);
@@ -67,10 +68,46 @@ function main(): number {
   );
   if (!movedOk) failures += 1;
 
-  process.stdout.write(`\n${CASES.length + 1 - failures}/${CASES.length + 1} passed\n`);
+  // A match job's signal reaches the Google call (SAA-227 part F): aborting it
+  // ends a call in flight at once, not at the 5 s timeout. fetch is replaced for
+  // this case by one that answers only when its own signal aborts; nothing
+  // reaches Google.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((_input: unknown, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      const s = init?.signal;
+      s?.addEventListener("abort", () => reject(s.reason), { once: true });
+    })) as typeof fetch;
+  const ctl = new AbortController();
+  const jobAbort = new Error("check: the job's signal");
+  const t0 = Date.now();
+  setTimeout(() => ctl.abort(jobAbort), 50);
+  // Holds the process open while the call is pending. Without it, a call that
+  // ignores the job's signal waits only on AbortSignal.timeout, whose timer does
+  // not keep Node alive: the process would exit before this case reports.
+  const keepAlive = setTimeout(() => {}, 10_000);
+  let outcome = "resolved";
+  try {
+    await listEvents("check-token", "check-calendar", new Date(0), new Date(1), ctl.signal);
+  } catch (err) {
+    outcome = err === jobAbort ? "the job's abort" : `another error (${err instanceof Error ? err.name : String(err)})`;
+  } finally {
+    clearTimeout(keepAlive);
+    globalThis.fetch = realFetch;
+  }
+  const elapsed = Date.now() - t0;
+  const signalOk = outcome === "the job's abort" && elapsed < 1000;
+  process.stdout.write(
+    `${signalOk ? "PASS" : "FAIL"} the job's signal aborts a Google call in flight at once, not at the timeout: ${outcome} after ${elapsed} ms\n`,
+  );
+  if (!signalOk) failures += 1;
+
+  process.stdout.write(`\n${CASES.length + 2 - failures}/${CASES.length + 2} passed\n`);
   return failures === 0 ? 0 : 1;
 }
 
 if (process.argv[1] && process.argv[1].endsWith("check-match-calendar.ts")) {
-  process.exit(main());
+  // A run that ends without reaching the summary is a failure, not a pass.
+  process.exitCode = 1;
+  void main().then((code) => process.exit(code));
 }

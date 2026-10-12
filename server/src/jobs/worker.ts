@@ -1,5 +1,6 @@
 // The jobs worker (SAA-227 parts D and E): takes the work POST /captures queued
-// and does it in this process. Extraction and its embeddings today.
+// and does it in this process. Extraction and its embeddings, and the calendar
+// match (part F).
 //
 // What it promises:
 //   - One job at a time.
@@ -38,6 +39,8 @@ import type { QueryResult, QueryResultRow } from "pg";
 import { pool } from "../db/index.js";
 import { readExtractionCompletion, runExtraction, speakerFingerprintHash, LeaseLostError } from "../extract/extract.js";
 import { embedMomentsByIds, type Embedder } from "../extract/embeddings.js";
+import { describeCalendarMatchApplication } from "../ingest/calendar-match.js";
+import { matchRecording } from "../pipeline/match-calendar.js";
 import { describeErrorLine, errorClassOf, logError } from "../lib/safe-error.js";
 import { abortableFetch } from "./abort.js";
 import type { Wakeable } from "./registry.js";
@@ -67,7 +70,7 @@ type JobRow = {
   id: string;
   account_id: string;
   recording_id: string;
-  kind: "extract" | "re_extract";
+  kind: "extract" | "re_extract" | "match";
   attempts: number;
   lease_token: string;
   run_ids: string[];
@@ -308,8 +311,31 @@ export class JobWorker implements Wakeable {
     cur.ctl.abort();
   }
 
-  // The work of one attempt.
+  // The work of one attempt, by the job's kind.
   private async execute(cur: Running): Promise<void> {
+    if (cur.job.kind === "match") return this.executeMatch(cur);
+    return this.executeExtraction(cur);
+  }
+
+  // A calendar match (SAA-227 part F): the owner's calendar only, the Google calls
+  // on this job's signal, the apply fenced on its lease (match-calendar.ts). No
+  // match, or no connection any more, is done like a match; a failure retries.
+  private async executeMatch(cur: Running): Promise<void> {
+    const { job, ctl } = cur;
+    const result = await matchRecording(job.recording_id, {
+      signal: ctl.signal,
+      leaseGuard: { jobId: job.id, leaseToken: job.lease_token },
+    });
+    ctl.signal.throwIfAborted();
+    console.log(
+      `jobs: ${job.id} recording=${job.recording_id} ` +
+        (result.matched
+          ? `calendar matched, ${result.inviteeCount} invitee(s): ${describeCalendarMatchApplication(result.application)}`
+          : `calendar not matched (${result.reason})`),
+    );
+  }
+
+  private async executeExtraction(cur: Running): Promise<void> {
     const { job, ctl } = cur;
     const signal = ctl.signal;
     const completion = await readExtractionCompletion(job.recording_id);

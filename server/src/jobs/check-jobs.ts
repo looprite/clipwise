@@ -18,6 +18,12 @@
 //              rows are gone, the re-extract finds nothing to do
 //         c2s  running, but promoted before the answer landed: the re-extract
 //              redoes it with the name
+// Calendar match (SAA-227 part F). Members X and Y have calendars connected, Z
+// has none; Google is answered in this process, by which member's token arrives
+//   m1  Z's capture queues no match job; X's queues one beside extract
+//   m2  X's match uses X's connection only: Y's token is never sent, and the
+//       title and invitees are X's event's
+//   m3  X's capture: match and extract both run to done, the recording ready
 // Worker
 //   a   queued, running, done; the recording ready with its current run; no null
 //       embedding in it
@@ -60,7 +66,7 @@
 
 import express from "express";
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
@@ -72,6 +78,7 @@ import { db, pool, schema } from "../db/index.js";
 import { makeStubEmbedder, makeStubModel, waitFor } from "../extract/stub-model.js";
 import { dropAccount, endPool, makeAccount, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
 import { capturesPost } from "../routes/captures.js";
+import { encrypt } from "../lib/crypto.js";
 import { errorHandler } from "../lib/http.js";
 import { JobWorker, type WorkerOptions } from "./worker.js";
 
@@ -214,7 +221,9 @@ async function main(): Promise<void> {
   const app = express();
   app.use(express.json({ limit: "16mb" }));
   app.use((req, _res, next) => {
-    req.access = { accountId: fx.accountId, memberId: fx.memberId, role: "member", authUserId: "check", email: "check@clipwise.test", scope: ["clipwise:capture"] };
+    // x-check-member: the match cases post as another member of the account.
+    const memberId = typeof req.headers["x-check-member"] === "string" ? req.headers["x-check-member"] : fx.memberId;
+    req.access = { accountId: fx.accountId, memberId, role: "member", authUserId: "check", email: "check@clipwise.test", scope: ["clipwise:capture"] };
     next();
   });
   app.post("/captures", capturesPost);
@@ -222,8 +231,12 @@ async function main(): Promise<void> {
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const post = async (body: unknown): Promise<{ status: number; json: Record<string, unknown> }> => {
-    const res = await fetch(`${base}/captures`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const post = async (body: unknown, asMember?: string): Promise<{ status: number; json: Record<string, unknown> }> => {
+    const res = await fetch(`${base}/captures`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(asMember ? { "x-check-member": asMember } : {}) },
+      body: JSON.stringify(body),
+    });
     return { status: res.status, json: (await res.json()) as Record<string, unknown> };
   };
   const jobsOf = (recordingId: string) => db.select().from(schema.jobs).where(eq(schema.jobs.recordingId, recordingId)).orderBy(schema.jobs.createdAt);
@@ -312,6 +325,90 @@ async function main(): Promise<void> {
       const noNames = await mk("running");
       const rn = await post({ ...noNames.p, identity: answer("2026-10-10T10:05:00Z", null, ["A", "B"]) });
       check("c2 an answer that writes no speaker name (no host name, two guests) queues nothing even while running", rn.json.identityApplied === true && (await reCount(noNames.recordingId)) === 0, JSON.stringify(await speakersOf(noNames.recordingId)));
+    }
+
+    // ---- calendar match ----------------------------------------------------------
+    if (wanted("m1", "m2", "m3")) {
+      await clearJobs();
+      process.env.CALENDAR_TOKEN_ENCRYPTION_KEY ??= randomBytes(32).toString("base64");
+      const memberOf = async (who: string): Promise<string> => {
+        const [m] = await db
+          .insert(schema.accountMembers)
+          .values({ accountId: fx.accountId, email: `${who}-${fx.tag}@clipwise.test`, role: "member", joinedAt: new Date() })
+          .returning({ id: schema.accountMembers.id });
+        return m.id;
+      };
+      const X = fx.memberId;
+      const Y = await memberOf("check-jobs-y");
+      const Z = await memberOf("check-jobs-z");
+      const tokenOf = (who: string) => `check-jobs-${who}-${fx.tag}-access`;
+      const connect = (memberId: string, who: string) =>
+        db.insert(schema.calendarConnections).values({
+          accountId: fx.accountId,
+          memberId,
+          calendarEmail: `${who}-${fx.tag}@clipwise.test`,
+          accessToken: encrypt(tokenOf(who)),
+          refreshToken: encrypt(`check-jobs-${who}-refresh`),
+          tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+          scope: "https://www.googleapis.com/auth/calendar.readonly",
+          searchedCalendarIds: [`${who}-cal-${fx.tag}@clipwise.test`],
+        });
+      await connect(X, "x");
+      await connect(Y, "y");
+
+      // Each member's calendar holds one event 30 s after the payload's start, with
+      // its own title and invitee. Which token arrived is recorded.
+      const tokensSeen: string[] = [];
+      const eventFor: Record<string, { title: string; invitee: string }> = {
+        [tokenOf("x")]: { title: "X's meeting", invitee: `guest-x-${fx.tag}@clipwise.test` },
+        [tokenOf("y")]: { title: "Y's meeting", invitee: `guest-y-${fx.tag}@clipwise.test` },
+      };
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.startsWith("https://www.googleapis.com/calendar/v3/calendars/")) {
+          const token = String(new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /, "");
+          tokensSeen.push(token);
+          const ev = eventFor[token];
+          const items = ev
+            ? [{ id: `evt-${token.slice(11, 12)}`, summary: ev.title, start: { dateTime: "2026-10-10T10:00:30.000Z" }, attendees: [{ email: ev.invitee, displayName: null, responseStatus: "accepted" }] }]
+            : [];
+          return Response.json({ items });
+        }
+        return realFetch(input, init);
+      }) as typeof fetch;
+      try {
+        const kindsOf = async (recordingId: string) => (await jobsOf(recordingId)).map((j) => j.kind).sort();
+        const capZ = String((await post(payload(), Z)).json.recordingId);
+        const capX = String((await post(payload(), X)).json.recordingId);
+        const kz = await kindsOf(capZ);
+        const kx = await kindsOf(capX);
+        check("m1 an owner with no calendar connected gets no match job, though other members have one", JSON.stringify(kz) === JSON.stringify(["extract"]), JSON.stringify(kz));
+        check("m1 an owner with a calendar connected gets a match job beside extract (the control)", JSON.stringify(kx) === JSON.stringify(["extract", "match"]), JSON.stringify(kx));
+
+        await db.delete(schema.jobs).where(eq(schema.jobs.recordingId, capZ));
+        const jobs = await runToEnd(worker(model(), makeStubEmbedder()), capX);
+        const rec = (await pool.query("select status, title from recordings where id = $1", [capX])).rows[0] as { status: string; title: string | null };
+        const inv = (await pool.query("select email from invitees where recording_id = $1 order by email", [capX])).rows.map((r) => r.email as string);
+        const uniqueTokens = [...new Set(tokensSeen)];
+
+        check(
+          "m2 the match uses the owner's connection only: X's token sent, Y's never, and the title and invitee are X's event's",
+          uniqueTokens.length === 1 && uniqueTokens[0] === tokenOf("x") && rec.title === "X's meeting" && JSON.stringify(inv) === JSON.stringify([eventFor[tokenOf("x")].invitee]),
+          JSON.stringify({ tokens: uniqueTokens.map((t) => (t === tokenOf("x") ? "X's" : t === tokenOf("y") ? "Y's" : "other")), title: rec.title, invitees: inv.length }),
+        );
+        check(
+          "m3 match and extract both run to done for one capture, on one attempt each, and the recording is ready",
+          jobs.length === 2 && jobs.every((j) => j.state === "done" && j.attempts === 1) && JSON.stringify(jobs.map((j) => j.kind).sort()) === JSON.stringify(["extract", "match"]) && rec.status === "ready",
+          JSON.stringify({ jobs: jobs.map((j) => [j.kind, j.state, j.attempts, j.errorClass]), status: rec.status }),
+        );
+      } finally {
+        globalThis.fetch = realFetch;
+        // X is the member every other case posts as: with X still connected, every
+        // later capture would queue a match job and send it to the real Google.
+        await db.delete(schema.calendarConnections).where(eq(schema.calendarConnections.accountId, fx.accountId));
+        await clearJobs();
+      }
     }
 
     // ---- a, then c and c-skip on its recording, then g ------------------------

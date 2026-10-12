@@ -26,7 +26,8 @@
 // (metadata.capture.content_hash).
 //
 // The extraction job is queued in the same transaction as the capture, so a stored
-// capture always has one. The end of the request is afterStore(): answer 201, then
+// capture always has one; so is a calendar match job, when the owner has a
+// calendar connected (SAA-227 part F). The end of the request is afterStore(): answer 201, then
 // wake the worker. A repeat creates no job, except that an identity answer or
 // voice names that name a speaker after extraction has started or finished queue
 // a re-extract (jobs/enqueue.ts has the cases).
@@ -216,9 +217,10 @@ type Stored = {
 
 // What happens once a capture is stored and its job committed: the recorder is
 // told, then the worker is woken in this process. Ids only in the log.
-function afterStore(res: Response, stored: Stored, jobId: string | null): void {
+function afterStore(res: Response, stored: Stored, jobId: string | null, matchJobId: string | null): void {
   res.status(201).json({ created: true, ...stored });
   logQueued(jobId, stored.recordingId, "extract");
+  logQueued(matchJobId, stored.recordingId, "match");
   wakeWorker();
 }
 
@@ -522,10 +524,22 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
     }
 
     const jobId = await enqueueJob(tx, { accountId: ctx.accountId, recordingId: recording.id, kind: "extract" });
+    // The calendar match, beside extraction and in no set order with it (SAA-227
+    // decisions 10 and 16), only when the owner has a calendar connected now
+    // (decision 17). A capture stored before they connect is the backlog run's.
+    const [connected] = await tx
+      .select({ id: schema.calendarConnections.id })
+      .from(schema.calendarConnections)
+      .where(eq(schema.calendarConnections.memberId, ctx.memberId))
+      .limit(1);
+    const matchJobId = connected
+      ? await enqueueJob(tx, { accountId: ctx.accountId, recordingId: recording.id, kind: "match" })
+      : null;
 
     return {
       kind: "created" as const,
       jobId,
+      matchJobId,
       stored: {
         recordingId: recording.id,
         transcriptId: transcript.id,
@@ -538,7 +552,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
   });
 
   if (outcome.kind === "created") {
-    afterStore(res, outcome.stored, outcome.jobId);
+    afterStore(res, outcome.stored, outcome.jobId, outcome.matchJobId);
     return;
   }
   res.status(200).json({ created: false, recordingId: outcome.recordingId, identityApplied: outcome.identityApplied, voiceNamesApplied: outcome.voiceNamesApplied });

@@ -5,14 +5,22 @@
 //
 // Every call carries an explicit timeout. voyage.ts's precedent has no
 // story for a hang — a non-2xx throws, but Node's fetch has no default
-// timeout, and this module's caller (match-calendar.ts) now runs FIRST in
-// the pipeline, ahead of transcribe. A stalled request here doesn't fail a
-// capture, it stalls it silently and indefinitely — indistinguishable from
-// the walk-away stall SAA-183 exists to explain. A match that arrives late
-// has no value (the whole point was availability before transcribe), so
-// waiting longer is never the right call.
+// timeout. This module's caller (match-calendar.ts) runs as a match job on
+// the server's worker (SAA-227 part F), one job at a time: a stalled request
+// here would hold the worker, and every capture's jobs behind it, for good
+// (the lease is renewed while the job runs). A call that is slow is failed at
+// the timeout and the job retried, and the job's own signal (shutdown, lost
+// lease) ends it sooner.
 
 export const GOOGLE_API_TIMEOUT_MS = 5000;
+
+// The timeout, joined with the caller's signal when there is one: a match job
+// (jobs/worker.ts) passes its own, so a shutdown or a lost lease aborts a call in
+// flight rather than waiting out the timeout (SAA-227 part F).
+function deadline(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS);
+  return signal ? AbortSignal.any([timeout, signal]) : timeout;
+}
 
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const CALENDAR_BASE = "https://www.googleapis.com/calendar/v3";
@@ -43,12 +51,13 @@ function credentials(): { clientId: string; clientSecret: string } {
 async function postForm(
   url: string,
   body: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(body).toString(),
-    signal: AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS),
+    signal: deadline(signal),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -81,14 +90,18 @@ export async function exchangeCode(code: string, redirectUri: string): Promise<T
   };
 }
 
-export async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
+export async function refreshAccessToken(refreshToken: string, signal?: AbortSignal): Promise<TokenResult> {
   const { clientId, clientSecret } = credentials();
-  const data = await postForm(TOKEN_ENDPOINT, {
-    refresh_token: refreshToken,
-    client_id: clientId,
-    client_secret: clientSecret,
-    grant_type: "refresh_token",
-  });
+  const data = await postForm(
+    TOKEN_ENDPOINT,
+    {
+      refresh_token: refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: "refresh_token",
+    },
+    signal,
+  );
   return {
     accessToken: String(data.access_token),
     refreshToken: null, // a refresh grant doesn't reissue the refresh token
@@ -189,6 +202,7 @@ export async function listEvents(
   calendarId: string,
   timeMin: Date,
   timeMax: Date,
+  signal?: AbortSignal,
 ): Promise<CalendarEvent[]> {
   const url = new URL(`${CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events`);
   url.searchParams.set("timeMin", timeMin.toISOString());
@@ -200,7 +214,7 @@ export async function listEvents(
   url.searchParams.set("singleEvents", "true");
   const res = await fetch(url.toString(), {
     headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS),
+    signal: deadline(signal),
   });
   if (!res.ok) {
     const text = await res.text();
