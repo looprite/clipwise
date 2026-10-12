@@ -210,6 +210,8 @@ clean_exec() {
         # caller's environment before it was cleaned (see cmd_run).
         CLIPWISE_CHECK_CONTROL) export CLIPWISE_CHECK_CONTROL="$CHECK_CONTROL_VALUE" ;;
         AUTH_PASSWORD_ENABLED) export AUTH_PASSWORD_ENABLED=true ;;
+        # As on hosted (fly.toml): only looprite.ai emails become users, and Google is asked for that domain (hd).
+        AUTH_ALLOWED_EMAIL_DOMAIN) export AUTH_ALLOWED_EMAIL_DOMAIN=looprite.ai ;;
         BETTER_AUTH_URL) export BETTER_AUTH_URL="$AUTH_ORIGIN" ;;
         VOYAGE_API_KEY) export VOYAGE_API_KEY="$VOYAGE_VALUE" ;;
         ANTHROPIC_API_KEY) export ANTHROPIC_API_KEY="$ANTHROPIC_VALUE" ;;
@@ -552,7 +554,7 @@ cmd_serve() {
     signin="password and Google sign-in (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET from dev.env)"
   fi
   say "serve: src/index.ts at $AUTH_ORIGIN, with ANTHROPIC_API_KEY and VOYAGE_API_KEY; $signin"
-  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED ANTHROPIC_API_KEY VOYAGE_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET -- \
+  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED AUTH_ALLOWED_EMAIL_DOMAIN ANTHROPIC_API_KEY VOYAGE_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET -- \
     npx --no-install tsx src/index.ts 2>&1 | scrub
   exit "${PIPESTATUS[0]}"
 }
