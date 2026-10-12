@@ -106,30 +106,96 @@ ${inner}
 </html>`;
 }
 
+// /login offers what the instance has turned on: Google (when GOOGLE_CLIENT_ID
+// and GOOGLE_CLIENT_SECRET are set) and the password form (when
+// AUTH_PASSWORD_ENABLED is "true"). With an OAuth request in the query (it
+// carries client_id), a sign-in goes back into that request. Without one, the
+// page shows the signed-in state, and there a signed-in user can link Google
+// to their login: implicit linking is off (auth.ts), so this explicit link is
+// the only way a password login gains Google. Google sends the browser back
+// here, with ?error=… when it went wrong; both Google navigations go only to
+// accounts.google.com.
 export const loginPage: RequestHandler = (_req, res) => {
-  const passwordEnabled = authConfigFromEnv().passwordEnabled;
+  const cfg = authConfigFromEnv();
+  const passwordEnabled = cfg.passwordEnabled;
+  const googleEnabled = cfg.google !== null;
+  const googleButton = `<div class="row"><button class="primary" id="google" type="button">Continue with Google</button></div>`;
+  const passwordForm = `<form id="f" novalidate>
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username" required${googleEnabled ? "" : " autofocus"}>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <div class="row"><button${googleEnabled ? "" : ` class="primary"`} id="go" type="submit">Sign in${googleEnabled ? " with a password" : ""}</button></div>
+</form>`;
+  const signedIn = `<section id="done" hidden>
+<p>Signed in<span id="who"></span>. You can close this tab.</p>
+${googleEnabled ? `<p id="linked" class="muted" hidden>Google is linked to this login.</p>
+<div class="row" id="linkrow" hidden><button id="link" type="button">Link Google</button></div>` : ""}
+</section>`;
   send(res, (nonce) =>
     shell(
       nonce,
       "Sign in to Clipwise",
-      passwordEnabled
-        ? `<h1>Sign in to Clipwise</h1>
+      `<h1>Sign in to Clipwise</h1>
+${
+  passwordEnabled || googleEnabled
+    ? `<section id="start">
 <p class="muted">Sign in to continue connecting.</p>
-<form id="f" novalidate>
-  <label for="email">Email</label>
-  <input id="email" name="email" type="email" autocomplete="username" required autofocus>
-  <label for="password">Password</label>
-  <input id="password" name="password" type="password" autocomplete="current-password" required>
-  <div class="row"><button class="primary" id="go" type="submit">Sign in</button></div>
-</form>
-<div id="msg" role="alert" aria-live="polite"></div>`
-        : `<h1>Sign in to Clipwise</h1>
-<p>Password sign-in is turned off for this instance.</p>
-<p class="muted">Ask the person who runs it how to sign in.</p>`,
-      passwordEnabled
-        ? `
-const f = document.getElementById('f'), msg = document.getElementById('msg'), go = document.getElementById('go');
-f.addEventListener('submit', async (e) => {
+${googleEnabled ? googleButton : ""}
+${passwordEnabled ? passwordForm : ""}
+</section>`
+    : `<p>No sign-in method is turned on for this instance.</p>
+<p class="muted">Ask the person who runs it how to sign in.</p>`
+}
+${signedIn}
+<div id="msg" role="alert" aria-live="polite"></div>`,
+      `
+const q = new URLSearchParams(location.search);
+const oauthRequest = q.has('client_id');
+const msg = document.getElementById('msg');
+const el = (id) => document.getElementById(id);
+if (q.get('error')) msg.textContent = 'That sign-in did not work (' + q.get('error') + ').';
+async function showSignedIn() {
+  if (el('start')) el('start').hidden = true;
+  el('done').hidden = false;
+  try {
+    const s = await (await fetch('/api/auth/get-session', { credentials: 'same-origin' })).json();
+    if (s && s.user && s.user.email) el('who').textContent = ' as ' + s.user.email;
+  } catch {}
+${googleEnabled ? `  try {
+    const accounts = await (await fetch('/api/auth/list-accounts', { credentials: 'same-origin' })).json();
+    const hasGoogle = Array.isArray(accounts) && accounts.some((a) => a.providerId === 'google');
+    el('linked').hidden = !hasGoogle;
+    el('linkrow').hidden = hasGoogle;
+  } catch { el('linkrow').hidden = false; }` : ""}
+}
+async function afterSignIn() {
+  // Back into the OAuth request this page was sent from.
+  if (oauthRequest) { location.assign('/api/auth/oauth2/authorize' + location.search); return; }
+  await showSignedIn();
+}
+${googleEnabled ? `function toGoogle(u) {
+  try { return new URL(u).origin === 'https://accounts.google.com'; } catch { return false; }
+}
+async function google(path, button) {
+  msg.textContent = '';
+  button.disabled = true;
+  const back = oauthRequest ? '/api/auth/oauth2/authorize' + location.search : '/login';
+  try {
+    const res = await fetch(path, {
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'google', callbackURL: back, errorCallbackURL: '/login', disableRedirect: true }),
+    });
+    const body = await res.json().catch(() => null);
+    if (res.ok && body && toGoogle(body.url)) { location.assign(body.url); return; }
+    msg.textContent = 'Google sign-in could not start. Try again.';
+  } catch { msg.textContent = 'Could not reach the server. Try again.'; }
+  button.disabled = false;
+}
+el('google').addEventListener('click', () => google('/api/auth/sign-in/social', el('google')));
+el('link').addEventListener('click', () => google('/api/auth/link-social', el('link')));` : ""}
+const f = el('f'), go = el('go');
+if (f) f.addEventListener('submit', async (e) => {
   e.preventDefault();
   msg.textContent = '';
   go.disabled = true;
@@ -138,11 +204,7 @@ f.addEventListener('submit', async (e) => {
       method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: f.email.value.trim(), password: f.password.value }),
     });
-    if (res.ok) {
-      // Back into the OAuth request this page was sent from.
-      if (location.search) { location.assign('/api/auth/oauth2/authorize' + location.search); return; }
-      msg.style.color = 'inherit'; msg.textContent = 'Signed in. You can close this tab.'; return;
-    }
+    if (res.ok) { msg.style.color = 'inherit'; await afterSignIn(); return; }
     if (res.status === 429) {
       const s = Number(res.headers.get('x-retry-after') || 0);
       msg.textContent = 'Too many attempts. Try again in ' + Math.max(1, Math.ceil(s / 60)) + ' minute(s).';
@@ -151,8 +213,15 @@ f.addEventListener('submit', async (e) => {
     }
   } catch { msg.textContent = 'Could not reach the server. Try again.'; }
   go.disabled = false;
-});`
-        : "",
+});
+// Already signed in and not in the middle of an OAuth request: show that,
+// with the link action. In an OAuth request the sign-in is asked for anyway.
+if (!oauthRequest) {
+  fetch('/api/auth/get-session', { credentials: 'same-origin' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((s) => { if (s && s.user) showSignedIn(); })
+    .catch(() => {});
+}`,
     ),
   );
 };
