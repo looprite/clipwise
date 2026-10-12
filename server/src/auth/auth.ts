@@ -1,6 +1,7 @@
 // Sign-in for the instance: Better Auth as the authorization server for
-// claude.ai and Claude Code (the MCP plugin), plus password sign-in for
-// development and the personal instance. Google sign-in is the next step.
+// claude.ai and Claude Code (the MCP plugin), with Google sign-in (when its
+// client is configured) and password sign-in (when AUTH_PASSWORD_ENABLED is
+// on: development, checks, self-hosting).
 //
 // What this file deliberately does not turn on, each tied to a published
 // Better Auth advisory (checked 2026-10-08, all fixed in the pinned 1.7.7):
