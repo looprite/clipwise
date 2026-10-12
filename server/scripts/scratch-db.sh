@@ -19,6 +19,13 @@
 #                                 line (a drop, truncate or remove, or the "Do you
 #                                 still want to push changes?" prompt), the push
 #                                 again with --force. Otherwise exit 1, unforced
+#   scratch-db.sh push --apply --allow-drop <name>[,<name>]
+#                                 the same, except that a plan line dropping a
+#                                 CHECK or index by one of these exact names
+#                                 (`ALTER TABLE "t" DROP CONSTRAINT "<name>";` or
+#                                 `DROP INDEX "<name>";`) is not a data-loss
+#                                 line. Any other drop, truncate, remove or prompt
+#                                 still refuses
 #   scratch-db.sh push-check [--apply] <file>
 #                                 the same decision on saved drizzle-kit output;
 #                                 touches nothing (for showing the matching)
@@ -614,12 +621,32 @@ push_applied() {
   return 0
 }
 
+# Names given with push --apply --allow-drop, comma-separated; empty, none.
+ALLOW_DROPS=""
+
+# Whether a plan line ($1) is exactly the drop of a constraint or index named in
+# ALLOW_DROPS: the whole line, one of the two shapes, and the name equal to one
+# listed. A constraint or an index holds no rows; anything else is not let through.
+allowed_drop() {
+  local name
+  [ -n "$ALLOW_DROPS" ] || return 1
+  name="$(printf '%s\n' "$1" | sed -nE -e 's/^ALTER TABLE "[A-Za-z0-9_]+" DROP CONSTRAINT "([A-Za-z0-9_]+)";$/\1/p' -e 's/^DROP INDEX "([A-Za-z0-9_]+)";$/\1/p')"
+  [ -n "$name" ] || return 1
+  case ",$ALLOW_DROPS," in
+    *",$name,"*) return 0 ;;
+  esac
+  return 1
+}
+
 # Lines that mean a push would lose data: the prompt that offers to remove or
-# truncate, or any drop / truncate / remove in the plan. Fails closed: a word
-# match is enough.
+# truncate, or any drop / truncate / remove in the plan, less the drops
+# --allow-drop names. Fails closed: a word match is enough.
 push_dataloss_lines() {
-  printf '%s\n' "$1" | grep -iE 'Do you still want to push changes\?' 
-  printf '%s\n' "$1" | grep -iwE 'drop|truncate|remove'
+  local line
+  printf '%s\n' "$1" | grep -iE 'Do you still want to push changes\?'
+  printf '%s\n' "$1" | grep -iwE 'drop|truncate|remove' | while IFS= read -r line; do
+    allowed_drop "$line" || printf '%s\n' "$line"
+  done
   return 0
 }
 
@@ -659,12 +686,22 @@ apply_decision() {
 # kept. Exit 1 if the push did not apply. With --apply, see apply_decision.
 cmd_push() {
   local apply=0
-  case "${1:-}" in
-    "") ;;
-    --apply) apply=1 ;;
-    *) refuse "usage: scratch-db.sh push [--apply]" ;;
-  esac
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1 ;;
+      --allow-drop)
+        shift
+        printf '%s\n' "${1:-}" | grep -qE '^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$' \
+          || refuse "usage: --allow-drop <name>[,<name>] (letters, digits and _ only)"
+        ALLOW_DROPS="$1"
+        ;;
+      *) refuse "usage: scratch-db.sh push [--apply [--allow-drop <name>[,<name>]]]" ;;
+    esac
+    shift
+  done
+  [ -z "$ALLOW_DROPS" ] || [ "$apply" = 1 ] || refuse "--allow-drop goes with --apply"
   scratch_ready
+  [ -z "$ALLOW_DROPS" ] || say "push: drops allowed by name: $ALLOW_DROPS"
   say "push: drizzle-kit push ($MODE branch)"
   local out rc
   out="$(drizzle_push)"
@@ -676,7 +713,7 @@ cmd_push() {
       0) say "push: nothing to apply"; exit 0 ;;
       1) exit 1 ;;
     esac
-    say "push: applying with --force (the statements above, no data-loss line)"
+    say "push: applying with --force (the statements above, no data-loss line${ALLOW_DROPS:+ beyond the drops allowed by name})"
     out="$(drizzle_push --force)"
     printf '%s\n' "$out"
   else
