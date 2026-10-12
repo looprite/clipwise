@@ -6,7 +6,8 @@
 // a meeting. Read from the files the pipeline leaves beside the recordings,
 // because main.js has no database access.
 //
-// States (classifyCapture):
+// States (classifyCapture), for a capture the direct pipeline handled before the
+// cut-over (SAA-227):
 //   ready     ingested (the pipeline record has a db_recording_id and the
 //             ingest step is ok, or skipped because an earlier run already
 //             did it), the transcript has at least one line, and diarize has
@@ -16,8 +17,9 @@
 //   failed    the pipeline failed (or was abandoned) before it finished
 //   pending   still recording or still being processed
 //
-// A capture the database-free pipeline handled (server mode) is ready by its
-// server jobs instead; see classifyServerCapture.
+// Every capture since the cut-over is handled by the capture pipeline
+// (capture-cli.ts) and is ready by its server jobs instead; see
+// classifyServerCapture.
 //
 // lastMeeting picks the newest capture that is ready. A newer capture with no
 // speech or a failed pipeline is skipped. The newest capture still pending is
@@ -69,14 +71,14 @@ function calendarTitle(dir, stem) {
     return doc && typeof doc.title === 'string' && doc.title.trim() ? doc.title.trim() : null;
 }
 
-// A capture the database-free pipeline (server mode, SAA-227 part L) handled:
+// A capture the capture pipeline (capture-cli.ts, SAA-227) handled:
 // what this Mac does ends at the upload, and the rest is the server's. Ready once
 // the capture was sent and its server jobs are done, as its upload-queue entry
 // records them (main.js pollJobStates); the recording id is the server's.
 // Failed when the server refused it, or its jobs failed, are gone, or went
 // unconfirmed past the polling limit ("stale"), or there were none. Pending while
 // it waits to be sent or its jobs run. With no entry, it is pending only while
-// its pipeline was recently active, like a direct capture.
+// its pipeline was recently active, like a pre-cutover capture.
 const SERVER_CAPTURE_FAILED_JOBS = new Set(['failed', 'gone', 'stale', 'none']);
 
 function classifyServerCapture(dir, stem, pipeline, title, now, uploadQueueDir) {
@@ -100,7 +102,7 @@ function classifyServerCapture(dir, stem, pipeline, title, now, uploadQueueDir) 
 }
 
 // -> { state, stem, title, recordingId? }. `opts.uploadQueueDir` is where the
-// upload queue's entries are, for captures the database-free pipeline handled.
+// upload queue's entries are, for captures the capture pipeline handled.
 function classifyCapture(dir, stem, now = Date.now(), opts = {}) {
     const title = calendarTitle(dir, stem);
     const pipeline = readJson(path.join(dir, `pipeline-${stem}.json`));
@@ -153,7 +155,8 @@ function classifyCapture(dir, stem, now = Date.now(), opts = {}) {
 }
 
 // A capture in the trash (SAA-154) has a trashed-<stem>.json marker beside its
-// files, written by server/src/pipeline/trash.ts, which is the only writer. A
+// files. main.js writes it once the server has trashed the capture
+// (runTrashOnServer); before the cut-over, trash.ts wrote it. A
 // trashed capture is absent from every list here: the window's meetings, the
 // tray's Save transcript item, and every other per-capture selection.
 function isTrashed(dir, stem) {

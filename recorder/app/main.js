@@ -168,10 +168,10 @@ const OUTDIR = path.join(SUPPORT_DIR, 'recordings');
 // recorder/app/dist, and never touches this directory.
 const DETECT_STORE_PATH = path.join(SUPPORT_DIR, 'detected-apps.json');
 
-// The capture→moments pipeline. Run through the server's own tsx so the seam
-// always executes current source — a built dist would silently run whatever
-// it was last compiled from. cwd is the server directory so dotenv/config
-// finds server/.env; the recorder never handles a secret itself.
+// The capture pipeline's checkout. Its scripts run through the server's own tsx
+// so the seam always executes current source — a built dist would silently run
+// whatever it was last compiled from. They need no database and no API key: the
+// server ingests and extracts (SAA-227).
 const SERVER_DIR = BUILD_INFO
     ? BUILD_INFO.server_dir
     : path.resolve(RECORDER_DIR, '..', 'server');
@@ -223,29 +223,17 @@ if (BUILD_INFO) {
         `commit ${BUILD_INFO.commit}${BUILD_INFO.dirty ? '+dirty' : ''}`);
 }
 const TSX_BIN = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
-const PIPELINE_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'cli.ts');
-// The database-free capture pipeline (SAA-227), which server mode runs instead.
+// The capture pipeline (SAA-227): transcribe, classify, diarize and naming data,
+// on this Mac and from files only. The upload at its exit hands the rest to the server.
 const CAPTURE_PIPELINE_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'capture-cli.ts');
-// Finds captures whose processing never finished and finishes them (SAA-136).
-// Spawned on launch and after a pipeline run fails. It decides what is
-// outstanding from the database, not from the sidecars in OUTDIR.
-const RECOVER_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'recover.ts');
-// Its counterpart for the database-free pipeline, driven by files (SAA-227).
+// Finds captures whose pipeline never finished, or never started, and finishes
+// them (SAA-136, SAA-227). Spawned on launch and after a pipeline run fails.
+// Driven by the files in OUTDIR.
 const CAPTURE_RECOVER_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'capture-recover.ts');
-// Applies an identity answer to a capture that has already been ingested. The
-// ordinary case never needs it — see startApplyIdentity.
-const APPLY_IDENTITY_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'apply-identity.ts');
-// Applies a voice-naming answer (SAA-195), same reasoning one step later —
-// see startApplyVoiceNames.
-const APPLY_VOICE_NAMES_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'apply-voice-names.ts');
-const SAVE_TRANSCRIPT_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'save-transcript.ts');
-// Trash, restore and permanent delete of a capture (SAA-154). The only writer
-// of both the trashed-<stem>.json marker and recordings.trashed_at.
-const TRASH_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'trash.ts');
 // How often the naming window polls for diarize's naming data while step 2
 // is in its waiting state (SAA-195). Diarize itself is fast (single-digit
-// seconds), but it runs after transcribe and ingest, which together have
-// taken 37-82s on the two captures this was measured against — so what
+// seconds), but it runs after transcribe (transcribe and the old on-Mac ingest
+// together took 37-82s on the two captures this was measured against) — so what
 // this window actually waits through is the whole preceding pipeline, not
 // just diarize. 3s keeps the wait itself cheap without polling pointlessly
 // often.
@@ -274,9 +262,9 @@ const MEETINGS_HTML = path.join(__dirname, 'meetings.html');
 const IDENTITY_REVEAL_GRACE_MS = 400;
 const SELF_PATH = path.join(SUPPORT_DIR, 'identity-self.json');
 
-// The Clipwise server the shadow upload sends each capture to (SAA-227 part B):
-// {"url": "http://localhost:3000"}. No file, or no usable URL in it, means no
-// upload; the direct path runs either way.
+// The Clipwise server each capture is sent to (SAA-227):
+// {"url": "https://<team>.clipwiseapp.com"}. No file, or no usable URL in it,
+// means no upload: the capture stays on this Mac.
 const CAPTURE_SERVER_PATH = path.join(SUPPORT_DIR, 'capture-server.json');
 // The recorder's OAuth client on every instance (server/src/auth/recorder-client.ts):
 // public, PKCE S256, loopback redirect on any port. The capture token it gets is
@@ -317,7 +305,7 @@ let pendingStartTrigger = null;
 let teardownInFlight = false;
 
 // Pipeline state is tracked separately from capture state, not folded into
-// it. Transcription and extraction take minutes and outlive the capture that
+// it. Transcription can take minutes and outlives the capture that
 // triggered them; a single state variable would leave the tray claiming to be
 // busy and refusing to start the next meeting's recording for no reason.
 // { stem, state: 'running' | 'failed', proc }
@@ -940,15 +928,10 @@ function saveTranscriptLabel(meeting) {
     return meeting.state === 'ready' ? base : `${base} (not ready yet)`;
 }
 
-// The file is built into a temporary path, by a server-side script from the same
-// read get_transcript uses (main.js has no database access), or in server mode
-// by the server itself; the person then picks where it goes, in a Save dialog
-// opening on Downloads.
+// The file is built by the server, into a temporary path; the person then picks
+// where it goes, in a Save dialog opening on Downloads.
 function saveTranscript(meeting) {
     if (savingTranscript || meeting.state !== 'ready') return;
-    const server = readCaptureMode().mode === 'server';
-    // The server's copy, beside this one and not waiting on it (step 11 above).
-    if (!server) saveTranscriptFromServer(meeting.stem);
     savingTranscript = true;
     renderTray();
     sendMeetingsData();
@@ -963,43 +946,21 @@ function saveTranscript(meeting) {
         console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: failed — ${why}`);
         notify('Clipwise: transcript not saved', `Couldn't build the transcript for ${meeting.stem}: ${why}`);
     };
-    if (server) {
-        buildTranscriptFromServer(meeting.stem, tmp)
-            .then((meta) => offerTranscriptSave(meeting, tmp, meta), (err) => failed(err.message))
-            .catch((e) => {
-                console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: ${String(e)}`);
-                notify('Clipwise: transcript not saved', String(e.message || e));
-            })
-            .finally(done);
-        return;
-    }
-    execFile(
-        TSX_BIN,
-        [SAVE_TRANSCRIPT_ENTRY, OUTDIR, '--stem', meeting.stem, '--out', tmp],
-        { cwd: SERVER_DIR, env: { ...process.env, PATH: PIPELINE_PATH }, timeout: 60000, maxBuffer: 1 << 20 },
-        async (err, stdout, stderr) => {
-            try {
-                const line = String(stdout || '').split('\n').find(l => l.startsWith('SAVE_TRANSCRIPT_META '));
-                if (err || !line) {
-                    failed(String(stderr || (err && err.message) || 'no result').trim().split('\n').pop());
-                    return;
-                }
-                await offerTranscriptSave(meeting, tmp, JSON.parse(line.slice('SAVE_TRANSCRIPT_META '.length)));
-            } catch (e) {
-                console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: ${String(e)}`);
-                notify('Clipwise: transcript not saved', String(e.message || e));
-            } finally {
-                done();
-            }
-        });
+    buildTranscriptFromServer(meeting.stem, tmp)
+        .then((meta) => offerTranscriptSave(meeting, tmp, meta), (err) => failed(err.message))
+        .catch((e) => {
+            console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: ${String(e)}`);
+            notify('Clipwise: transcript not saved', String(e.message || e));
+        })
+        .finally(done);
 }
 
-// Server mode: the file the server builds for this capture (GET
-// /captures/:captureId/transcript, the same builder as save-transcript.ts), in this
-// Mac's time zone, written to `tmp`. Resolves the same fields save-transcript.ts
-// reports; only the text's SHA-256 is logged.
+// The file the server builds for this capture (GET /captures/:captureId/transcript,
+// the same builder get_transcript reads through), in this Mac's time zone, written
+// to `tmp`. Resolves the file's fields (suggestedFileName, turns,
+// unattributedTurns); only the text's SHA-256 is logged.
 async function buildTranscriptFromServer(stem, tmp) {
-    const server = shadowServer();
+    const server = signedInServer();
     if (!server) throw new Error('not signed in to the capture server');
     const captureId = captureIdFor(stem);
     if (!captureId) throw new Error(`manifest-${stem}.json has no recording_id`);
@@ -1055,36 +1016,10 @@ function sendMeetingsData() {
 
 // --- trash (SAA-154) --------------------------------------------------------
 // Move to trash, Restore and Delete permanently, one or several at once. The
-// work is trash.ts's: this asks, runs it, and reports what it said. One batch
-// at a time.
+// server decides (runTrashOnServer): this asks, sends it, and reports what it
+// said. One batch at a time.
 
 let trashBusy = false;
-
-function runTrashScript(action, stems) {
-    const args = [TRASH_ENTRY, OUTDIR, action];
-    for (const stem of stems) args.push('--stem', stem);
-    return new Promise((resolve) => {
-        execFile(
-            TSX_BIN,
-            args,
-            { cwd: SERVER_DIR, env: { ...process.env, PATH: PIPELINE_PATH }, timeout: 120000, maxBuffer: 1 << 20 },
-            (err, stdout, stderr) => {
-                const results = [];
-                for (const line of String(stdout || '').split('\n')) {
-                    if (!line.startsWith('TRASH_RESULT ')) continue;
-                    try { results.push(JSON.parse(line.slice('TRASH_RESULT '.length))); } catch {}
-                }
-                // A script that never reported (it could not start, or timed out)
-                // is a failure for every stem it was given, not a success.
-                const reported = new Set(results.map((r) => r.stem));
-                const why = String(stderr || (err && err.message) || 'no result').trim().split('\n').pop();
-                for (const stem of stems) {
-                    if (!reported.has(stem)) results.push({ action, stem, ok: false, code: 'error', message: why });
-                }
-                resolve(results);
-            });
-    });
-}
 
 // One line of the delete confirmation: title, who was on the call, when. Most
 // are "Untitled", and calls minutes apart look alike without the names.
@@ -1129,16 +1064,12 @@ async function changeTrash(action, rawStems) {
         if (stems.length === 0) { sendMeetingsData(); return; }
     }
 
-    // In server mode the server decides and this Mac follows it (SAA-227 part L
-    // decision 8). Otherwise the same on the server, beside the direct path and
-    // not waiting on it.
-    const server = readCaptureMode().mode === 'server';
-    if (!server) trashOnServer(action, stems);
+    // The server decides and this Mac follows it (SAA-227 part L decision 8).
     trashBusy = true;
     sendMeetingsData();
     let results;
     try {
-        results = server ? await runTrashOnServer(action, stems) : await runTrashScript(action, stems);
+        results = await runTrashOnServer(action, stems);
     } finally {
         trashBusy = false;
     }
@@ -1148,9 +1079,7 @@ async function changeTrash(action, rawStems) {
     }
     if (failed.length > 0) {
         const verb = { trash: 'moved to trash', restore: 'restored', delete: 'deleted' }[action];
-        if (action === 'trash' && failed.every((r) => r.code === 'db_unreachable')) {
-            notify('Clipwise: not moved to trash', "Couldn't reach the database. Nothing was moved to trash.");
-        } else if (failed.every((r) => r.code === 'server_unreachable')) {
+        if (failed.every((r) => r.code === 'server_unreachable')) {
             notify(`Clipwise: not ${verb}`, `Couldn't reach the Clipwise server. Nothing was ${verb}.`);
         } else {
             notify(`Clipwise: ${failed.length} not ${verb}`, `${failed[0].message || failed[0].code}`);
@@ -1470,8 +1399,8 @@ function renderTray() {
     ];
     if (pipelineNote) items.push({ label: pipelineNote, enabled: false });
     if (permNote) items.push({ label: permNote, enabled: false });
-    // The three most recent uploads, unless the mode is direct.
-    if (readCaptureMode().server) {
+    // The three most recent uploads, while a server is set.
+    if (readCaptureServerUrl()) {
         for (const entry of listUploadQueue().slice(-3).reverse()) items.push({ label: uploadTrayLabel(entry), enabled: false });
     }
     // The live prompt, carried here as well as in the notification. These are
@@ -1496,9 +1425,9 @@ function renderTray() {
               click: () => showConsentWindow(blockedStartFresh() ? 'blocked' : 'launch') },
         );
     }
-    // The sign-in (SAA-227 part B): only in shadow or server mode
+    // The sign-in (SAA-227 part B): only while a server is set
     // and this app holds no capture token for it.
-    const captureServer = readCaptureMode().server;
+    const captureServer = readCaptureServerUrl();
     if (captureServer && !(captureTokens && captureTokens.server === captureServer)) {
         items.push(
             { type: 'separator' },
@@ -2511,21 +2440,18 @@ function autostopFinish(s, cause) {
 // while it is being transcribed. The exit listener still fires for as long as
 // this process is alive, which is what drives the tray.
 //
-// In server mode it is the database-free pipeline (capture-cli.ts), which needs
-// no database and no API key; the upload at its exit hands the rest to the server.
-function startPipeline(stem, opts = {}) {
+// It is the database-free pipeline (capture-cli.ts), which needs no database and
+// no API key; the upload at its exit hands the rest to the server.
+function startPipeline(stem) {
     if (!stem) return;
     const logPath = path.join(OUTDIR, `pipeline-${stem}.log`);
-    const server = readCaptureMode().mode === 'server';
-    const args = [server ? CAPTURE_PIPELINE_ENTRY : PIPELINE_ENTRY, OUTDIR, '--stem', stem];
-    if (opts.force && !server) args.push('--force-extract');
+    const args = [CAPTURE_PIPELINE_ENTRY, OUTDIR, '--stem', stem];
     let fd;
     try {
         fd = fs.openSync(logPath, 'a');
         fs.writeSync(
             fd,
-            `\n[clipwise-recorder] ${new Date().toISOString()} pipeline start ` +
-            `stem=${stem}${server ? ' capture' : ''}${opts.force && !server ? ' force-extract' : ''}\n`,
+            `\n[clipwise-recorder] ${new Date().toISOString()} pipeline start stem=${stem}\n`,
         );
     } catch (err) {
         console.error(`pipeline log ${logPath}: ${String(err)}`);
@@ -2554,8 +2480,8 @@ function startPipeline(stem, opts = {}) {
         }
     });
     proc.once('exit', (code, signal) => {
-        // The upload queue (SAA-227), whatever the exit code: a run that failed
-        // after ingest still left everything the upload reads. Drained after
+        // The upload queue (SAA-227), whatever the exit code: the drain sends a
+        // capture only once its record shows its steps settled. Drained after
         // `pipeline` is updated below, so this capture counts as settled.
         setImmediate(() => drainUploadQueue('pipeline exit'));
         if (!pipeline || pipeline.proc !== proc) return;
@@ -2572,8 +2498,8 @@ function startPipeline(stem, opts = {}) {
             pipeline = { stem, state: 'failed', proc: null };
             // The unattended retry (SAA-136). The tray still shows the failure
             // and still offers Retry, but neither is now the only way back:
-            // this capture is outstanding as far as the database is concerned,
-            // so the recovery pass will pick it up and finish it. Bounded at
+            // this capture's record shows a step that did not finish, so the
+            // recovery pass will pick it up and finish it. Bounded at
             // three attempts per capture with a cooldown between them, so a
             // capture that fails for a reason retrying cannot fix stops on its
             // own rather than spinning.
@@ -2591,8 +2517,8 @@ function startPipeline(stem, opts = {}) {
 // --- recovery (SAA-136) ---------------------------------------------------
 //
 // The unattended half of processing. Runs on launch and after a pipeline run
-// fails, works out what is outstanding by asking the database, and finishes
-// it. Nothing here touches the tray: the point is that a capture whose
+// fails, works out what is outstanding from the capture records on disk
+// (capture-recover.ts), and finishes it. Nothing here touches the tray: the point is that a capture whose
 // processing died gets finished without the user learning it ever happened.
 //
 // Detached and unref'd for the same reason the pipeline is — a recovery that
@@ -2606,21 +2532,19 @@ function startPipeline(stem, opts = {}) {
 // pipeline run failing.
 let recoveryProc = null;
 
-// Only these mean isComplete() is true for a stem right now — see
-// recover.ts's own comment on Attempts.last_action, which is what this is
-// read against.
+// Only these mean the stem is finished right now — see capture-recover.ts's
+// Attempts.last_action, which is what this is read against.
 const RECOVERY_COMPLETE_ACTIONS = new Set(['complete', 'recovered']);
 
 function startRecovery(reason, opts = {}) {
     // One at a time. The pass is sequential and can take minutes on a backlog;
-    // a second one would race it for the same captures and the same API quota.
+    // a second one would race it for the same captures.
     if (recoveryProc) {
         console.error(`[clipwise-recorder] recovery already running — skipping trigger (${reason})`);
         return;
     }
     const logPath = path.join(OUTDIR, 'recovery.log');
-    // In server mode, the file-driven recovery of the database-free pipeline.
-    const entry = readCaptureMode().mode === 'server' ? CAPTURE_RECOVER_ENTRY : RECOVER_ENTRY;
+    const entry = CAPTURE_RECOVER_ENTRY;
     let fd;
     try {
         fd = fs.openSync(logPath, 'a');
@@ -2631,8 +2555,7 @@ function startRecovery(reason, opts = {}) {
     }
     // Recorded here, before spawn, not read from the recovery file's own
     // last_action_at: a pass that aborts before reaching this stem at all
-    // (loadDbState throwing on a network error, SAA-156) leaves the file
-    // holding whatever a PREVIOUS pass wrote. Comparing against this instant
+    // leaves the file holding whatever a PREVIOUS pass wrote. Comparing against this instant
     // is what stops that stale value from being read as "this pass cleared
     // it" (SAA-183).
     const triggeredAtMs = Date.now();
@@ -2712,14 +2635,15 @@ function dismissPipelineFailure() {
     renderTray();
 }
 
-// --- shadow upload (SAA-227 part B) ---------------------------------------
+// --- the capture server (SAA-227) -------------------------------------------
 //
-// Alongside the direct path, not instead of it: the pipeline still ingests and
-// extracts on this Mac, and a finished capture is also sent to POST /captures
-// on the server named in capture-server.json.
+// Each finished capture is sent to POST /captures on the server named in
+// capture-server.json, which ingests and extracts it. With no server set,
+// captures stay on this Mac and nothing is sent.
 
-// The server's origin, or null when the upload is off. Read on each use, so
-// writing or removing the file takes effect without a restart.
+// The server's origin, or null when none is set. Read on each use, so writing or
+// removing the file takes effect without a restart. Any other key in the file
+// (an older `mode`) is ignored.
 function readCaptureServerUrl() {
     try {
         const doc = JSON.parse(fs.readFileSync(CAPTURE_SERVER_PATH, 'utf8'));
@@ -2729,34 +2653,6 @@ function readCaptureServerUrl() {
     } catch {
         return null;
     }
-}
-
-// Which path a capture takes (SAA-227 part L), from capture-server.json's `mode`:
-//   direct  the pipeline ingests and extracts on this Mac; nothing is sent
-//   shadow  direct, and each capture is also sent to the server
-//   server  the database-free pipeline on this Mac; the server does the rest
-// No file means direct. A file with a usable URL and no mode means shadow, which
-// is what such a file meant before the key existed. Shadow and server need the
-// URL; without one, or with a mode that is none of the three, it is direct, and
-// `reason` says why. Read on each use, as the URL is.
-const CAPTURE_MODES = new Set(['direct', 'shadow', 'server']);
-
-function readCaptureMode() {
-    let doc;
-    try {
-        doc = JSON.parse(fs.readFileSync(CAPTURE_SERVER_PATH, 'utf8'));
-    } catch (err) {
-        return { mode: 'direct', server: null, reason: err.code === 'ENOENT' ? 'no capture-server.json' : `capture-server.json unreadable (${err.code || err.name})` };
-    }
-    const server = readCaptureServerUrl();
-    const asked = doc && doc.mode !== undefined ? doc.mode : null;
-    if (asked !== null && !CAPTURE_MODES.has(asked)) {
-        return { mode: 'direct', server: null, reason: `capture-server.json mode ${JSON.stringify(asked)} is not direct, shadow or server` };
-    }
-    if (asked === 'direct') return { mode: 'direct', server: null, reason: 'mode direct' };
-    if (!server) return { mode: 'direct', server: null, reason: `capture-server.json has no usable url${asked ? ` for mode ${asked}` : ''}` };
-    if (asked === null) return { mode: 'shadow', server, reason: 'url and no mode' };
-    return { mode: asked, server, reason: `mode ${asked}` };
 }
 
 // The capture token, once signed in: { server, access, refresh, expiresAt }.
@@ -2769,7 +2665,7 @@ let captureSignIn = null;
 // it redirects back with exchanged for tokens. The person signs in on the
 // server's own login page; this process never sees a password.
 function signInToCaptureServer() {
-    const server = readCaptureMode().server;
+    const server = readCaptureServerUrl();
     if (!server) return;
     // A second click starts over rather than leaving the first listener open.
     if (captureSignIn) captureSignIn.close();
@@ -2905,8 +2801,9 @@ function refreshCaptureToken() {
 async function refreshCaptureTokenOnce() {
     const tokens = captureTokens;
     if (!tokens) return false;
-    // Direct mode calls no server, this one included; the stored tokens are kept.
-    if (readCaptureMode().mode === 'direct') return false;
+    // With no server set, no server is called, this one included; the stored
+    // tokens are kept.
+    if (!readCaptureServerUrl()) return false;
     let reply;
     try {
         reply = await postCaptureTokenForm(tokens.server, {
@@ -3003,8 +2900,8 @@ function buildCapturePayload(stem) {
         return seg;
     });
     return {
-        // Verbatim: manifest ids are uppercase, as are the 107 rows direct
-        // ingest has filed under them.
+        // Verbatim: manifest ids are uppercase, as are the rows filed under
+        // them before the cut-over.
         captureId: manifest.recording_id,
         startedAt: manifest.started_at,
         stem,
@@ -3123,9 +3020,9 @@ function listUploadQueue() {
 
 // Into the queue, or back into it: a new answer sends the whole capture again
 // (the server applies it once). A failed capture stays failed, since a 409 or
-// 422 would be the same again. Only in shadow or server mode.
+// 422 would be the same again. Only while a server is set.
 function enqueueUpload(stem) {
-    if (!readCaptureMode().server) return;
+    if (!readCaptureServerUrl()) return;
     const prior = readUploadEntry(stem);
     if (prior && prior.state === 'failed') return;
     const now = new Date().toISOString();
@@ -3217,7 +3114,7 @@ function drainUploadQueue(reason) {
     uploadDraining = (async () => {
         do {
             uploadDrainAgain = false;
-            const server = readCaptureMode().server;
+            const server = readCaptureServerUrl();
             if (!server) return;
             for (const entry of listUploadQueue()) {
                 if (entry.state !== 'queued' || Date.parse(entry.nextAttemptAt) > Date.now()) continue;
@@ -3287,7 +3184,7 @@ function scheduleJobPoll(delayMs) {
 }
 
 async function pollJobStates() {
-    const server = shadowServer();
+    const server = signedInServer();
     if (!server) return;
     jobPolling = true;
     try {
@@ -3341,7 +3238,7 @@ function scheduleUploadTimer() {
     uploadTimer = setTimeout(() => drainUploadQueue('backoff'), Math.max(0, Math.min(...due) - Date.now()));
 }
 
-// Queues the captures one recovery pass ran to the end (recover.ts writes
+// Queues the captures one recovery pass ran to the end (capture-recover.ts writes
 // last_action "recovered" in recovery-<stem>.json when it does).
 function queueRecoveredCaptures(passStartedAtMs) {
     let names = [];
@@ -3355,15 +3252,12 @@ function queueRecoveredCaptures(passStartedAtMs) {
     }
 }
 
-// --- shadow calls to the capture-scope routes (SAA-227 step 11) ------------
+// --- the capture-scope routes (SAA-227) --------------------------------------
 //
 // Save transcript and trash, restore, delete permanently, over the server's
-// routes for the owner's own captures (routes/capture-scope.ts), as functions L
-// will select. While capture-server.json is set and this app is signed in, the
-// Recent Meetings actions also call them, beside the direct path and never
-// waiting on its result; the direct path still decides what happens on this Mac.
-// The log holds the stem, a status and, for a transcript, the SHA-256 of the
-// server's file, never its text.
+// routes for the owner's own captures (routes/capture-scope.ts). The log holds
+// the stem, a status and, for a transcript, the SHA-256 of the server's file,
+// never its text.
 
 // The capture's id on the server: the manifest's recording_id, as sent.
 function captureIdFor(stem) {
@@ -3397,55 +3291,26 @@ async function captureServerRequest(server, method, route, json) {
     return reply;
 }
 
-// The server, when calls to it should go (shadow or server mode, signed in); null otherwise.
-function shadowServer() {
-    const server = readCaptureMode().server;
+// The server, when calls to it should go (a server set and this app signed in to
+// it); null otherwise.
+function signedInServer() {
+    const server = readCaptureServerUrl();
     return server && captureTokens && captureTokens.server === server ? server : null;
 }
 
-// The saved transcript file the server makes for this capture, dated in this
-// Mac's time zone, so that it is the file save-transcript.ts makes here. Only its
-// SHA-256 is logged.
-async function saveTranscriptFromServer(stem) {
-    const server = shadowServer();
-    const captureId = captureIdFor(stem);
-    if (!server || !captureId) return;
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const reply = await captureServerRequest(server, 'GET', `/captures/${captureId}/transcript?tz=${encodeURIComponent(tz)}`);
-    const text = reply.status === 200 && typeof reply.json.text === 'string' ? reply.json.text : null;
-    const hash = text !== null ? createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex') : null;
-    console.error(`[clipwise-recorder] save-transcript ${stem}: server ${reply.status ?? 'no reply'}${hash ? ` sha256=${hash}` : ` ${reply.json.error || ''}`}`);
-}
-
-// Trash, restore or delete permanently on the server, one capture at a time.
-async function trashOnServer(action, stems) {
-    const server = shadowServer();
-    if (!server) return;
-    for (const stem of stems) {
-        const captureId = captureIdFor(stem);
-        if (!captureId) continue;
-        const reply = action === 'trash'
-            ? await captureServerRequest(server, 'POST', `/captures/${captureId}/trash`, {})
-            : action === 'restore'
-                ? await captureServerRequest(server, 'POST', `/captures/${captureId}/restore`, {})
-                : await captureServerRequest(server, 'DELETE', `/captures/${captureId}`);
-        console.error(`[clipwise-recorder] trash ${action} ${stem}: server ${reply.status ?? 'no reply'}${reply.json.error ? ` ${reply.json.error}` : ''}`);
-    }
-}
-
-// Server mode (SAA-227 part L decision 8): the server owns trash state, and this
-// Mac's marker (trashed-<stem>.json, server/src/lib/trash-marker.ts's format) and
-// files follow what it answered. One result per stem, in runTrashScript's shape.
+// The server owns trash state (SAA-227 part L decision 8), and this Mac's marker
+// (trashed-<stem>.json, server/src/lib/trash-marker.ts's format) and files follow
+// what it answered. One result per stem: { action, stem, ok, code?, message? }.
 //   trash    POST …/trash, then the marker, holding the server's trashedAt
 //   restore  POST …/restore, then the marker goes
-//   delete   DELETE, then the files, the manifest last, then the marker, as
-//            trash.ts orders them: a crash part way leaves a capture still in
-//            the trash, and deleting it again finishes it
+//   delete   DELETE, then the files, the manifest last, then the marker: a crash
+//            part way leaves a capture still in the trash, and deleting it again
+//            finishes it
 // A 404 means the server has no such capture of this member's (never uploaded,
 // or already deleted), and the Mac side still follows. Anything else changes
 // nothing on this Mac.
 async function runTrashOnServer(action, stems) {
-    const server = shadowServer();
+    const server = signedInServer();
     const results = [];
     for (const stem of stems) {
         const fail = (code, message) => results.push({ action, stem, ok: false, code, message });
@@ -3562,78 +3427,6 @@ function writeIdentityAnswer(capture, answer) {
         `self=${JSON.stringify(answer.selfName)} guests=${JSON.stringify(answer.names)} ` +
         `scope=${JSON.stringify(doc.scope)} -> ${finalPath}`);
     return finalPath;
-}
-
-// Spawned on every answer, not only on late ones. Ingest reads the same file
-// itself, so the two overlap by design: this process cannot know whether the
-// detached pipeline has already passed ingest, and an answer that arrives
-// after it would otherwise sit on disk unread. The step no-ops when the
-// recording row does not exist yet and inserts only names it does not already
-// have, so running it always is the cheap half of the choice.
-function startApplyIdentity(stem) {
-    const logPath = path.join(OUTDIR, `identity-${stem}.log`);
-    let fd;
-    try {
-        fd = fs.openSync(logPath, 'a');
-        fs.writeSync(fd, `\n[clipwise-recorder] ${new Date().toISOString()} apply-identity stem=${stem}\n`);
-    } catch (err) {
-        console.error(`identity log ${logPath}: ${String(err)}`);
-        return;
-    }
-    try {
-        const proc = spawn(TSX_BIN, [APPLY_IDENTITY_ENTRY, OUTDIR, '--stem', stem], {
-            cwd: SERVER_DIR,
-            env: { ...process.env, PATH: PIPELINE_PATH },
-            stdio: ['ignore', fd, fd],
-            detached: true,
-        });
-        proc.unref();
-        proc.once('error', (err) => {
-            try {
-                fs.appendFileSync(logPath, `[clipwise-recorder] spawn failed: ${String(err)}\n`);
-            } catch {}
-        });
-    } catch (err) {
-        console.error(`identity: apply spawn failed: ${String(err)}`);
-    } finally {
-        fs.closeSync(fd);
-    }
-}
-
-// Same shape as startApplyIdentity, one step later (SAA-195): spawned on
-// every voice-naming save, not only late ones, because this process cannot
-// know whether recover.ts's sweep would otherwise be the only thing that
-// ever reads the answer. Re-extraction (inside apply-voice-names.ts) makes
-// this slower than startApplyIdentity's spawn — logged to its own file for
-// the same reason.
-function startApplyVoiceNames(stem) {
-    const logPath = path.join(OUTDIR, `voice-names-${stem}.log`);
-    let fd;
-    try {
-        fd = fs.openSync(logPath, 'a');
-        fs.writeSync(fd, `\n[clipwise-recorder] ${new Date().toISOString()} apply-voice-names stem=${stem}\n`);
-    } catch (err) {
-        console.error(`voice-names log ${logPath}: ${String(err)}`);
-        return;
-    }
-    try {
-        const proc = spawn(TSX_BIN, [APPLY_VOICE_NAMES_ENTRY, OUTDIR, '--stem', stem], {
-            cwd: SERVER_DIR,
-            env: { ...process.env, PATH: PIPELINE_PATH },
-            stdio: ['ignore', fd, fd],
-            detached: true,
-        });
-        proc.unref();
-        proc.once('error', (err) => {
-            try {
-                fs.appendFileSync(logPath, `[clipwise-recorder] spawn failed: ${String(err)}\n`);
-            } catch {}
-        });
-    } catch (err) {
-        console.error(`voice-names: apply spawn failed: ${String(err)}`);
-    } finally {
-        fs.closeSync(fd);
-    }
 }
 
 // Asked once, then reused. Kept beside the recordings rather than in the
@@ -3935,9 +3728,7 @@ function registerIdentityIpc() {
             finishIdentityWindow();
             return;
         }
-        // In server mode the answer goes only with the capture; the server
-        // applies it (SAA-227 part L).
-        if (readCaptureMode().mode !== 'server') startApplyIdentity(capture.stem);
+        // The answer goes with the capture; the server applies it (SAA-227).
         uploadAnswer(capture.stem);
         // Answered now, deferred or not (SAA-197) — a marker left from an
         // earlier close no longer describes this capture's state. No-op
@@ -3955,7 +3746,7 @@ function registerIdentityIpc() {
 
         // Step 2: the window stays open. identity.html switches itself to
         // the waiting view; this starts polling for the naming data diarize
-        // (well after transcribe and ingest) will eventually produce.
+        // (after transcribe) will eventually produce.
         identityWindow.step = 2;
         identityWindow.win.webContents.send('identity:show-step2', { guestNames: names });
         beginNamingDataWait(capture);
@@ -3997,7 +3788,6 @@ function registerIdentityIpc() {
             finishIdentityWindow();
             return;
         }
-        if (readCaptureMode().mode !== 'server') startApplyVoiceNames(capture.stem);
         uploadAnswer(capture.stem);
         finishIdentityWindow();
         // The tray's "Name N voices…" item for this stem should disappear
@@ -4563,8 +4353,8 @@ app.whenReady().then(() => {
     // decides what it is a moment later. They only mean something together.
     tray = new Tray(iconFor('stopped'));
     {
-        const { mode, server, reason } = readCaptureMode();
-        console.error(`[clipwise-recorder] capture mode: ${mode}${server ? ` server=${server}` : ''} (${reason})`);
+        const server = readCaptureServerUrl();
+        console.error(`[clipwise-recorder] capture server: ${server || 'none (no usable capture-server.json; captures stay on this Mac)'}`);
     }
     // Before the first render, so the tray knows whether to offer sign-in.
     loadCaptureTokens();
