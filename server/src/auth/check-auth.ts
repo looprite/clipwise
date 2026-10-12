@@ -295,11 +295,13 @@ async function main(): Promise<void> {
 
       const gctx = await googleAuth.$context;
       const googleSource = { method: "oauth", oauth: { providerId: "google" } };
+      let lastRefusal: unknown = null;
       const createdByGoogle = async (email: string): Promise<boolean> => {
         try {
           await gctx.internalAdapter.createUser({ email, name: "Google User", emailVerified: true }, googleSource);
           return true;
-        } catch {
+        } catch (err) {
+          lastRefusal = err;
           return false;
         }
       };
@@ -309,6 +311,15 @@ async function main(): Promise<void> {
       record(
         !(await createdByGoogle(outsideEmail)) && (await userCount(outsideEmail)) === 0,
         "a Google-created user outside the allowed domain is refused at creation, even as a member",
+      );
+      // Better Auth's OAuth callback redirects an error to the sign-in's error
+      // URL only when it carries a code (api/routes/callback.mjs:192); without
+      // one the browser is left on raw JSON.
+      const refusalCode = (lastRefusal as { body?: { code?: unknown } } | null)?.body?.code;
+      record(
+        refusalCode === "SIGN_IN_DENIED", // auth.ts's SIGN_IN_DENIED, spelled out so the control can run old code
+        "the refusal carries a code, so a refused Google sign-in is sent back to /login",
+        `body.code ${String(refusalCode)}`,
       );
 
       const nonMemberEmail = emailFor("google-nonmember");

@@ -78,6 +78,16 @@ export function authConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AuthCon
   };
 }
 
+// The refusal from the user and session hooks below. It carries a code because
+// Better Auth's OAuth callback sends an error to the sign-in's error URL
+// (/login) only when the error has one (better-auth api/routes/callback.mjs:192);
+// without it a refused Google sign-in ends on raw JSON. The code and message
+// reach the address bar, so neither names the reason.
+const SIGN_IN_DENIED = "SIGN_IN_DENIED"; // pages.ts's /login and check-auth match this string
+function signInDenied(): APIError {
+  return new APIError("FORBIDDEN", { code: SIGN_IN_DENIED, message: "This account can't sign in to this Clipwise instance." });
+}
+
 // `control` is for check-access's SAA-244 control only: it builds its own
 // instance without clientRegistrationDefaultScopes, to show that the assertion
 // about dynamic clients and the capture scope fails without it. getAuth() never
@@ -162,9 +172,7 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
               allowedDomain: cfg.allowedDomain,
               member,
             });
-            if (!decision.allowed) {
-              throw new APIError("FORBIDDEN", { message: `sign_in_denied:${decision.reason}` });
-            }
+            if (!decision.allowed) throw signInDenied();
           },
           after: async (user) => {
             const member = await findMemberByEmail(user.email);
@@ -177,9 +185,7 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
           // A removed member's existing login must not mint new sessions.
           before: async (session) => {
             const member = await findMemberByAuthUserId(session.userId);
-            if (!member || member.removedAt) {
-              throw new APIError("FORBIDDEN", { message: "sign_in_denied:not_an_active_member" });
-            }
+            if (!member || member.removedAt) throw signInDenied();
           },
         },
       },
