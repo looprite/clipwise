@@ -84,6 +84,9 @@ export const people = pgTable(
 // than defaulted: a live table full of plaintext long-lived Google refresh
 // tokens is expensive to fix after the fact, and encrypting from the first
 // row is not.
+//
+// Each connection is one member's own (SAA-227 part F): a recording is matched
+// against its owner's connections only, never another member's.
 export const calendarConnections = pgTable(
   "calendar_connections",
   {
@@ -91,6 +94,9 @@ export const calendarConnections = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade" }),
+    memberId: uuid("member_id")
+      .notNull()
+      .references(() => accountMembers.id, { onDelete: "cascade" }),
     provider: varchar("provider", { length: 32 }).notNull().default("google"),
     calendarEmail: varchar("calendar_email", { length: 320 }).notNull(),
     // AES-256-GCM ciphertext (lib/crypto.ts), never the raw token.
@@ -114,8 +120,8 @@ export const calendarConnections = pgTable(
       .default(sql`now()`),
   },
   (t) => ({
-    accountEmailIdx: uniqueIndex("calendar_connections_account_email_idx").on(
-      t.accountId,
+    memberEmailIdx: uniqueIndex("calendar_connections_member_email_idx").on(
+      t.memberId,
       t.calendarEmail,
     ),
   }),
@@ -589,7 +595,9 @@ export const jobs = pgTable(
       .where(sql`${t.state} in ('queued', 'running')`),
     recordingIdx: index("jobs_recording_idx").on(t.recordingId),
     stateIdx: index("jobs_state_run_after_idx").on(t.state, t.runAfter),
-    kindValid: check("jobs_kind_valid", sql`${t.kind} IN ('extract', 're_extract')`),
+    // Renamed from jobs_kind_valid when 'match' was added: drizzle-kit push never
+    // alters a CHECK, it only adds and drops them by name.
+    kindValid: check("jobs_kind_allowed", sql`${t.kind} IN ('extract', 're_extract', 'match')`),
     stateValid: check("jobs_state_valid", sql`${t.state} IN ('queued', 'running', 'done', 'failed')`),
   }),
 );
