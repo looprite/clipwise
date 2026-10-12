@@ -37,7 +37,10 @@
 #                                 ~/.config/clipwise/dev.env so its worker can
 #                                 extract. Password sign-in is on; Google
 #                                 sign-in is on too when dev.env has both
-#                                 GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET
+#                                 GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET,
+#                                 and calendar connect when it also has both
+#                                 GOOGLE_OAUTH_REDIRECT_URI and
+#                                 CALENDAR_TOKEN_ENCRYPTION_KEY
 #   scratch-db.sh cli <args>      src/auth/cli.ts <args> on the scratch branch,
 #                                 after the guard
 #   scratch-db.sh sql < file      psql on the scratch branch after the guard, the
@@ -228,6 +231,8 @@ clean_exec() {
         # Optional: left unset when dev.env does not have it (see cmd_serve).
         GOOGLE_CLIENT_ID) [ -z "${GOOGLE_ID_VALUE:-}" ] || export GOOGLE_CLIENT_ID="$GOOGLE_ID_VALUE" ;;
         GOOGLE_CLIENT_SECRET) [ -z "${GOOGLE_SECRET_VALUE:-}" ] || export GOOGLE_CLIENT_SECRET="$GOOGLE_SECRET_VALUE" ;;
+        GOOGLE_OAUTH_REDIRECT_URI) [ -z "${GOOGLE_REDIRECT_VALUE:-}" ] || export GOOGLE_OAUTH_REDIRECT_URI="$GOOGLE_REDIRECT_VALUE" ;;
+        CALENDAR_TOKEN_ENCRYPTION_KEY) [ -z "${CALENDAR_KEY_VALUE:-}" ] || export CALENDAR_TOKEN_ENCRYPTION_KEY="$CALENDAR_KEY_VALUE" ;;
         PROBE_HOST) export PROBE_HOST="$PROBE_HOST_VALUE" ;;
         *) export "$v=$(envval "$v" "$f")" ;;
       esac
@@ -563,8 +568,17 @@ cmd_serve() {
   if [ -n "$GOOGLE_ID_VALUE" ] && [ -n "$GOOGLE_SECRET_VALUE" ]; then
     signin="password and Google sign-in (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET from dev.env)"
   fi
-  say "serve: src/index.ts at $AUTH_ORIGIN, with ANTHROPIC_API_KEY and VOYAGE_API_KEY; $signin"
-  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED AUTH_ALLOWED_EMAIL_DOMAIN ANTHROPIC_API_KEY VOYAGE_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET -- \
+  # Calendar connect (SAA-227 part F) when dev.env has both: its redirect address
+  # (localhost:3000's callback) and the token key. The key is dev.env's, not one
+  # made per run, so connections stored before a restart still decrypt after it.
+  GOOGLE_REDIRECT_VALUE="$(optional_env_value GOOGLE_OAUTH_REDIRECT_URI)"
+  CALENDAR_KEY_VALUE="$(optional_env_value CALENDAR_TOKEN_ENCRYPTION_KEY)"
+  local calendar="no calendar connect (dev.env has not both GOOGLE_OAUTH_REDIRECT_URI and CALENDAR_TOKEN_ENCRYPTION_KEY)"
+  if [ -n "$GOOGLE_REDIRECT_VALUE" ] && [ -n "$CALENDAR_KEY_VALUE" ]; then
+    calendar="calendar connect (GOOGLE_OAUTH_REDIRECT_URI and CALENDAR_TOKEN_ENCRYPTION_KEY from dev.env)"
+  fi
+  say "serve: src/index.ts at $AUTH_ORIGIN, with ANTHROPIC_API_KEY and VOYAGE_API_KEY; $signin; $calendar"
+  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED AUTH_ALLOWED_EMAIL_DOMAIN ANTHROPIC_API_KEY VOYAGE_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_OAUTH_REDIRECT_URI CALENDAR_TOKEN_ENCRYPTION_KEY -- \
     npx --no-install tsx src/index.ts 2>&1 | scrub
   exit "${PIPESTATUS[0]}"
 }
