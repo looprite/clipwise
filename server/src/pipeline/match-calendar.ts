@@ -46,7 +46,7 @@ export function matchEvent(
   return best;
 }
 
-export type CalendarErrorDetail = { calendar_id: string; status: number | null; message: string };
+export type CalendarErrorDetail = { status: number | null };
 
 export type ResolvedConnection = {
   connection: typeof schema.calendarConnections.$inferSelect;
@@ -144,17 +144,18 @@ export async function fetchEventsForWindow(
   const calendarErrors: CalendarErrorDetail[] = [];
   for (let i = 0; i < settled.length; i++) {
     const outcome = settled[i];
-    const calendarId = searchedCalendarIds[i];
     if (outcome.status === "fulfilled") {
       events.push(...outcome.value.events);
     } else {
+      // The calendar by its place in the list and the status, nothing else: its
+      // id is an address, and the error can carry Google's reply (SAA-227
+      // decisions 11 and 21).
       const err = outcome.reason;
       const status = err instanceof GoogleApiError ? err.status : null;
-      const message = err instanceof Error ? err.message : String(err);
-      calendarErrors.push({ calendar_id: calendarId, status, message });
+      calendarErrors.push({ status });
       process.stdout.write(
-        `calendar-match: WARNING calendar fetch failed calendar=${calendarId} ` +
-          `status=${status ?? "(n/a)"} — ${message}\n`,
+        `calendar-match: WARNING calendar fetch failed (calendar ${i + 1} of ${settled.length}) ` +
+          `status=${status ?? "(n/a)"} ${err instanceof Error ? err.name : "error"}\n`,
       );
     }
   }

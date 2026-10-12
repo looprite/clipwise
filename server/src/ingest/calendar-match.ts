@@ -143,10 +143,9 @@ export async function applyCalendarMatch(
       // itself rather than look like an ordinary, correctly-skipped
       // hand-set title.
       titleSkipReason = "placeholder_mismatch";
+      // Ids only: both titles can carry a meeting's name (SAA-227 decision 11).
       process.stdout.write(
-        `calendar-match: WARNING title placeholder mismatch for recording=${recordingId} — ` +
-          `expected ${JSON.stringify(placeholder)}, found ${JSON.stringify(recording.title)}. ` +
-          "Not overwriting.\n",
+        `calendar-match: WARNING title placeholder mismatch for recording=${recordingId} — not overwriting\n`,
       );
     } else {
       titleSkipReason = "custom_title";
