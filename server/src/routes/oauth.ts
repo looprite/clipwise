@@ -107,16 +107,10 @@ oauthRouter.get(
       throw new HttpError(502, "google_did_not_return_a_refresh_token");
     }
     // calendarList, not the userinfo endpoint — see listCalendars' own
-    // comment. Logged in full and not just the primary entry: this is
-    // also the check for whether the LeadIQ share (jd@leadiq.com) is still
-    // visible through Clipwise's own client, the premise the whole SAA-115
-    // dry run rests on and which has so far only been confirmed through
-    // the chat connector, never this one.
+    // comment. Counts and ids only in the log (SAA-227 decision 11): the
+    // list holds calendar addresses and names.
     const calendars = await listCalendars(tokens.accessToken);
-    console.log(
-      `oauth callback: calendarList for account=${pending.accountId} → ` +
-        JSON.stringify(calendars, null, 2),
-    );
+    console.log(`oauth callback: calendarList for member=${pending.memberId}: ${calendars.length} calendar(s)`);
     const primary = calendars.find((c) => c.primary);
     if (!primary) {
       throw new HttpError(502, "no_primary_calendar_in_calendarlist");
@@ -135,9 +129,8 @@ oauthRouter.get(
     // and any freeBusyReader-only entry are not.
     const selection = selectSearchableCalendars(calendars);
     console.log(
-      `oauth callback: searchable calendars for account=${pending.accountId} → ` +
-        `included=${JSON.stringify(selection.included)}\n` +
-        `  excluded: ${selection.excluded.map((e) => `${e.id} (${e.reason})`).join("; ") || "(none)"}`,
+      `oauth callback: searchable calendars for member=${pending.memberId}: ` +
+        `${selection.included.length} included, ${selection.excluded.length} excluded`,
     );
 
     // UNIQUE(member_id, calendar_email) is exactly the conflict target

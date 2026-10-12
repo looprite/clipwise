@@ -29,14 +29,24 @@ const CALENDAR_BASE = "https://www.googleapis.com/calendar/v3";
 // or 404 once the calendar is gone) apart from a generic failure — that
 // distinction is the whole reason match-calendar.ts needs this rather than
 // a plain Error.
+//
+// The message is which call and the status, never Google's reply: the reply
+// can quote an address or a calendar's name, and the message reaches logs and
+// a job's last_error (SAA-227 decision 21). The reply body is read off and
+// dropped, so the connection is released.
 export class GoogleApiError extends Error {
   constructor(
-    message: string,
+    call: string,
     readonly status: number,
   ) {
-    super(message);
+    super(`google ${call} ${status}`);
     this.name = "GoogleApiError";
   }
+}
+
+async function googleError(call: string, res: Response): Promise<GoogleApiError> {
+  await res.arrayBuffer().catch(() => undefined);
+  return new GoogleApiError(call, res.status);
 }
 
 function credentials(): { clientId: string; clientSecret: string } {
@@ -60,8 +70,7 @@ async function postForm(
     signal: deadline(signal),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new GoogleApiError(`google oauth token ${res.status}: ${text}`, res.status);
+    throw await googleError("oauth token", res);
   }
   return res.json() as Promise<Record<string, unknown>>;
 }
@@ -130,8 +139,7 @@ export async function listCalendars(accessToken: string): Promise<CalendarListEn
     signal: AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new GoogleApiError(`google calendarList ${res.status}: ${text}`, res.status);
+    throw await googleError("calendarList", res);
   }
   const data = (await res.json()) as { items?: CalendarListEntry[] };
   return data.items ?? [];
@@ -217,8 +225,7 @@ export async function listEvents(
     signal: deadline(signal),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new GoogleApiError(`google calendar events.list ${res.status}: ${text}`, res.status);
+    throw await googleError("calendar events.list", res);
   }
   const data = (await res.json()) as { items?: CalendarEvent[] };
   return data.items ?? [];
