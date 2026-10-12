@@ -28,7 +28,9 @@
 #                                 at http://localhost:3000, after the guard, with
 #                                 ANTHROPIC_API_KEY and VOYAGE_API_KEY from
 #                                 ~/.config/clipwise/dev.env so its worker can
-#                                 extract
+#                                 extract. Password sign-in is on; Google
+#                                 sign-in is on too when dev.env has both
+#                                 GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET
 #   scratch-db.sh cli <args>      src/auth/cli.ts <args> on the scratch branch,
 #                                 after the guard
 #   scratch-db.sh sql < file      psql on the scratch branch after the guard, the
@@ -40,9 +42,9 @@
 # doing anything, 3 the guard refused a host.
 #
 # Secrets stay in the settings file (mode 600). Nothing here prints the
-# connection string, the admin password, the auth secret, VOYAGE_API_KEY or
-# ANTHROPIC_API_KEY, and none of them goes on a command line (where `ps` would
-# show it).
+# connection string, the admin password, the auth secret, VOYAGE_API_KEY,
+# ANTHROPIC_API_KEY or GOOGLE_CLIENT_SECRET, and none of them goes on a command
+# line (where `ps` would show it).
 #
 # Every check runs from a cleaned environment: only the variables it needs, and
 # DOTENV_CONFIG_PATH pointing at an empty file so nothing from server/.env loads
@@ -69,7 +71,7 @@ refuse() { say "scratch-db: refused: $*" >&2; exit 2; }
 fail() { say "scratch-db: failed: $*" >&2; exit 1; }
 
 # Whatever a tool says on a failure goes through this first.
-scrub() { sed -E 's#postgres(ql)?://[^[:space:]"]+#<url>#g; s#npg_[A-Za-z0-9]+#<secret>#g; s#sk-ant-[A-Za-z0-9_-]+#<secret>#g'; }
+scrub() { sed -E 's#postgres(ql)?://[^[:space:]"]+#<url>#g; s#npg_[A-Za-z0-9]+#<secret>#g; s#sk-ant-[A-Za-z0-9_-]+#<secret>#g; s#GOCSPX-[A-Za-z0-9_-]+#<secret>#g'; }
 
 neon() { neonctl "$@" --project-id "$PROJECT_ID" 2>&1; }
 
@@ -211,6 +213,9 @@ clean_exec() {
         BETTER_AUTH_URL) export BETTER_AUTH_URL="$AUTH_ORIGIN" ;;
         VOYAGE_API_KEY) export VOYAGE_API_KEY="$VOYAGE_VALUE" ;;
         ANTHROPIC_API_KEY) export ANTHROPIC_API_KEY="$ANTHROPIC_VALUE" ;;
+        # Optional: left unset when dev.env does not have it (see cmd_serve).
+        GOOGLE_CLIENT_ID) [ -z "${GOOGLE_ID_VALUE:-}" ] || export GOOGLE_CLIENT_ID="$GOOGLE_ID_VALUE" ;;
+        GOOGLE_CLIENT_SECRET) [ -z "${GOOGLE_SECRET_VALUE:-}" ] || export GOOGLE_CLIENT_SECRET="$GOOGLE_SECRET_VALUE" ;;
         PROBE_HOST) export PROBE_HOST="$PROBE_HOST_VALUE" ;;
         *) export "$v=$(envval "$v" "$f")" ;;
       esac
@@ -523,14 +528,31 @@ real_env_value() {
   printf '%s' "$v"
 }
 
+# The same read for a key that may be absent: empty output, no refusal.
+optional_env_value() {
+  local v
+  [ -f "$DEV_ENV" ] || return 0
+  v="$(envval "$1" "$DEV_ENV")"
+  v="${v#\"}"; v="${v%\"}"; v="${v#\'}"; v="${v%\'}"
+  printf '%s' "$v"
+}
+
 cmd_serve() {
   [ $# -eq 0 ] || refuse "usage: scratch-db.sh serve"
   scratch_ready
   # The worker extracts and embeds, so the server gets the two keys the Mac uses.
   ANTHROPIC_VALUE="$(real_env_value ANTHROPIC_API_KEY)" || exit 2
   VOYAGE_VALUE="$(real_env_value VOYAGE_API_KEY)" || exit 2
-  say "serve: src/index.ts at $AUTH_ORIGIN, with ANTHROPIC_API_KEY and VOYAGE_API_KEY"
-  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED ANTHROPIC_API_KEY VOYAGE_API_KEY -- \
+  # Google sign-in when dev.env has both; the server turns it on only with both
+  # (src/auth/auth.ts). Without them it serves password sign-in only.
+  GOOGLE_ID_VALUE="$(optional_env_value GOOGLE_CLIENT_ID)"
+  GOOGLE_SECRET_VALUE="$(optional_env_value GOOGLE_CLIENT_SECRET)"
+  local signin="password sign-in only (dev.env has not both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)"
+  if [ -n "$GOOGLE_ID_VALUE" ] && [ -n "$GOOGLE_SECRET_VALUE" ]; then
+    signin="password and Google sign-in (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET from dev.env)"
+  fi
+  say "serve: src/index.ts at $AUTH_ORIGIN, with ANTHROPIC_API_KEY and VOYAGE_API_KEY; $signin"
+  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED ANTHROPIC_API_KEY VOYAGE_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET -- \
     npx --no-install tsx src/index.ts 2>&1 | scrub
   exit "${PIPESTATUS[0]}"
 }

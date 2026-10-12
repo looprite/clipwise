@@ -15,8 +15,9 @@
 //
 // A password is only ever read from the environment variable named by
 // --password-env, never from argv (which lands in shell history and `ps`).
-// Without one the member has no password login and signs in another way
-// (Google, once it is enabled).
+// Without one the member has no password login and signs in with Google (when
+// the instance has GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET set); their
+// first Google sign-in creates the login.
 //
 // Exit code 0 on success, 1 on a refusal or failure; messages say which.
 
