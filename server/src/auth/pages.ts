@@ -157,7 +157,13 @@ const q = new URLSearchParams(location.search);
 const oauthRequest = q.has('client_id');
 const msg = document.getElementById('msg');
 const el = (id) => document.getElementById(id);
-if (q.get('error')) msg.textContent = 'That sign-in did not work (' + q.get('error') + ').';
+// Better Auth sends a refused or failed Google sign-in back here with ?error=.
+// The page says what it means in words and never shows the code.
+if (q.get('error')) {
+  msg.textContent = q.get('error') === 'SIGN_IN_DENIED'
+    ? "This account isn't a member of this Clipwise instance. Ask the person who runs it to add you."
+    : "That sign-in didn't work. Try again.";
+}
 async function showSignedIn() {
   if (el('start')) el('start').hidden = true;
   el('done').hidden = false;
