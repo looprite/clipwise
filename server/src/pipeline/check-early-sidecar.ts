@@ -1,4 +1,4 @@
-// Checks for diarize.ts's use of the sidecar transcribe.py leaves after its
+// Checks for capture-cli.ts's use of the sidecar transcribe.py leaves after its
 // early voice-separation run (SAA-239): a sidecar is used only when it says
 // the binary exited 0 and the two wavs still have the size and mtime it
 // recorded; anything else runs the binary as before. No database and no
@@ -194,16 +194,16 @@ const CASES: Case[] = [
     },
   },
   {
-    name: "diarize.ts: the binary is only reached through sidecarForCapture; voice-clips.ts (where the sidecar readers live) reads mtime as bigint nanoseconds",
+    name: "capture-cli.ts: the binary is only reached through sidecarForCapture; voice-clips.ts (where the sidecar readers live) reads mtime as bigint nanoseconds",
     run: () => {
       const read = (file: string) => readFileSync(resolve(import.meta.dirname, "..", "..", "src", "pipeline", file), "utf8");
-      const src = read("diarize.ts");
+      const src = read("capture-cli.ts");
       const calls = src.split("execFileSync(diarizeBin").length - 1;
-      const within = /sidecarForCapture\([^)]*\(\) => \{[\s\S]*?execFileSync\(diarizeBin/.test(src);
+      const within = /sidecarForCapture\([\s\S]*?\(\) => \{[\s\S]*?execFileSync\(diarizeBin/.test(src);
       if (calls !== 1 || !within) return `execFileSync(diarizeBin appears ${calls} time(s); inside sidecarForCapture callback: ${within}`;
       const readers = read("voice-clips.ts");
       if (!/statSync\(path, \{ bigint: true \}\)/.test(readers) || !/String\(st\.mtimeNs\)/.test(readers)) return "no bigint mtimeNs comparison in voice-clips.ts";
-      if (/mtimeMs/.test(src) || /mtimeMs/.test(readers)) return "diarize.ts or voice-clips.ts reads mtimeMs";
+      if (/mtimeMs/.test(src) || /mtimeMs/.test(readers)) return "capture-cli.ts or voice-clips.ts reads mtimeMs";
       return null;
     },
   },

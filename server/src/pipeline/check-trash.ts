@@ -1,19 +1,20 @@
-// Regression check for trash, restore and permanent delete (SAA-154).
+// Regression check for trash, restore and permanent delete (SAA-154): the trash
+// marker's file handling (lib/trash-marker.ts), what the routers hide while a
+// recording is trashed, and what a permanent delete takes with it. Trash state is
+// set on the column directly; the server's capture-scope routes that set it for
+// the recorder are check-access 18d and 18e (SAA-227). The cases for the direct
+// path's trash, recovery and save-transcript scripts went with those scripts.
 //
 // Files are made-up captures in a temporary folder, never the live recordings
-// folder (recovery scans it). Rows are throwaway, in a throwaway account that
-// is deleted at the end, so Claude's real account never sees them. The real
-// routers (moments, transcript, recordings) are mounted in-process and called
-// over HTTP, so a missing join or a wrong filter fails here rather than on a
-// live search. Recovery is run for real against the temporary folder, but
-// only ever with every unfinished capture trashed (or in a dry run), so a
-// real pass never starts a pipeline, and the check asserts it did not.
+// folder. Rows are throwaway, in a throwaway account that is deleted at the end,
+// so Claude's real account never sees them. The real routers (moments,
+// transcript, recordings) are mounted in-process and called over HTTP, so a
+// missing join or a wrong filter fails here rather than on a live search.
 //
 // Usage:
 //   tsx src/pipeline/check-trash.ts
 
 import express from "express";
-import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -29,8 +30,6 @@ import { captureFiles, isTrashed, markerPath, readMarker, trashedStems, writeMar
 import { momentsRouter } from "../routes/moments.js";
 import { recordingsRouter } from "../routes/recordings.js";
 import { transcriptRouter } from "../routes/transcript.js";
-import { runRecoveryPass } from "./recover.js";
-import { deleteCapture, reconcileTrash, restoreCapture, trashCapture, TrashError } from "./trash.js";
 
 let failed = 0;
 function check(name: string, ok: boolean, detail = ""): void {
@@ -61,7 +60,7 @@ function writeFiles(c: Cap): void {
   w(`mic-${c.stem}.log`, "log");
   w(`voice-clip-${c.stem}-1-1.wav`, "RIFF");
 }
-const FILES_PER_CAPTURE = 7; // no identity or voice-names answer: recovery must have nothing to apply
+const FILES_PER_CAPTURE = 7;
 
 async function makeRow(accountId: string, key: string, n: number, status: string): Promise<void> {
   const stem = mkStem(n);
@@ -185,8 +184,9 @@ async function main(): Promise<void> {
     (await get(`/accounts/${acc}/moments?semantic_q=nothing&limit=5`)).status;
   const indexIds = async (): Promise<string[]> =>
     ((await get(`/accounts/${acc}/moments?index=true&limit=50`)).body.recordings ?? []).map((r: any) => r.id);
-  const rowsOfThisRun = async (): Promise<number> =>
-    (await db.select({ id: schema.recordings.id }).from(schema.recordings).where(like(schema.recordings.sourceId, `${ROW_PREFIX}%`))).length;
+  const setTrashed = async (rowId: string, at: Date | null): Promise<void> => {
+    await db.update(schema.recordings).set({ trashedAt: at }).where(eq(schema.recordings.id, rowId));
+  };
 
   try {
     await makeRow(acc, "a", 1, TERMINAL_STATUS);
@@ -206,9 +206,10 @@ async function main(): Promise<void> {
     check("the semantic branch runs (200) with the new condition in its SQL", (await semanticStatus()) === 200, String(await semanticStatus()));
 
     // ---- trash ---------------------------------------------------------------
-    const t = await trashCapture(dir, A.stem);
-    const [rowA] = await db.select({ t: schema.recordings.trashedAt }).from(schema.recordings).where(eq(schema.recordings.id, A.rowId));
-    check("trash: marker written, one row marked", isTrashed(dir, A.stem) && t.rows === 1 && rowA.t !== null);
+    // The column is what the routers read. The recorder sets it through the
+    // server's capture-scope route (check-access 18d and 18e); here it is set
+    // directly, so these cases test only what the routers hide.
+    await setTrashed(A.rowId, new Date());
     check("trash: search by a's own term finds nothing", (await search(A.term)).length === 0);
     check("trash: the shared term finds b and c but not a", (await search(SHARED)).sort().join() === [B.rowId, C.rowId].sort().join());
     check("trash: get_transcript is a 404", (await get(`/recordings/${A.rowId}/transcript`)).status === 404);
@@ -217,13 +218,10 @@ async function main(): Promise<void> {
     check("trash: the recording list and GET /:id omit a",
       !(await get(`/accounts/${acc}/recordings`)).body.recordings.some((r: any) => r.id === A.rowId) &&
         (await get(`/accounts/${acc}/recordings/${A.rowId}`)).status === 404);
-    const saved = spawnSync("npx", ["tsx", "src/pipeline/save-transcript.ts", "--recording", A.rowId, "--out", join(dir, "out.txt")], { encoding: "utf8" });
-    check("trash: Save transcript's script refuses a trashed recording", saved.status !== 0 && /not found/.test(saved.stderr), `${saved.status} ${saved.stderr}`);
     check("trash: the semantic branch still runs", (await semanticStatus()) === 200);
 
     // ---- restore -------------------------------------------------------------
-    await restoreCapture(dir, A.stem);
-    check("restore: marker gone, column cleared", !isTrashed(dir, A.stem) && (await db.select({ t: schema.recordings.trashedAt }).from(schema.recordings).where(eq(schema.recordings.id, A.rowId)))[0].t === null);
+    await setTrashed(A.rowId, null);
     check("restore: search, transcript, moment, index and list all find a again",
       (await search(A.term)).join() === A.rowId &&
         (await get(`/recordings/${A.rowId}/transcript`)).status === 200 &&
@@ -231,77 +229,17 @@ async function main(): Promise<void> {
         (await indexIds()).includes(A.rowId) &&
         (await get(`/accounts/${acc}/recordings/${A.rowId}`)).status === 200);
 
-    // ---- the database is unreachable: refuse, leave nothing -----------------
-    const offline = spawnSync("npx", ["tsx", "src/pipeline/trash.ts", dir, "trash", "--stem", B.stem], {
-      encoding: "utf8",
-      env: { ...process.env, DATABASE_URL: "postgres://nobody:nothing@127.0.0.1:1/none" },
-    });
-    const line = (offline.stdout.split("\n").find((l) => l.startsWith("TRASH_RESULT ")) ?? "").slice("TRASH_RESULT ".length);
-    const res = line ? JSON.parse(line) : null;
-    check("offline: trash fails with db_unreachable and exit 1", offline.status === 1 && res?.ok === false && res?.code === "db_unreachable", offline.stdout + offline.stderr);
-    check("offline: the marker was removed, nothing moved to trash", !isTrashed(dir, B.stem));
-    check("offline: b is still found", (await search(B.term)).join() === B.rowId);
-
-    // ---- reconcile: the marker is the intent, the column follows ------------
-    writeMarker(dir, { stem: B.stem, source_id: B.sourceId, trashed_at: new Date().toISOString() });
-    check("crash between marker and column: b is still found (they disagree)", (await search(B.term)).length === 1);
-    const r1 = await reconcileTrash(dir);
-    check("reconcile: marker present -> column set, b hidden", r1.marked >= 1 && (await search(B.term)).length === 0);
-    rmSync(markerPath(dir, B.stem));
-    const r2 = await reconcileTrash(dir);
-    check("reconcile: marker gone -> column cleared, b found again", r2.cleared >= 1 && (await search(B.term)).join() === B.rowId);
-
-    // ---- recovery skips a trashed capture ------------------------------------
-    // d and e are unfinished (status pending): an untrashed one is work for
-    // recovery. Real passes below run only while both are trashed.
-    await makeRow(acc, "d", 4, "pending");
-    await makeRow(acc, "e", 5, "pending");
-    const D = caps.d, E = caps.e;
-    const dry = await runRecoveryPass({ dir, dryRun: true });
-    const dryStems = dry.processing.map((o) => o.stem);
-    check("positive control: unfinished, untrashed captures are picked up by recovery (dry run)", dryStems.includes(D.stem) && dryStems.includes(E.stem), dryStems.join());
-    await trashCapture(dir, D.stem);
-    await trashCapture(dir, E.stem);
-    await trashCapture(dir, C.stem);
-    const pass = await runRecoveryPass({ dir });
-    const passStems = pass.processing.map((o) => o.stem);
-    check("recovery: trashed captures (complete or not) are not in the pass at all", ![C.stem, D.stem, E.stem].some((s) => passStems.includes(s)), passStems.join());
-    check("recovery: a complete, untrashed capture is still reported", passStems.includes(A.stem) && passStems.includes(B.stem), passStems.join());
-    check("recovery: a trashed unfinished capture got no attempt file", !existsSync(join(dir, `recovery-${D.stem}.json`)));
-    const dry2 = await runRecoveryPass({ dir, dryRun: true });
-    check("recovery: still skipped on a second pass", ![C.stem, D.stem, E.stem].some((s) => dry2.processing.map((o) => o.stem).includes(s)));
-    await restoreCapture(dir, D.stem);
-    await restoreCapture(dir, E.stem);
-    await restoreCapture(dir, C.stem);
-    const dry3 = await runRecoveryPass({ dir, dryRun: true });
-    check("restore puts an unfinished capture back in recovery's sight (dry run)", dry3.processing.map((o) => o.stem).includes(D.stem));
-    // Back in the trash before any further real pass: a real pass over an
-    // unfinished, untrashed capture would start a pipeline on made-up files.
-    await trashCapture(dir, D.stem);
-    await trashCapture(dir, E.stem);
-
     // ---- permanent delete ----------------------------------------------------
-    let refused: unknown = null;
-    try {
-      await deleteCapture(dir, C.stem);
-    } catch (e) {
-      refused = e;
-    }
-    check("delete refuses a capture that is not in the trash, and removes nothing",
-      refused instanceof TrashError && refused.code === "not_trashed" && captureFiles(dir, C.stem).length === FILES_PER_CAPTURE && (await counts([C.rowId])).recordings === 1,
-      String(refused));
+    // Only from the trash, as the server's DELETE route does; the row is deleted
+    // directly and everything under it must go with it.
     const before = await counts([A.rowId, B.rowId]);
     check("before delete: a and b have rows, transcripts, segments, moments, speakers",
       before.recordings === 2 && before.transcripts === 2 && before.segments === 4 && before.moments === 2 && before.speakers === 2, JSON.stringify(before));
-
-    await trashCapture(dir, A.stem);
-    await trashCapture(dir, B.stem);
-    const out = execFileSync("npx", ["tsx", "src/pipeline/trash.ts", dir, "delete", "--stem", A.stem, "--stem", B.stem], { encoding: "utf8" });
-    const results = out.split("\n").filter((l) => l.startsWith("TRASH_RESULT ")).map((l) => JSON.parse(l.slice("TRASH_RESULT ".length)));
-    check("delete two in one action: both report ok, one row each", results.length === 2 && results.every((r) => r.ok && r.rowsDeleted === 1), out);
+    await setTrashed(A.rowId, new Date());
+    await setTrashed(B.rowId, new Date());
+    await db.delete(schema.recordings).where(inArray(schema.recordings.id, [A.rowId, B.rowId]));
     const after = await counts([A.rowId, B.rowId]);
     check("delete: rows, transcripts, segments, moments and speakers are all gone (counted directly)", Object.values(after).every((n) => n === 0), JSON.stringify(after));
-    check("delete: no capture files and no marker remain for a or b", captureFiles(dir, A.stem).length === 0 && captureFiles(dir, B.stem).length === 0);
     const orphans = await db.execute(sql`
       select
         (select count(*)::int from transcripts t left join recordings r on r.id = t.recording_id where r.id is null) as orphan_transcripts,
@@ -315,46 +253,6 @@ async function main(): Promise<void> {
     check("blast radius: c's row, transcript, segments, moment and speaker are intact", cc.recordings === 1 && cc.transcripts === 1 && cc.segments === 2 && cc.moments === 1 && cc.speakers === 1, JSON.stringify(cc));
     check("blast radius: c's files are intact", captureFiles(dir, C.stem).length === FILES_PER_CAPTURE, String(captureFiles(dir, C.stem).length));
     check("blast radius: search still finds c", (await search(C.term)).join() === C.rowId && (await search(SHARED)).includes(C.rowId));
-
-    // ---- stays gone after a "relaunch" ---------------------------------------
-    // c was restored above and is complete; d and e are trashed again. No
-    // unfinished, untrashed capture exists, so this real pass has nothing to
-    // run — and the assertions below prove it started nothing.
-    const rowsBefore = await rowsOfThisRun();
-    const relaunch = await runRecoveryPass({ dir });
-    const relaunchStems = relaunch.processing.map((p) => p.stem);
-    const back = await db.select({ id: schema.recordings.id }).from(schema.recordings).where(inArray(schema.recordings.sourceId, [A.sourceId, B.sourceId]));
-    check("relaunch: recovery's pass does not mention a or b, and no row for either came back",
-      ![A.stem, B.stem].some((s) => relaunchStems.includes(s)) && back.length === 0, `${back.length} rows`);
-    check("relaunch: the pass started no pipeline (every outcome is 'complete')",
-      relaunch.processing.length > 0 && relaunch.processing.every((p) => p.action === "complete"),
-      JSON.stringify(relaunch.processing.map((p) => [p.stem, p.action])));
-    check("relaunch: no attempt file was written for any capture",
-      readdirSync(dir).filter((f) => f.startsWith("recovery-")).length === 0, readdirSync(dir).filter((f) => f.startsWith("recovery-")).join());
-    check("relaunch: no pipeline sidecar or transcript was created or changed beyond the made-up ones",
-      readdirSync(dir).filter((f) => f.startsWith("pipeline-")).length === 3, readdirSync(dir).filter((f) => f.startsWith("pipeline-")).join());
-    check("relaunch: no row appeared for this run (the count of this run's rows is unchanged)", (await rowsOfThisRun()) === rowsBefore, `${rowsBefore} -> ${await rowsOfThisRun()}`);
-
-    // Positive control for the 09-20 failure: a row deleted but files left
-    // behind IS seen by recovery as work. This is what the order prevents.
-    // Dry run only: a real pass would re-ingest the made-up files.
-    await makeRow(acc, "r", 6, TERMINAL_STATUS);
-    const R = caps.r;
-    await db.delete(schema.recordings).where(eq(schema.recordings.id, R.rowId));
-    const resurrect = await runRecoveryPass({ dir, dryRun: true });
-    check("positive control: a row deleted while its files remain is picked up to be re-ingested (09-20)",
-      resurrect.processing.some((p) => p.stem === R.stem && p.action === "skipped"), JSON.stringify(resurrect.processing.map((p) => [p.stem, p.action])));
-    for (const f of captureFiles(dir, R.stem)) rmSync(join(dir, f));
-
-    // ---- a crash partway through a delete ------------------------------------
-    await makeRow(acc, "x", 7, TERMINAL_STATUS);
-    const X = caps.x;
-    await trashCapture(dir, X.stem);
-    for (const f of captureFiles(dir, X.stem)) if (f !== `trashed-${X.stem}.json`) rmSync(join(dir, f)); // files and manifest gone, row and marker remain
-    await reconcileTrash(dir);
-    check("crash mid-delete: still trashed and hidden from search", isTrashed(dir, X.stem) && (await search(X.term)).length === 0);
-    const gone = await deleteCapture(dir, X.stem);
-    check("crash mid-delete: deleting again finishes it (row gone, marker gone)", gone.rowsDeleted === 1 && !isTrashed(dir, X.stem) && (await counts([X.rowId])).recordings === 0, JSON.stringify(gone));
   } finally {
     // Recordings first: owner_member_id restricts deleting a member that still
     // owns one, and the account's cascade does not promise an order.
