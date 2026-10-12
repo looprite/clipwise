@@ -209,6 +209,9 @@ clean_exec() {
         # A check's control mode (check-access, check-pool-close), taken from the
         # caller's environment before it was cleaned (see cmd_run).
         CLIPWISE_CHECK_CONTROL) export CLIPWISE_CHECK_CONTROL="$CHECK_CONTROL_VALUE" ;;
+        # A password for `cli ... --password-env CLIPWISE_CLI_PASSWORD`, taken from
+        # the caller's environment (see cmd_cli); left unset when not given.
+        CLIPWISE_CLI_PASSWORD) [ -z "${CLI_PASSWORD_VALUE:-}" ] || export CLIPWISE_CLI_PASSWORD="$CLI_PASSWORD_VALUE" ;;
         AUTH_PASSWORD_ENABLED) export AUTH_PASSWORD_ENABLED=true ;;
         # As on hosted (fly.toml): only looprite.ai emails become users, and Google is asked for that domain (hd).
         AUTH_ALLOWED_EMAIL_DOMAIN) export AUTH_ALLOWED_EMAIL_DOMAIN=looprite.ai ;;
@@ -563,7 +566,10 @@ cmd_cli() {
   [ $# -gt 0 ] || refuse "usage: scratch-db.sh cli <command> (see src/auth/cli.ts)"
   scratch_ready
   say "cli: src/auth/cli.ts $1"
-  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED -- \
+  # A login password, e.g. `read -s P; CLIPWISE_CLI_PASSWORD=$P scratch-db.sh cli
+  # bootstrap-admin --email … --password-env CLIPWISE_CLI_PASSWORD`. Never printed.
+  CLI_PASSWORD_VALUE="${CLIPWISE_CLI_PASSWORD:-}"
+  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED CLIPWISE_CLI_PASSWORD -- \
     npx --no-install tsx src/auth/cli.ts "$@" 2>&1 | scrub
   exit "${PIPESTATUS[0]}"
 }
