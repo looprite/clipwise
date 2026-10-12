@@ -43,6 +43,9 @@
 #                                 CALENDAR_TOKEN_ENCRYPTION_KEY
 #   scratch-db.sh cli <args>      src/auth/cli.ts <args> on the scratch branch,
 #                                 after the guard
+#   scratch-db.sh jobs <args>     src/jobs/cli.ts <args> (list, retry,
+#                                 match-backlog) on the scratch branch, after
+#                                 the guard
 #   scratch-db.sh sql < file      psql on the scratch branch after the guard, the
 #                                 statements from stdin inside BEGIN READ ONLY
 #                                 ... ROLLBACK
@@ -595,6 +598,17 @@ cmd_cli() {
   exit "${PIPESTATUS[0]}"
 }
 
+# The jobs CLI (src/jobs/cli.ts: list, retry, match-backlog) on the scratch
+# branch, after the guard. It needs the database and nothing else.
+cmd_jobs() {
+  [ $# -gt 0 ] || refuse "usage: scratch-db.sh jobs <command> (see src/jobs/cli.ts)"
+  scratch_ready
+  say "jobs: src/jobs/cli.ts $1"
+  clean_exec "$F" DATABASE_URL -- \
+    npx --no-install tsx src/jobs/cli.ts "$@" 2>&1 | scrub
+  exit "${PIPESTATUS[0]}"
+}
+
 # psql against the scratch branch, the connection given as PG* variables taken
 # apart from DATABASE_URL, so the URL is on no command line.
 PSQL_JS='
@@ -785,9 +799,10 @@ case "${1:-}" in
   run) shift; cmd_run "$@" ;;
   serve) shift; cmd_serve "$@" ;;
   cli) shift; cmd_cli "$@" ;;
+  jobs) shift; cmd_jobs "$@" ;;
   sql) shift; cmd_sql "$@" ;;
   push) shift; cmd_push "$@" ;;
   push-check) shift; cmd_push_check "$@" ;;
   down) cmd_down ;;
-  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | cli <command> | sql | down" >&2; exit 2 ;;
+  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | cli <command> | jobs <command> | sql | down" >&2; exit 2 ;;
 esac
