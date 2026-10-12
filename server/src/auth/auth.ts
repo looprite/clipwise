@@ -113,11 +113,16 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
     // domain rule at user creation below still applies on top of it. A user
     // created by a password login gains Google only through the explicit link
     // call while signed in, because implicit linking is off.
+    // includeGrantedScopes is off: the provider's default sends
+    // include_granted_scopes=true (google.mjs:84), and Google then adds every
+    // scope this user granted this client before, the calendar's included, to
+    // the sign-in's token (seen on scratch 2026-10-12, 5a).
     socialProviders: cfg.google
       ? {
           google: {
             clientId: cfg.google.clientId,
             clientSecret: cfg.google.clientSecret,
+            includeGrantedScopes: false,
             ...(cfg.allowedDomain ? { hd: cfg.allowedDomain } : {}),
           },
         }
