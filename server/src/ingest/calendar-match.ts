@@ -1,15 +1,10 @@
-// A calendar match answer, written by the pipeline's "match" step (before
-// transcribe) and applied here at ingest — the read/apply half of SAA-115's
-// steps 1 & 3. Twin of ingest/identity.ts, but simpler: unlike an identity
-// answer, a calendar match is computed synchronously, one pipeline step
-// earlier in the same run, so there's no SAA-173-style race to close and no
-// separate late-apply entry point is needed.
+// A calendar match, applied to a stored recording — the apply half of
+// SAA-115's steps 1 & 3. Computed and applied on the server by the match job
+// (pipeline/match-calendar.ts matchRecording; SAA-227 part F), in one
+// transaction. No file passes between them any more.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
-import { describeErrorLine } from "../lib/safe-error.js";
 import { titlePlaceholderFor } from "./clipwise.js";
 
 export type CalendarMatchInvitee = {
@@ -25,40 +20,6 @@ export type CalendarMatch = {
   invitees: CalendarMatchInvitee[];
   offset_ms: number;
 };
-
-export function calendarMatchPathFor(dir: string, stem: string): string {
-  return join(dir, `calendar-match-${stem}.json`);
-}
-
-// Same atomicity as recorder/app/identity-answer.js's writeAnswer: write to
-// a .tmp sibling, then rename — a crash mid-write leaves either the old file
-// or nothing new, never a half-written JSON.
-export function writeCalendarMatch(dir: string, stem: string, match: CalendarMatch): string {
-  const finalPath = calendarMatchPathFor(dir, stem);
-  const tmpPath = `${finalPath}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(match, null, 2) + "\n");
-  renameSync(tmpPath, finalPath);
-  return finalPath;
-}
-
-// Never throws — same reasoning as readIdentityAnswer: an unreadable or
-// missing match file leaves the recording unmatched, which is the ordinary
-// "nothing to apply" case (no connection, no event in range, or this
-// capture predates the feature), not a reason to fail ingest.
-export function readCalendarMatch(dir: string, stem: string): CalendarMatch | null {
-  const path = calendarMatchPathFor(dir, stem);
-  if (!existsSync(path)) return null;
-  try {
-    const doc = JSON.parse(readFileSync(path, "utf8")) as CalendarMatch;
-    if (!doc || typeof doc !== "object") return null;
-    return doc;
-  } catch (err) {
-    process.stdout.write(
-      `calendar-match: ${path} unreadable (${describeErrorLine(err)}) — recording left unmatched\n`,
-    );
-    return null;
-  }
-}
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 

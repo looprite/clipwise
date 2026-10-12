@@ -6,7 +6,7 @@ import { db, schema } from "../db/index.js";
 import { TERMINAL_STATUS } from "../extract/extract.js";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
-export type JobKind = "extract" | "re_extract";
+export type JobKind = "extract" | "re_extract" | "match";
 
 // The new job's id, or null when one of this kind is already queued or running
 // for the recording (the partial unique index refuses it; nothing is written).
