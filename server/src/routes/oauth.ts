@@ -4,10 +4,10 @@
 
 import { randomBytes } from "node:crypto";
 import { Router } from "express";
-import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "../db/index.js";
-import { accessOf } from "../access/authenticate.js";
+import { accessOf, sessionMember } from "../access/authenticate.js";
+import { normalizeEmail } from "../auth/membership.js";
 import { asyncHandler, HttpError, parseQuery } from "../lib/http.js";
 import { encrypt } from "../lib/crypto.js";
 import { exchangeCode, listCalendars, selectSearchableCalendars } from "../lib/google-calendar.js";
@@ -17,10 +17,12 @@ export const oauthRouter = Router();
 const GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 
-// state -> {accountId, expiresAt}. Generated and validated in this same
-// process, deliberately not persisted (decision 1's ethos on the issue: no
-// polling, no sync cursor, no jobs table — this is one flow, run once per
-// calendar connection, by one local user). Single-use: deleted on lookup.
+// state -> {accountId, memberId, expiresAt}. Generated and validated in this
+// same process, deliberately not persisted (decision 1's ethos on the issue:
+// no polling, no sync cursor, no jobs table — this is one flow, run once per
+// calendar connection; hosted runs one machine, SAA-227 decision 22). The
+// member is who started it, and the callback requires that same member signed
+// in. Single-use: deleted on lookup.
 // Cost of the simpler choice: a connect attempt started right before a
 // server restart has to be retried.
 const pendingStates = new Map<string, { accountId: string; memberId: string; expiresAt: number }>();
@@ -48,26 +50,18 @@ function oauthConfig(): { clientId: string; redirectUri: string } {
   return { clientId, redirectUri };
 }
 
-const connectQuerySchema = z.object({ account_id: z.string().uuid() });
-
 oauthRouter.get(
   "/oauth/google/connect",
   asyncHandler(async (req, res) => {
-    const { account_id: accountId } = parseQuery(connectQuerySchema, req);
-    // Mounted behind requireMember + requireAdmin (app.ts). The account asked
-    // for must be the caller's own. /callback is deliberately not behind them:
-    // Google's redirect carries no token, and it is gated by the single-use
-    // state this route issues.
-    if (accountId !== accessOf(req).accountId) throw new HttpError(404, "account_not_found");
-    const [account] = await db
-      .select({ id: schema.accounts.id })
-      .from(schema.accounts)
-      .where(eq(schema.accounts.id, accountId));
-    if (!account) throw new HttpError(404, "account_not_found");
+    // Mounted behind requireSession (app.ts): any member, signed in in this
+    // browser, connects their own calendar (SAA-227 decision 9). The account
+    // and the member come from the session. /callback is deliberately not
+    // behind it: it runs its own session check against the state's member.
+    const { accountId, memberId } = accessOf(req);
 
     const { clientId, redirectUri } = oauthConfig();
     const state = randomBytes(16).toString("hex");
-    setState(state, accountId, accessOf(req).memberId);
+    setState(state, accountId, memberId);
 
     const url = new URL(GOOGLE_AUTH_ENDPOINT);
     url.searchParams.set("client_id", clientId);
@@ -96,6 +90,13 @@ oauthRouter.get(
     if (!pending || pending.expiresAt < Date.now()) {
       throw new HttpError(400, "invalid_or_expired_state");
     }
+    // The member who started this connect, signed in in this browser now
+    // (SAA-227 decision 22). Checked before Google is asked anything, so a
+    // code that reaches another member's session is never exchanged.
+    const member = await sessionMember(req);
+    if (!member || member.memberId !== pending.memberId) {
+      throw new HttpError(403, "calendar_connect_not_this_member");
+    }
 
     const { redirectUri } = oauthConfig();
     const tokens = await exchangeCode(code, redirectUri);
@@ -121,6 +122,12 @@ oauthRouter.get(
       throw new HttpError(502, "no_primary_calendar_in_calendarlist");
     }
     const calendarEmail = primary.id;
+    // Only the member's own calendar (SAA-227 decision 28): the grant's
+    // primary address must be their sign-in address. Anything else is
+    // refused, and nothing is stored.
+    if (normalizeEmail(calendarEmail) !== member.email) {
+      throw new HttpError(403, "calendar_not_own_address");
+    }
 
     // The list a match actually searches — computed once here, stored,
     // not recomputed per match. jd@leadiq.com (shared in, accessRole

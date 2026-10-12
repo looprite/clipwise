@@ -12,7 +12,9 @@
 //   capture  audience …/capture, scope clipwise:capture — the recorder.
 //            requireCapture.
 // The route table (access/classification.ts, `requires`) says which a route
-// takes, and check-access compares that with what these guards do.
+// takes, and check-access compares that with what these guards do. One route
+// takes neither: calendar connect is a browser page, and takes a signed-in
+// session instead (requireSession).
 //
 // Every refusal is the same 401 — no token, a bad token, a token for another
 // resource, a removed member — so the response does not say which. The one
@@ -20,7 +22,8 @@
 // insufficient_scope, naming the scope it needs.
 
 import type { NextFunction, Request, RequestHandler, Response } from "express";
-import { authConfigFromEnv } from "../auth/auth.js";
+import { fromNodeHeaders } from "better-auth/node";
+import { authConfigFromEnv, getAuth } from "../auth/auth.js";
 import { findMemberByAuthUserId } from "../auth/membership.js";
 import { CAPTURE_SCOPE, type ExpectedResource } from "../auth/scopes.js";
 import { verifyAccessToken } from "../auth/tokens.js";
@@ -103,6 +106,48 @@ function requireToken(expected: ExpectedResource): RequestHandler {
     next();
   });
 }
+
+// The member behind a signed-in browser session (Better Auth's cookie), or null:
+// no session, or its user is not an active member. Never a bearer token; the
+// session is the only thing read. Its scope is empty: a session carries none.
+export async function sessionMember(req: Request): Promise<AccessContext | null> {
+  const session = await getAuth().api.getSession({ headers: fromNodeHeaders(req.headers) });
+  if (!session?.user) return null;
+  const member = await findMemberByAuthUserId(session.user.id);
+  if (!member || member.removedAt) return null;
+  return {
+    accountId: member.accountId,
+    memberId: member.id,
+    role: member.role === "admin" ? "admin" : "member",
+    authUserId: session.user.id,
+    email: member.email,
+    scope: [],
+  };
+}
+
+// For a route a person reaches in their browser, signed in (SAA-227 part F's
+// calendar connect): a session of an active member, and no token of any kind.
+// Every refusal is the same 401, as for tokens.
+export const requireSession: RequestHandler = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  if (!process.env.BETTER_AUTH_SECRET) {
+    res.status(503).json({ error: "auth_not_configured" });
+    return;
+  }
+  try {
+    const ctx = await sessionMember(req);
+    if (!ctx) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    req.access = ctx;
+  } catch (err) {
+    if (!isDependencyDown(err)) throw err;
+    logError(`${req.method} ${req.baseUrl}${req.route?.path ?? ""}`, err);
+    sendUnavailable(res);
+    return;
+  }
+  next();
+});
 
 // The default guard: an MCP token (claude.ai, Claude Code).
 export const requireMember: RequestHandler = requireToken("mcp");

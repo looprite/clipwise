@@ -20,12 +20,15 @@
 //   capture  A capture token: audience …/capture and scope clipwise:capture
 //            (the recorder). A valid MCP token is refused with 403
 //            insufficient_scope.
+//   session  A signed-in browser session (Better Auth's cookie), no token: a
+//            page a person opens themselves. Either kind of token is refused
+//            with 401.
 //
 // check-access gives every non-public entry a token of each kind and fails on
 // any entry whose behaviour differs from what it says here.
 
 export type Access = "public" | "member" | "owner" | "admin";
-export type Requires = "public" | "mcp" | "capture";
+export type Requires = "public" | "mcp" | "capture" | "session";
 
 export const ROUTES: Record<string, { access: Access; requires: Requires; note: string }> = {
   "GET /live": { access: "public", requires: "public", note: "liveness; no database, no data" },
@@ -48,9 +51,9 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
   "GET /oauth/google/callback": {
     access: "public",
     requires: "public",
-    note: "Google's redirect carries no token; gated by the single-use state an admin's /connect issued",
+    note: "Google's redirect carries no token; gated by the single-use state /connect issued and the session of the member who started it",
   },
-  "GET /oauth/google/connect": { access: "admin", requires: "mcp", note: "starts a calendar connection for the caller's own account" },
+  "GET /oauth/google/connect": { access: "member", requires: "session", note: "starts a calendar connection for the signed-in member's own calendar" },
 
   "POST /captures": {
     access: "member",

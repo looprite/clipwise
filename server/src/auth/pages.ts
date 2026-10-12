@@ -117,11 +117,14 @@ ${inner}
 // to their login: implicit linking is off (auth.ts), so this explicit link is
 // the only way a password login gains Google. Google sends the browser back
 // here, with ?error=… when it went wrong; both Google navigations go only to
-// accounts.google.com.
+// accounts.google.com. The signed-in state also offers Connect calendar
+// (SAA-227 part F), which goes to /oauth/google/connect in this origin.
 export const loginPage: RequestHandler = (_req, res) => {
   const cfg = authConfigFromEnv();
   const passwordEnabled = cfg.passwordEnabled;
   const googleEnabled = cfg.google !== null;
+  // Calendar connect (routes/oauth.ts) also needs its own redirect address.
+  const calendarEnabled = googleEnabled && !!process.env.GOOGLE_OAUTH_REDIRECT_URI;
   const googleButton = `<div class="row"><button class="primary" id="google" type="button">Continue with Google</button></div>`;
   const passwordForm = `<form id="f" novalidate>
   <label for="email">Email</label>
@@ -134,6 +137,8 @@ export const loginPage: RequestHandler = (_req, res) => {
 <p>Signed in<span id="who"></span>. You can close this tab.</p>
 ${googleEnabled ? `<p id="linked" class="muted" hidden>Google is linked to this login.</p>
 <div class="row" id="linkrow" hidden><button id="link" type="button">Link Google</button></div>` : ""}
+${calendarEnabled ? `<p class="muted">Connect your own Google Calendar, so your recordings get their meeting's title and invitees.</p>
+<div class="row"><button id="calendar" type="button">Connect calendar</button></div>` : ""}
 </section>`;
   send(res, (nonce) =>
     shell(
@@ -203,6 +208,8 @@ async function google(path, button) {
 }
 el('google').addEventListener('click', () => google('/api/auth/sign-in/social', el('google')));
 el('link').addEventListener('click', () => google('/api/auth/link-social', el('link')));` : ""}
+${calendarEnabled ? `// Same origin: the session cookie goes with it, and the server sends the browser on to Google.
+el('calendar').addEventListener('click', () => location.assign('/oauth/google/connect'));` : ""}
 const f = el('f'), go = el('go');
 if (f) f.addEventListener('submit', async (e) => {
   e.preventDefault();

@@ -1,8 +1,9 @@
 // Live check for sign-in: Better Auth mounted on an in-process Express server
 // against a real database. Covers password sign-in, closed sign-up, the
 // member gate, removal revoking sessions, rate limiting (including a client
-// that picks its own forwarding header), anonymous client registration and the
-// OAuth discovery document.
+// that picks its own forwarding header), anonymous client registration, the
+// OAuth discovery document, and connecting a member's own calendar from their
+// signed-in session (SAA-227 part F, against the real app).
 //
 // WRITES to the database it is pointed at (throwaway members, users and OAuth
 // clients, all tagged and removed at the end), so it refuses to run unless the
@@ -18,6 +19,7 @@ import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import express from "express";
 import { sql } from "drizzle-orm";
+import { buildApp } from "../app.js";
 import { db, pool, schema } from "../db/index.js";
 import { authConfigFromEnv, createAuth, getAuth } from "./auth.js";
 import { addMember, createPasswordLogin, removeMember, requireAccount, Refusal } from "./members.js";
@@ -33,6 +35,7 @@ if (process.env.CLIPWISE_CHECK_SCRATCH_DB !== "1") {
 const tag = randomBytes(4).toString("hex");
 const emailFor = (who: string) => `${who}-${tag}@clipwise.test`;
 const PASSWORD = `pw-${randomBytes(9).toString("base64url")}`;
+const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 const cfg = authConfigFromEnv();
 const origin = cfg.baseURL;
 
@@ -95,6 +98,7 @@ async function cleanup(): Promise<void> {
       await pool.query(`delete from auth_session where "userId" in (select id from auth_user where email like $1)`, [like]);
       await pool.query(`delete from auth_account where "userId" in (select id from auth_user where email like $1)`, [like]);
       await pool.query(`delete from auth_user where email like $1`, [like]);
+      await pool.query(`delete from calendar_connections where member_id in (select id from account_members where email like $1)`, [like]);
       await pool.query(`delete from account_members where email like $1`, [like]);
     }
     await pool.query(`delete from "oauthClient" where name like $1`, [`check-${tag}%`]);
@@ -169,6 +173,132 @@ async function main(): Promise<void> {
       unverifiedRefused = true;
     }
     record(unverifiedRefused && (await userCount(unverifiedEmail)) === 0, "a member with an unverified email is refused");
+
+    // --- calendar connect, per member (SAA-227 part F) ----------------------
+    // Against the real app (buildApp), with its session guard. Google is
+    // answered in this process: fetch is wrapped so the token and calendarList
+    // requests the server makes get a placeholder reply, and every other request
+    // goes out as usual. Nothing reaches Google, and the app is unchanged. The
+    // Google settings are placeholders set for this section only; Better Auth was
+    // built above without them, so Google sign-in stays off for the cases below.
+    const calEnv = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_REDIRECT_URI", "CALENDAR_TOKEN_ENCRYPTION_KEY"] as const;
+    const savedEnv = calEnv.map((k) => [k, process.env[k]] as const);
+    process.env.GOOGLE_CLIENT_ID = "check-client.apps.googleusercontent.com";
+    process.env.GOOGLE_CLIENT_SECRET = "check-placeholder";
+    process.env.GOOGLE_OAUTH_REDIRECT_URI = `${origin}/oauth/google/callback`;
+    process.env.CALENDAR_TOKEN_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+    const realFetch = globalThis.fetch;
+    let googleCalls = 0;
+    let primaryAddress = "";
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.startsWith("https://oauth2.googleapis.com/token")) {
+        googleCalls++;
+        return Response.json({ access_token: "check-access", refresh_token: "check-refresh", expires_in: 3600, scope: CALENDAR_SCOPE });
+      }
+      if (url.startsWith("https://www.googleapis.com/calendar/v3/users/me/calendarList")) {
+        googleCalls++;
+        return Response.json({ items: [{ id: primaryAddress, primary: true, accessRole: "owner" }] });
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    const { app: realApp } = await buildApp();
+    const rsrv = await listen(realApp);
+    try {
+      // GET /oauth/google/connect with a session cookie, not followed: where it
+      // sends the browser, and the state it issued.
+      const startConnect = async (cookie: string) => {
+        const res = await realFetch(`${rsrv.base}/oauth/google/connect`, { headers: { origin, cookie }, redirect: "manual" });
+        const location = res.headers.get("location");
+        const u = location ? new URL(location) : null;
+        return {
+          status: res.status,
+          atGoogle: u?.host === "accounts.google.com",
+          scope: u?.searchParams.get("scope") ?? null,
+          state: u?.searchParams.get("state") ?? null,
+        };
+      };
+
+      // GET /oauth/google/callback as Google's redirect would arrive, with a
+      // session cookie. No state (connect refused) is status 0.
+      const callback = async (state: string | null, cookie: string): Promise<{ status: number; error: unknown }> => {
+        if (!state) return { status: 0, error: "no state" };
+        const res = await realFetch(`${rsrv.base}/oauth/google/callback?code=check-code&state=${encodeURIComponent(state)}`, {
+          headers: { origin, cookie },
+          redirect: "manual",
+        });
+        const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+        return { status: res.status, error: body?.error ?? null };
+      };
+
+      const rowsOfMember = async (email: string): Promise<number> => {
+        const { rows } = await pool.query<{ n: string }>(
+          `select count(*)::text n from calendar_connections c join account_members m on m.id = c.member_id where m.email = $1`,
+          [email],
+        );
+        return Number(rows[0].n);
+      };
+      const rowsOfAddress = async (address: string): Promise<number> => {
+        const { rows } = await pool.query<{ n: string }>(`select count(*)::text n from calendar_connections where calendar_email = $1`, [address]);
+        return Number(rows[0].n);
+      };
+
+      // memberEmail is a plain member (role member), signed in above as `good`.
+      const otherEmail = emailFor("calendar-other");
+      await addMember({ email: otherEmail, role: "member", name: "Calendar Other" });
+      await createPasswordLogin(otherEmail, "Calendar Other", PASSWORD);
+      const other = await signIn(srv.base, otherEmail, PASSWORD);
+
+      // 1. A member who is not an admin can start a connection.
+      const s1 = await startConnect(good.cookie);
+      record(
+        s1.status === 302 && s1.atGoogle && s1.scope === CALENDAR_SCOPE && !!s1.state,
+        "calendar connect: a signed-in member who is not an admin starts a connection at Google, for calendar.readonly",
+        `status ${s1.status}`,
+      );
+
+      // 2. The member's state, arriving with another member's session.
+      primaryAddress = memberEmail;
+      const before = googleCalls;
+      const wrongMember = await callback(s1.state, other.cookie);
+      const wrongMemberRows = await rowsOfMember(memberEmail);
+      const wrongMemberOtherRows = await rowsOfMember(otherEmail);
+      record(
+        wrongMember.status === 403 && googleCalls - before === 0 && wrongMemberRows === 0 && wrongMemberOtherRows === 0,
+        "calendar callback: another member's session is refused (403) before Google is asked, and nothing is stored",
+        `status ${wrongMember.status} ${String(wrongMember.error)}, Google calls ${googleCalls - before}, rows for the member ${wrongMemberRows}, for the other ${wrongMemberOtherRows}`,
+      );
+
+      // 3. The member's own session, but Google's primary address is someone else's.
+      const s2 = await startConnect(good.cookie);
+      primaryAddress = emailFor("calendar-someone-else");
+      const notOwn = await callback(s2.state, good.cookie);
+      const notOwnMemberRows = await rowsOfMember(memberEmail);
+      const notOwnAddressRows = await rowsOfAddress(primaryAddress);
+      record(
+        notOwn.status === 403 && notOwnMemberRows === 0 && notOwnAddressRows === 0,
+        "calendar callback: a Google account whose primary address is not the member's own is refused (403), and no row is stored",
+        `status ${notOwn.status} ${String(notOwn.error)}, rows for the member ${notOwnMemberRows}, for the address ${notOwnAddressRows}`,
+      );
+
+      // 4. The control for 2 and 3: own session, own address, stored.
+      const s3 = await startConnect(good.cookie);
+      primaryAddress = memberEmail;
+      const own = await callback(s3.state, good.cookie);
+      const ownRows = await rowsOfMember(memberEmail);
+      record(
+        own.status === 200 && ownRows === 1,
+        "calendar callback: the member's own session and own address are stored as their connection (the control for both refusals)",
+        `status ${own.status} ${String(own.error)}, rows for the member ${ownRows}`,
+      );
+    } finally {
+      await rsrv.close();
+      globalThis.fetch = realFetch;
+      for (const [k, v] of savedEnv) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
 
     // --- removal ------------------------------------------------------------
     const removed = await removeMember(memberEmail);

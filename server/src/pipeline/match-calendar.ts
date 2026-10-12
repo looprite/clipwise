@@ -57,67 +57,32 @@ export type ResolvedConnection = {
   accessToken: string;
 };
 
-// Resolves the one calendar connection a capture matches against, and a
-// usable access token — refreshing and persisting a new one if the stored
-// token has expired. This is the only side effect: a token refresh is
-// infrastructure upkeep, not capture data, and is unconditionally safe to
-// repeat. No event data is read or written here.
+// Resolves the calendar connection of the recording's owner, and a usable
+// access token — refreshing and persisting a new one if the stored token has
+// expired. This is the only side effect: a token refresh is infrastructure
+// upkeep, not capture data, and is unconditionally safe to repeat. No event
+// data is read or written here.
+//
+// Only the owner's own connection, never another member's (SAA-227 decision
+// 8). A member has at most one: the callback stores only a grant whose primary
+// address is the member's own sign-in address (decision 28), and the unique
+// index is on (member_id, calendar_email).
 //
 // Exported so a read-only check (a dry run, a diagnostic) can drive the
 // exact same resolution matchCaptureToCalendar uses, rather than a second,
 // hand-written copy of it drifting out of sync — the same lesson the title
 // placeholder duplication taught earlier in this change.
-export async function resolveCalendarConnection(): Promise<
-  ResolvedConnection | { reason: "no_account" | "not_connected" }
-> {
-  // Takes whichever row Postgres returns first. Safe today only because
-  // ingest/clipwise.ts's own single-account assumption already holds
-  // everywhere in this codebase (see its `accounts.length !== 1` check) —
-  // this doesn't add a new assumption, it inherits an existing one.
-  const accountRows = await db.select().from(schema.accounts);
-  const [account] = accountRows;
-  if (!account) {
-    return { reason: "no_account" };
-  }
-  if (accountRows.length > 1) {
-    process.stdout.write(
-      `calendar-match: WARNING ${accountRows.length} accounts exist — picked ` +
-        `${account.id} arbitrarily. This module has no multi-account story.\n`,
-    );
-  }
-
-  // First check, deliberately: this is what keeps every capture on an
-  // account with no calendar connected completely unaffected — the common
-  // case until a connection exists.
-  //
-  // Also takes an arbitrary first row, and here it's a real gap rather
-  // than an inherited assumption: calendar_connections has
-  // UNIQUE(account_id, calendar_email) *specifically* so a genuinely
-  // separate OAuth grant (a second account someone else's calendar can't
-  // be shared into) is a second row, not a replacement. A single grant
-  // seeing multiple calendars is handled by searched_calendar_ids below,
-  // not by multiple rows — that distinction is what the 2026-09-18 fix
-  // settled. Multi-connection (multi-grant) matching is still explicitly
-  // out of scope — but the moment a second grant exists, this silently
-  // picks one of the two and every capture matches against only its
-  // calendars, with no error and no signal. The warning below is what
-  // turns that from a silent wrong answer into something that announces
-  // itself the day it matters, without having to build the real fix first.
-  const connectionRows = await db
+export async function resolveCalendarConnection(
+  ownerMemberId: string,
+): Promise<ResolvedConnection | { reason: "not_connected" }> {
+  // First check, deliberately: this is what keeps every capture whose owner
+  // has no calendar connected completely unaffected.
+  const [connection] = await db
     .select()
     .from(schema.calendarConnections)
-    .where(eq(schema.calendarConnections.accountId, account.id));
-  const [connection] = connectionRows;
+    .where(eq(schema.calendarConnections.memberId, ownerMemberId));
   if (!connection) {
     return { reason: "not_connected" };
-  }
-  if (connectionRows.length > 1) {
-    process.stdout.write(
-      `calendar-match: WARNING ${connectionRows.length} calendar connections exist for ` +
-        `account=${account.id} — picked ${connection.calendarEmail} arbitrarily. ` +
-        "Multi-connection matching is not implemented; every capture is being matched " +
-        "against only this one connection's calendars.\n",
-    );
   }
 
   let accessToken = decrypt(connection.accessToken);
@@ -202,8 +167,9 @@ export async function matchCaptureToCalendar(
   dir: string,
   stem: string,
   capture: CaptureIdentity,
+  ownerMemberId: string,
 ): Promise<MatchResult> {
-  const resolved = await resolveCalendarConnection();
+  const resolved = await resolveCalendarConnection(ownerMemberId);
   if ("reason" in resolved) {
     return { matched: false, detail: { reason: resolved.reason } };
   }
