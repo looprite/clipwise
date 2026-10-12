@@ -75,6 +75,9 @@ const STYLE = `
   ul { padding-left: 20px; margin: 8px 0; }
   li::marker { color: var(--orange); }
   .host { font-weight: 700; overflow-wrap: anywhere; }
+  /* The hidden attribute is only the browser's [hidden] { display: none }, which
+     any rule setting display (.row) overrides; this keeps hidden meaning hidden. */
+  [hidden] { display: none !important; }
 `;
 
 // The Clipwise mark, inline: the same shapes as the tab icon (lib/brand.ts), with
