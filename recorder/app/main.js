@@ -3502,7 +3502,8 @@ function resolveIdentityWindow() {
     if (identityWindow.fromQueue) identityQueue.shift();
 }
 
-// The pipeline's own per-step record (run-capture.ts's pipeline-<stem>.json)
+// The pipeline's own per-step record (pipeline-<stem>.json, capture-cli.ts's, or
+// the direct pipeline's before the cut-over)
 // — read directly, no database access, same reason every other file this
 // process reads is a file.
 function readPipelineSidecar(dir, stem) {

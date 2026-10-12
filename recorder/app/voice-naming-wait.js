@@ -2,14 +2,14 @@
 // so this decision can be exercised directly against fixture data — no
 // Electron, no window, no timer — rather than only through the live poll.
 //
-// Reads exactly two facts off the pipeline record (run-capture.ts's
-// pipeline-<stem>.json): steps.diarize.state and, only when that is
+// Reads exactly two facts off the pipeline record (pipeline-<stem>.json, as
+// the direct pipeline wrote it before the cut-over): steps.diarize.state and, only when that is
 // "skipped", steps.diarize.detail.model_revision, plus steps.transcribe.state
 // and steps.ingest.state. No text parsing of any `reason` string anywhere
 // here.
 //
 // steps.diarize.state is "skipped" for every non-split outcome alike, benign
-// or not (run-capture.ts's finish() call uses that one state either way).
+// or not (the direct pipeline's diarize step used that one state either way).
 // model_revision is what tells them apart: it is only ever non-null when the
 // diarize tool actually ran and produced a real sidecar — the two-party gate
 // and the identity-already-named skip both pass it through from that real

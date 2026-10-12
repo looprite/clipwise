@@ -156,7 +156,8 @@ function classifyCapture(dir, stem, now = Date.now(), opts = {}) {
 
 // A capture in the trash (SAA-154) has a trashed-<stem>.json marker beside its
 // files. main.js writes it once the server has trashed the capture
-// (runTrashOnServer); before the cut-over, trash.ts wrote it. A
+// (runTrashOnServer); before the cut-over, the direct path's trash script
+// wrote it. A
 // trashed capture is absent from every list here: the window's meetings, the
 // tray's Save transcript item, and every other per-capture selection.
 function isTrashed(dir, stem) {
