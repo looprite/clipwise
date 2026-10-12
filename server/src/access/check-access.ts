@@ -46,6 +46,8 @@ import { ensureRecorderClient, RECORDER_CLIENT_ID, RECORDER_REDIRECT_URI } from 
 import { CAPTURE_SCOPE, MCP_SCOPES } from "../auth/scopes.js";
 import { verifyAccessToken } from "../auth/tokens.js";
 import { db, pool, schema } from "../db/index.js";
+import { encrypt } from "../lib/crypto.js";
+import { resolveCalendarConnection } from "../pipeline/match-calendar.js";
 import { MCP_TOOLS, ROUTES } from "./classification.js";
 import { listRoutes } from "./route-list.js";
 
@@ -263,6 +265,7 @@ async function cleanup(accountId: string | null): Promise<void> {
   await run(`delete from auth_session where "userId" in (select id from auth_user where email like $1)`, [like]);
   await run(`delete from auth_account where "userId" in (select id from auth_user where email like $1)`, [like]);
   await run(`delete from auth_user where email like $1`, [like]);
+  await run(`delete from calendar_connections where member_id in (select id from account_members where email like $1)`, [like]);
   await run(`delete from account_members where email like $1`, [like]);
   await run(`delete from "oauthClient" where name like $1`, [`check-access-${tag}%`]);
   // The recorder's client is the instance's own; remove it only if this run made it.
@@ -1057,10 +1060,45 @@ async function main(): Promise<void> {
     const me = await http("GET", "/accounts/me", { token: C.token });
     record(me.json?.member?.role === "admin" && me.json?.account?.id === acc, "/accounts/me: the caller's own account and role");
 
-    // ---- admin-only --------------------------------------------------------
+    // ---- calendar connect: a session, not a token ---------------------------
+    // Any member connects their own calendar from a signed-in browser (SAA-227
+    // decision 9); check-auth signs in and connects. A bearer token, a member's
+    // or an admin's, gets no further than the session guard.
     const connectB = await http("GET", `/oauth/google/connect?account_id=${acc}`, { token: B.token });
     const connectC = await http("GET", `/oauth/google/connect?account_id=${acc}`, { token: C.token });
-    record(connectB.status === 403 && connectC.status !== 401 && connectC.status !== 403, "calendar connect: a member is refused (403); an admin gets past the gate", `${connectB.status}/${connectC.status}`);
+    record(connectB.status === 401 && connectC.status === 401, "calendar connect: a bearer token is refused (401), a member's and an admin's alike; it takes a signed-in session", `${connectB.status}/${connectC.status}`);
+
+    // ---- calendar lookup: the owner's own connection only ---------------------
+    // A connects, C connects, B does not. Each lookup returns that member's own
+    // row; B's returns none, never A's or C's (SAA-227 decision 8). The tokens
+    // are placeholders, encrypted with a key made for this run, and unexpired, so
+    // nothing reaches Google.
+    process.env.CALENDAR_TOKEN_ENCRYPTION_KEY ??= randomBytes(32).toString("base64");
+    const connectionFor = async (who: Who): Promise<string> => {
+      const [row] = await db
+        .insert(schema.calendarConnections)
+        .values({
+          accountId: acc,
+          memberId: who.memberId,
+          calendarEmail: who.email,
+          accessToken: encrypt(`check-access-${tag}-access`),
+          refreshToken: encrypt(`check-access-${tag}-refresh`),
+          tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+          scope: "https://www.googleapis.com/auth/calendar.readonly",
+          searchedCalendarIds: [who.email],
+        })
+        .returning({ id: schema.calendarConnections.id });
+      return row.id;
+    };
+    const connA = await connectionFor(A);
+    const connC = await connectionFor(C);
+    const lookup = async (who: Who) => {
+      const r = await resolveCalendarConnection(who.memberId);
+      return "reason" in r ? r.reason : r.connection.id;
+    };
+    const [gotA, gotB, gotC] = [await lookup(A), await lookup(B), await lookup(C)];
+    record(gotA === connA && gotC === connC, "calendar lookup: each owner gets their own connection (the control)", `A ${gotA === connA ? "own" : gotA}, C ${gotC === connC ? "own" : gotC}`);
+    record(gotB === "not_connected", "calendar lookup: an owner with no connection gets none, never another member's", `B got ${gotB === connA ? "A's" : gotB === connC ? "C's" : gotB}`);
 
     // ---- the MCP endpoint ---------------------------------------------------
     let rpcId = 0;
@@ -1300,10 +1338,16 @@ async function main(): Promise<void> {
       const asCap = await http(real, fill(path), { token: capC.access ?? "", json });
       const insufficient = (r: Reply) => r.status === 403 && r.json?.error === "insufficient_scope";
       const through = (r: Reply) => r.status !== 401 && !insufficient(r);
-      const ok = entry.requires === "capture" ? insufficient(asMcp) && through(asCap) : through(asMcp) && asCap.status === 401;
+      // A session route takes neither token.
+      const ok =
+        entry.requires === "capture"
+          ? insufficient(asMcp) && through(asCap)
+          : entry.requires === "session"
+            ? asMcp.status === 401 && asCap.status === 401
+            : through(asMcp) && asCap.status === 401;
       record(
         ok,
-        `requires: ${key} takes a ${entry.requires} token and refuses the other`,
+        entry.requires === "session" ? `requires: ${key} takes a session and refuses both tokens` : `requires: ${key} takes a ${entry.requires} token and refuses the other`,
         `table says ${entry.requires}; MCP token → ${asMcp.status}${asMcp.json?.error ? ` ${asMcp.json.error}` : ""}; capture token → ${asCap.status}${asCap.json?.error ? ` ${asCap.json.error}` : ""}`,
       );
     }

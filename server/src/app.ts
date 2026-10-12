@@ -3,7 +3,8 @@
 //
 // Who may reach what is decided here, by mount:
 //   - /health, /api/auth/* (Better Auth's own gating) and the Google Calendar
-//     callback (gated by a single-use state) are reachable without a token;
+//     callback (gated by a single-use state and the session of the member who
+//     started it) are reachable without a token;
 //   - everything else goes through requireMember: a valid access token AND an
 //     active member row on this request (access/authenticate.ts). The routers
 //     that have write routes use requireMemberOrCaptureWrites instead: reads
@@ -14,13 +15,14 @@
 //     (SAA-227, 10-11);
 //   - the older routes keep :accountId in the URL, which sameAccountOnly checks
 //     against the caller's own account — it no longer decides which account;
-//   - starting a Google Calendar connection also needs an admin.
+//   - starting a Google Calendar connection takes a signed-in browser session
+//     of any member, for their own calendar (requireSession), and no token.
 // A router mounted any other way, or a route added outside the mounts, is not
 // in the classification table and check-access.ts fails on it.
 
 import express, { type Express, type RequestHandler, type Router } from "express";
 import { sql } from "drizzle-orm";
-import { requireAdmin, requireCapture, requireMember, requireMemberOrCaptureWrites, sameAccountOnly } from "./access/authenticate.js";
+import { requireCapture, requireMember, requireMemberOrCaptureWrites, requireSession, sameAccountOnly } from "./access/authenticate.js";
 import { authorizationServerMetadata, protectedResourceMetadata } from "./auth/discovery.js";
 import { consentPage, loginPage } from "./auth/pages.js";
 import { db } from "./db/index.js";
@@ -120,7 +122,7 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   // Guards for routes that live in routers mounted at "/" with fully
   // qualified paths.
   app.use("/recordings", requireMemberOrCaptureWrites);
-  app.use("/oauth/google/connect", requireMember, requireAdmin);
+  app.use("/oauth/google/connect", requireSession);
 
   mount("/accounts/:accountId/people", [requireMember, sameAccountOnly], peopleRouter);
   mount("/accounts/:accountId/recordings", [requireMemberOrCaptureWrites, sameAccountOnly], recordingsRouter);
