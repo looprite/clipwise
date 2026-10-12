@@ -26,7 +26,7 @@ Clipwise inverts that:
 ┌────────────────────────────┐         ┌──────────────────────────────┐
 │  Mac Desktop Recorder      │         │  Self-Hosted Server          │
 │  ────────────────────────  │         │  ──────────────────────────  │
-│  • Shell: Electron         │ spawns  │  • Recording + transcript    │
+│  • Shell: Electron         │ uploads │  • Recording + transcript    │
 │  • Core Audio Taps         │────────▶│    storage                   │
 │    (native macOS capture)  │         │  • Moment extraction         │
 │  • Local Parakeet          │         │  • Moment DB (Postgres +     │
@@ -121,7 +121,9 @@ itself for launch at login — Login Items is a thing you add it to.
 
 The bundle carries the three Swift binaries. It does not carry the server, so
 `build-app.sh` stamps the path of this checkout into the bundle and the packaged
-app runs the capture→moments pipeline out of it. Move the repo and rebuild.
+app runs the capture pipeline (transcribe, classify, diarize) out of it, then
+uploads each capture to the server named in `capture-server.json`, which makes the
+moments. Move the repo and rebuild.
 The developer keys (the database URL and the API keys) are not in the checkout:
 they are in `~/.config/clipwise/dev.env`, which only `server/scripts/scratch-db.sh`
 and the schema push (`server/drizzle.config.ts`) load, by name. Nothing the app
