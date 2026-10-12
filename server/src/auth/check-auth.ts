@@ -281,6 +281,12 @@ async function main(): Promise<void> {
       record(u?.searchParams.get("hd") === "clipwise.test", "it asks Google for the allowed domain (hd)", `hd ${u?.searchParams.get("hd")}`);
       const scopes = (u?.searchParams.get("scope") ?? "").split(" ").sort().join(" ");
       record(scopes === "email openid profile", "it asks only for identity (openid, email, profile)", `scope ${scopes}`);
+      const granted = u?.searchParams.get("include_granted_scopes") ?? null;
+      record(
+        granted === null || granted === "false",
+        "it does not ask Google to add scopes granted before (include_granted_scopes absent or false)",
+        `include_granted_scopes ${granted ?? "(absent)"}`,
+      );
       record(
         u?.searchParams.get("redirect_uri") === `${cfg.baseURL}/api/auth/callback/google`,
         "Google returns to /api/auth/callback/google",
