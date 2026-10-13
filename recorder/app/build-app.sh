@@ -9,15 +9,14 @@
 # artifact rather than measuring one — baseline.sh is a capture harness and
 # fix-electron-signature.sh is an install hook.
 #
-# What it deliberately does not do. No notarization, no stapling, no DMG, no
+# What it deliberately does not do. No notarization, no stapling and no DMG:
+# those need an Apple notary profile and are notarize.sh's, run after this. No
 # auto-update, and no login-item registration — the app never asks to launch
-# itself, it is added in System Settings by hand. Those are Phase 4.
+# itself, it is added in System Settings by hand.
 #
-# No hardened runtime. `--options runtime` is not passed, and that is a choice
-# rather than an oversight: it would extend to the tap, mic and whisper.cpp
-# binaries this app spawns, and library validation is what makes that a
-# notarization-shaped problem. The signature here is a real Developer ID
-# signature without it.
+# Signed with the hardened runtime (SAA-198 engineering call 6, SAA-126): every
+# executable in the bundle, inside-out, with only the entitlements it needs.
+# See section 4.
 
 set -euo pipefail
 
@@ -308,12 +307,56 @@ $PB -c "Delete :LSApplicationCategoryType" "$PLIST" >/dev/null 2>&1 || true
 
 # --- 4. sign --------------------------------------------------------------
 #
-# --deep signs inside-out: the framework, its helper apps and the three helper
-# binaries in Resources/bin all get the same identity before the outer bundle
-# is sealed. No --options runtime, no entitlements — see the header.
+# Inside-out, one piece at a time, every piece with the identity, the hardened
+# runtime and a secure timestamp: notarization requires all three on every
+# executable (SAA-126, SAA-198 engineering call 6). Not --deep: it never reaches
+# Resources/bin or Resources/python, which is how the capture binaries stayed
+# ad hoc before (SAA-126). Order is innermost first, so each container is sealed
+# over pieces that are already signed:
+#   1. every Mach-O file under Resources (the capture tools and the Python)
+#   2. what is inside each framework, then the framework
+#   3. the helper apps
+#   4. the app
+# Entitlements, only where needed (recorder/app/entitlements/): the app and the
+# helpers run V8 (allow-jit), and the app, miccap and systemtap record audio
+# (audio-input). Everything else gets none.
+
+ENT="$APP_SRC/entitlements"
+sign() {
+    # sign <path> [entitlements plist]
+    if [ -n "${2:-}" ]; then
+        codesign --force --timestamp --options runtime --entitlements "$2" --sign "$IDENTITY" "$1"
+    else
+        codesign --force --timestamp --options runtime --sign "$IDENTITY" "$1"
+    fi
+}
 
 step "signing as: $IDENTITY"
-codesign --force --deep --sign "$IDENTITY" "$APP"
+SIGNED=0
+while IFS= read -r -d '' f; do
+    file -b "$f" | grep -q "Mach-O" || continue
+    case "$(basename "$f")" in
+        miccap|systemtap) sign "$f" "$ENT/capture.plist" ;;
+        *) sign "$f" ;;
+    esac
+    SIGNED=$((SIGNED + 1))
+done < <(find "$C/Resources" -type f -print0)
+echo "signed $SIGNED Mach-O file(s) under Resources"
+
+FW="$C/Frameworks"
+EF="$FW/Electron Framework.framework/Versions/A"
+for f in "$EF/Libraries/"*.dylib "$EF/Helpers/chrome_crashpad_handler"; do
+    sign "$f"
+done
+sign "$FW/Electron Framework.framework"
+sign "$FW/Squirrel.framework/Versions/A/Resources/ShipIt"
+for fw in Squirrel Mantle ReactiveObjC; do
+    sign "$FW/$fw.framework"
+done
+for helper in "$FW/"*Helper*.app; do
+    sign "$helper" "$ENT/helper.plist"
+done
+sign "$APP" "$ENT/app.plist"
 
 step "codesign --verify --deep --strict --verbose=2 $APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
