@@ -527,6 +527,11 @@ async function main(): Promise<void> {
       }
     }
 
+    // The calendar cases above (m1–m4, bk: a worker run and three CLI processes)
+    // were added in SAA-227 part F inside the first watchdog window. The cases
+    // from here to e's lease wait get a fresh window, the one they had before.
+    stall.refresh();
+
     // ---- a, then c and c-skip on its recording, then g ------------------------
     let done: { p: Record<string, unknown>; recordingId: string } | null = null;
     if (wanted("a", "c", "c-skip", "g")) {
