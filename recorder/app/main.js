@@ -9,7 +9,7 @@
 // is a human. The recorder is the trigger; the manifest it wrote at capture
 // start is the record the pipeline keys on.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage, systemPreferences } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID, randomBytes, createHash } = require('crypto');
 const zlib = require('zlib');
@@ -40,6 +40,9 @@ const silenceReminder = require('./silence-reminder.js');
 // The first-run acknowledgement and the notice line (SAA-216). Pure; the gate
 // that uses it is startRecording.
 const consent = require('./consent.js');
+// First-run setup, launch at login, the move to Applications and the recording
+// time in the menu bar (SAA-198 step 4). Pure; the window is below.
+const setup = require('./setup.js');
 
 // --- constants ------------------------------------------------------------
 // All measurements come from 5-second captures on 2026-08-09. A long
@@ -235,6 +238,16 @@ if (BUILD_INFO) {
         `[clipwise-recorder] launched from bundle — built ${BUILD_INFO.built_at} ` +
         `commit ${BUILD_INFO.commit}${BUILD_INFO.dirty ? '+dirty' : ''}`);
 }
+
+// One Clipwise at a time (SAA-198, Jon's call 6). A second launch quits here and
+// the running one hears of it ('second-instance', in app boot). The capture
+// pipeline runs this same executable as Node (ELECTRON_RUN_AS_NODE), which never
+// loads this file, so the lock cannot turn the pipeline away.
+const GOT_SINGLE_INSTANCE_LOCK = app.requestSingleInstanceLock();
+if (!GOT_SINGLE_INSTANCE_LOCK) {
+    console.error('[clipwise-recorder] another Clipwise is already running — this launch quits');
+    app.quit();
+}
 const TSX_BIN = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
 // The capture pipeline (SAA-227): transcribe, classify, diarize and naming data,
 // on this Mac and from files only. The upload at its exit hands the rest to the server.
@@ -271,7 +284,7 @@ const VOICE_NAMING_STOP_MESSAGE_MS = 5000;
 // what the OS knows and not what a person would type. Guessing it would put a
 // name nobody chose on every recording.
 const IDENTITY_HTML = path.join(__dirname, 'identity.html');
-const CONSENT_HTML = path.join(__dirname, 'consent.html');
+const SETUP_HTML = path.join(__dirname, 'setup.html');
 const MEETINGS_HTML = path.join(__dirname, 'meetings.html');
 // How long the prompt waits for the page to report its height before showing
 // itself anyway. Short enough not to be noticed after a capture, long enough
@@ -1403,6 +1416,39 @@ function openAcknowledgements() {
     });
 }
 
+// Title stays down to a few characters whatever the state vocabulary grows
+// into: the recording time while a capture runs ("Rec 3:52", Jon's call 8,
+// counting up from the spawn), and single glyphs for anything wanting
+// attention. Everything wordy is a menu item, which has room for it.
+function trayTitle() {
+    const attention = permissionIssue || (pipeline && pipeline.state === 'failed');
+    const rec = state === 'stopped'
+        ? ''
+        : (session && session.startedAtMs ? `Rec ${setup.formatElapsed(Date.now() - session.startedAtMs)}` : 'Rec');
+    const title = [
+        rec,
+        pipeline && pipeline.state === 'running' ? '⚙' : '',
+        // A live detection prompt is visible in the menu bar itself, so a
+        // notification that never appeared is still recoverable (Decision #17).
+        detectPending ? '?' : '',
+        attention ? '⚠' : '',
+    ].filter(Boolean).join(' ');
+    return title ? ` ${title}` : '';
+}
+
+// Redraws only the title, once a second while a capture runs, so the time
+// counts up. The menu is left alone: rebuilding it every second would close it
+// under the person reading it.
+let trayClock = null;
+function syncTrayClock() {
+    if (state !== 'stopped' && !trayClock) {
+        trayClock = setInterval(() => { if (tray) tray.setTitle(trayTitle()); }, 1000);
+    } else if (state === 'stopped' && trayClock) {
+        clearInterval(trayClock);
+        trayClock = null;
+    }
+}
+
 function renderTray() {
     const label = LABEL[state];
     const pipelineNote = pipeline && PIPELINE_NOTE[pipeline.state]
@@ -1410,20 +1456,8 @@ function renderTray() {
         : null;
     const permNote = permissionIssue ? permissionIssue.note : null;
 
-    // Title stays down to a few characters whatever the state vocabulary
-    // grows into: a word for capture, and single glyphs for anything wanting
-    // attention. Everything wordy is a menu item, which has room for it.
-    const attention = permissionIssue || (pipeline && pipeline.state === 'failed');
-    const title = [
-        state === 'stopped' ? '' : 'Rec',
-        pipeline && pipeline.state === 'running' ? '⚙' : '',
-        // A live detection prompt is visible in the menu bar itself, so a
-        // notification that never appeared is still recoverable (Decision #17).
-        detectPending ? '?' : '',
-        attention ? '⚠' : '',
-    ].filter(Boolean).join(' ');
     tray.setImage(iconFor(state));
-    tray.setTitle(title ? ` ${title}` : '');
+    tray.setTitle(trayTitle());
 
     const active = state !== 'stopped';
     const items = [
@@ -1447,24 +1481,24 @@ function renderTray() {
             { label: `Never ask about ${name}`, click: () => answerDetectPrompt(key, 'never') },
         );
     }
-    // Until the recording notice is agreed to, a menu item that opens it: the
-    // window can be closed with "Not now", and a menu bar item must never be a
-    // dead end (SAA-195's rule).
-    if (!consent.isAcknowledged(SUPPORT_DIR)) {
-        items.push(
-            { type: 'separator' },
-            { label: 'Recording notice\u2026',
-              click: () => showConsentWindow(blockedStartFresh() ? 'blocked' : 'launch') },
-        );
-    }
-    // The sign-in (SAA-227 part B): only while a server is set
-    // and this app holds no capture token for it.
-    const captureServer = readCaptureServerUrl();
-    if (captureServer && !(captureTokens && captureTokens.server === captureServer)) {
-        items.push(
-            { type: 'separator' },
-            { label: 'Sign in to Clipwise…', click: signInToCaptureServer },
-        );
+    // The account items (setup.js trayAccountItems). Until setup has been
+    // finished once, one item leads back into the setup window, which can be
+    // closed at any screen, and a menu bar item must never be a dead end
+    // (SAA-195's rule). After that: the recording notice while it is not agreed
+    // to, the sign-in (SAA-227 part B) while a server is set and this app holds
+    // no capture token for it, and Sign out while it does.
+    const accountItems = setup.trayAccountItems({ setupCompleted: setupCompleted(), ...setupStatus() });
+    if (accountItems.length) items.push({ type: 'separator' });
+    for (const item of accountItems) {
+        if (item === 'finish-setup') {
+            items.push({ label: 'Finish setting up Clipwise…', click: () => showSetupWindow(blockedStartFresh() ? 'blocked' : 'launch') });
+        } else if (item === 'recording-notice') {
+            items.push({ label: 'Recording notice…', click: () => showSetupWindow(blockedStartFresh() ? 'blocked' : 'launch') });
+        } else if (item === 'sign-in') {
+            items.push({ label: 'Sign in to Clipwise…', click: signInToCaptureServer });
+        } else if (item === 'sign-out') {
+            items.push({ label: 'Sign out', click: () => signOutOfCaptureServer('tray') });
+        }
     }
     items.push(
         { type: 'separator' },
@@ -1573,6 +1607,10 @@ function renderTray() {
     }
     items.push(
         { type: 'separator' },
+        // On by default from the first run in Applications (applyLoginDefault),
+        // and only offered there: launch at login needs a path that stays put.
+        { label: 'Open at login', type: 'checkbox', checked: openAtLogin(),
+          enabled: app.isInApplicationsFolder(), click: (item) => setOpenAtLogin(item.checked) },
         { label: 'About Clipwise', click: () => app.showAboutPanel() },
         { label: 'Acknowledgements…', click: openAcknowledgements },
         { label: 'Quit', click: quitApp },
@@ -1770,6 +1808,7 @@ function setState(next) {
     const prev = state;
     state = next;
     renderTray();
+    syncTrayClock();
     if (prev !== next) notifyStateChange(prev, next);
 }
 
@@ -2718,6 +2757,7 @@ function signInToCaptureServer() {
         if (captureSignIn === listener) captureSignIn = null;
         if (!code) {
             console.error(`[clipwise-recorder] sign-in: ${url.searchParams.get('error') || 'no_code'}`);
+            setupSignInFinished(false);
             return;
         }
         exchangeCaptureCode(server, code, redirectUri, verifier);
@@ -2763,6 +2803,7 @@ async function exchangeCaptureCode(server, code, redirectUri, verifier) {
         });
         if (!body.access_token || !body.refresh_token) {
             console.error(`[clipwise-recorder] sign-in: token ${status} ${body.error || 'no_token'}`);
+            setupSignInFinished(false);
             return;
         }
         setCaptureTokens({
@@ -2772,8 +2813,10 @@ async function exchangeCaptureCode(server, code, redirectUri, verifier) {
             expiresAt: Date.now() + Number(body.expires_in) * 1000,
         });
         console.error(`[clipwise-recorder] sign-in: signed in to ${server}`);
+        setupSignInFinished(true);
     } catch (err) {
         console.error(`[clipwise-recorder] sign-in: failed: ${err.cause?.code || err.name}`);
+        setupSignInFinished(false);
     }
     renderTray();
 }
@@ -3865,31 +3908,83 @@ function registerIdentityIpc() {
     });
 }
 
-// --- first-run acknowledgement (SAA-216) -----------------------------------
+// --- first-run setup (SAA-198 step 4) and the recording notice (SAA-216) ------
 //
-// consent.js holds the rules; this is the window, the gate's memory and the
-// clipboard. The gate itself is at the top of startRecording.
+// setup.js and consent.js hold the rules; this is the window, the gate's memory
+// and the clipboard. The gate itself is at the top of startRecording.
+//
+// One window, setup.html. Until setup has been finished once it is "Set up
+// Clipwise": the notice, the team's address, sign-in and the two audio
+// permissions, opening at the first screen not yet done. After that it only
+// ever shows the notice, when the notice is not agreed to (a raised version).
 
 // What the gate last turned away: { trigger, at }, trigger null for a manual
 // start. Kept for a while, not forever: a start refused long ago is not
 // something agreeing now should quietly carry out.
 let blockedStart = null;
 const BLOCKED_START_TTL_MS = 10 * 60 * 1000;
-let consentWindow = null; // { win, token, mode }
+// { win, token, mode, noticeOnly, override, busy, waiting, error, asking, address }
+//   mode       'launch' or 'blocked' (consent.buttonLabel)
+//   noticeOnly setup was finished before this window opened
+//   override   a screen asked for by name ("Use a different address")
+//   busy       the address is being checked
+//   waiting    a sign-in is open in the browser
+//   asking     'mic' or 'tap' while macOS's prompt is up
+let setupWindow = null;
+// How long the team's address has to answer.
+const TEAM_ADDRESS_TIMEOUT_MS = 10000;
+// How long the system audio prompt is waited on before the probe gives up.
+const SYSTEM_AUDIO_PROMPT_WAIT_MS = 120000;
 
 function blockedStartFresh() {
     if (blockedStart && Date.now() - blockedStart.at > BLOCKED_START_TTL_MS) blockedStart = null;
     return blockedStart;
 }
 
-function showConsentWindow(mode) {
+// The two grants as audiodevs reports them (granted, denied, notDetermined, …),
+// for the setup window and setup.settleSetup. Read at launch, whenever the setup
+// window comes to the front and after each request; a failed read keeps the
+// last answer.
+let lastPermissions = { mic: 'notDetermined', tap: 'notDetermined' };
+function readPermissions() {
+    try {
+        const dev = readDevices();
+        lastPermissions = { mic: dev.micPerm, tap: dev.tapPerm };
+    } catch (err) {
+        console.error(`setup: could not read the permissions: ${String(err)}`);
+    }
+    return lastPermissions;
+}
+
+function setupStatus() {
+    const server = readCaptureServerUrl();
+    return {
+        acknowledged: consent.isAcknowledged(SUPPORT_DIR),
+        server,
+        signedIn: !!(server && captureTokens && captureTokens.server === server),
+        mic: lastPermissions.mic,
+        tap: lastPermissions.tap,
+    };
+}
+
+// Finished once, or all four done now (and then recorded as finished).
+function setupCompleted() {
+    const before = setup.isSetupCompleted(SUPPORT_DIR);
+    const now = setup.settleSetup(SUPPORT_DIR, setupStatus());
+    if (!before && now) console.error('[clipwise-recorder] setup: all four done — recorded as finished');
+    return now;
+}
+
+function showSetupWindow(mode = 'launch') {
+    const noticeOnly = setupCompleted();
+    if (noticeOnly && consent.isAcknowledged(SUPPORT_DIR)) return;
     // Already open: bring it forward, and if a start has been blocked since it
-    // opened by itself, say so on the button.
-    if (consentWindow) {
-        if (mode === 'blocked') consentWindow.mode = 'blocked';
+    // opened by itself, say so on the notice's button.
+    if (setupWindow) {
+        if (mode === 'blocked') setupWindow.mode = 'blocked';
+        sendSetupState();
         try {
-            consentWindow.win.webContents.send('consent:set-label', consent.buttonLabel(consentWindow.mode));
-            consentWindow.win.show();
+            setupWindow.win.show();
             app.focus({ steal: true });
         } catch {}
         return;
@@ -3900,46 +3995,226 @@ function showConsentWindow(mode) {
         win = new BrowserWindow({
             useContentSize: true,
             width: 460,
-            height: 330,
+            height: 360,
             show: false,
             resizable: false,
             minimizable: false,
             maximizable: false,
             fullscreenable: false,
-            alwaysOnTop: true,
-            title: 'Before you record',
+            // The notice alone stays on top, as it always has. Setup does not:
+            // the browser's sign-in page and macOS's prompts have to come in front.
+            alwaysOnTop: noticeOnly,
+            title: noticeOnly ? 'Before you record' : 'Set up Clipwise',
             webPreferences: { nodeIntegration: true, contextIsolation: false },
         });
     } catch (err) {
         // Nothing records while the gate is shut, so a window that cannot be
         // drawn has to be said out loud rather than leave a button that does nothing.
-        console.error(`consent: could not open the window: ${String(err)}`);
-        notify('Clipwise: could not show the recording notice',
-            'Recording stays off until it is agreed to. Try "Recording notice" in the menu bar.');
+        console.error(`setup: could not open the window: ${String(err)}`);
+        notify('Clipwise: could not show the setup window',
+            'Recording stays off until the recording notice is agreed to. Try the Clipwise menu bar item.');
         return;
     }
-    consentWindow = { win, token, mode };
+    setupWindow = { win, token, mode, noticeOnly, override: null, busy: false, waiting: false, error: '', asking: null, address: undefined };
+    console.error(`[clipwise-recorder] setup: window opened (${noticeOnly ? 'notice only' : `setup, at "${setupView().screen}"`}, as "${mode}")`);
     win.once('ready-to-show', () => {
         win.show();
         // An accessory app's window opens behind whatever is in front.
         try { app.focus({ steal: true }); } catch {}
     });
-    // Closing the window is "Not now": nothing is written and the gate stays shut.
+    // Back from System Settings or the browser: what is done may have changed.
+    win.on('focus', () => {
+        if (!setupWindow || setupWindow.win !== win || setupWindow.noticeOnly) return;
+        readPermissions();
+        sendSetupState();
+    });
+    // Closing the window is "Not now": nothing is written, and the gate stays shut
+    // if the notice was not agreed to.
     win.once('closed', () => {
-        if (consentWindow && consentWindow.win === win) consentWindow = null;
+        if (setupWindow && setupWindow.win === win) setupWindow = null;
         renderTray();
     });
-    win.loadFile(CONSENT_HTML, { query: { token, label: consent.buttonLabel(mode) } }).catch((err) => {
-        console.error(`consent: window failed to load: ${String(err)}`);
+    win.loadFile(SETUP_HTML, { query: { token } }).catch((err) => {
+        console.error(`setup: window failed to load: ${String(err)}`);
         try { win.close(); } catch {}
     });
 }
 
-function closeConsentWindow() {
-    if (!consentWindow) return;
-    const { win } = consentWindow;
-    consentWindow = null;
+// What the page draws: the screen, and everything on it.
+function setupView() {
+    const w = setupWindow;
+    const status = setupStatus();
+    const screen = w.noticeOnly
+        ? 'notice'
+        : (w.override || setup.firstIncompleteScreen(status) || 'permissions');
+    const host = status.server ? new URL(status.server).host : '';
+    return {
+        screen,
+        stepText: w.noticeOnly ? '' : `Step ${setup.SCREENS.indexOf(screen) + 1} of ${setup.SCREENS.length}`,
+        noticeLabel: consent.buttonLabel(w.mode),
+        address: w.address !== undefined ? w.address : host,
+        host,
+        busy: w.busy,
+        waiting: w.waiting,
+        error: w.error,
+        asking: w.asking,
+        mic: status.mic,
+        tap: status.tap,
+        permissionsSettled: setup.permissionSettled(status.mic) && setup.permissionSettled(status.tap),
+    };
+}
+
+function sendSetupState() {
+    if (!setupWindow) return;
+    try { setupWindow.win.webContents.send('setup:state', setupView()); } catch {}
+}
+
+function closeSetupWindow() {
+    if (!setupWindow) return;
+    const { win } = setupWindow;
+    setupWindow = null;
     try { win.close(); } catch {}
+}
+
+// Screen 2. The address is kept only once it answers as Clipwise
+// (setup.isClipwiseDiscovery); what was typed is logged as the origin it became,
+// and the reply only as a verdict and a status.
+async function checkTeamAddress(input) {
+    const w = setupWindow;
+    w.error = '';
+    w.address = input;
+    const parsed = setup.normalizeTeamAddress(input);
+    if (!parsed.ok) {
+        w.error = parsed.error;
+        sendSetupState();
+        return;
+    }
+    w.busy = true;
+    sendSetupState();
+    let verdict;
+    try {
+        const res = await fetch(`${parsed.origin}/.well-known/oauth-protected-resource`, {
+            signal: AbortSignal.timeout(TEAM_ADDRESS_TIMEOUT_MS),
+            redirect: 'error',
+        });
+        const body = await res.json().catch(() => null);
+        verdict = setup.isClipwiseDiscovery(parsed.origin, res.status, body) ? 'clipwise' : `not Clipwise (${res.status})`;
+    } catch (err) {
+        verdict = `unreachable (${err.cause?.code || err.name})`;
+    }
+    console.error(`[clipwise-recorder] setup: team address ${parsed.origin}: ${verdict}`);
+    if (setupWindow !== w) return;
+    w.busy = false;
+    if (verdict === 'clipwise') {
+        try {
+            writeCaptureServer(parsed.origin);
+            w.override = null;
+            w.address = undefined;
+        } catch (err) {
+            console.error(`setup: could not save the address: ${String(err)}`);
+            w.error = 'Couldn’t save the address. Try again.';
+        }
+        renderTray();
+    } else if (verdict.startsWith('not Clipwise')) {
+        w.error = `${parsed.host} answered, but it isn’t a Clipwise server.`;
+    } else {
+        w.error = `Couldn’t reach ${parsed.host}. Check the address and your connection.`;
+    }
+    sendSetupState();
+}
+
+// capture-server.json, as readCaptureServerUrl reads it. Atomic, like the others.
+function writeCaptureServer(origin) {
+    fs.mkdirSync(SUPPORT_DIR, { recursive: true });
+    const tmp = `${CAPTURE_SERVER_PATH}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ url: origin }) + '\n');
+    fs.renameSync(tmp, CAPTURE_SERVER_PATH);
+}
+
+// Screen 3's answer, from the sign-in's loopback listener or token exchange.
+function setupSignInFinished(ok) {
+    if (!setupWindow || !setupWindow.waiting) return;
+    setupWindow.waiting = false;
+    setupWindow.error = ok ? '' : 'Sign-in didn’t finish. Try again.';
+    sendSetupState();
+    if (ok) {
+        try {
+            setupWindow.win.show();
+            app.focus({ steal: true });
+        } catch {}
+    }
+}
+
+// Screen 4. macOS's own prompt, asked for while the person is on this screen and
+// nothing is recording, so the 9 s start timer never races it (SAA-124).
+async function requestPermission(which) {
+    const w = setupWindow;
+    w.error = '';
+    w.asking = which;
+    sendSetupState();
+    console.error(`[clipwise-recorder] setup: asking for ${which === 'mic' ? 'the microphone' : 'system audio'}`);
+    try {
+        if (which === 'mic') await systemPreferences.askForMediaAccess('microphone');
+        else await promptForSystemAudio();
+    } catch (err) {
+        console.error(`setup: asking for ${which} failed: ${String(err)}`);
+    }
+    readPermissions();
+    console.error(`[clipwise-recorder] setup: permissions now mic=${lastPermissions.mic} tap=${lastPermissions.tap}`);
+    if (setupWindow !== w) return;
+    w.asking = null;
+    sendSetupState();
+}
+
+// There is no call that asks for system audio: macOS asks when a process of this
+// app first opens a tap. So the bundled systemtap runs until the answer is in
+// (at most SYSTEM_AUDIO_PROMPT_WAIT_MS), writing to /dev/null, so nothing it
+// hears is kept anywhere. The person is on the setup screen, not on a call.
+function promptForSystemAudio() {
+    return new Promise((resolve) => {
+        let child;
+        try {
+            child = spawn(SYSTEMTAP_BIN, [], { env: { ...process.env, SYSTEMTAP_OUT: '/dev/null' }, stdio: 'ignore' });
+        } catch (err) {
+            console.error(`setup: could not run systemtap for the prompt: ${String(err)}`);
+            resolve();
+            return;
+        }
+        child.once('error', (err) => console.error(`setup: systemtap for the prompt: ${String(err)}`));
+        const started = Date.now();
+        const timer = setInterval(() => {
+            const answered = readPermissions().tap !== 'notDetermined';
+            const gone = child.exitCode !== null || child.signalCode !== null;
+            if (!answered && !gone && Date.now() - started < SYSTEM_AUDIO_PROMPT_WAIT_MS) return;
+            clearInterval(timer);
+            try { child.kill('SIGINT'); } catch {}
+            setTimeout(() => {
+                if (child.exitCode === null && child.signalCode === null) {
+                    try { child.kill('SIGKILL'); } catch {}
+                }
+                resolve();
+            }, KILL_GRACE_MS);
+        }, 1000);
+    });
+}
+
+// "Done": setup is recorded as finished, launch at login gets its default, and
+// one notification says the app is ready.
+function finishSetup() {
+    if (setup.firstIncompleteScreen(setupStatus()) !== null) {
+        sendSetupState();
+        return;
+    }
+    try {
+        setup.recordSetupCompleted(SUPPORT_DIR);
+    } catch (err) {
+        console.error(`setup: could not record it as finished: ${String(err)}`);
+    }
+    console.error('[clipwise-recorder] setup: finished');
+    closeSetupWindow();
+    applyLoginDefault();
+    renderTray();
+    notify('Clipwise is ready', 'Start a recording from the menu bar.');
 }
 
 // After "I understand" has been saved. Whether a capture starts is
@@ -3963,9 +4238,13 @@ function resumeBlockedStart(mode) {
     startRecording();
 }
 
-function registerConsentIpc() {
-    ipcMain.on('consent:acknowledge', (_event, payload) => {
-        if (!consentWindow || !payload || payload.token !== consentWindow.token) return;
+function registerSetupIpc() {
+    const fromWindow = (payload) => !!setupWindow && !!payload && payload.token === setupWindow.token;
+    ipcMain.on('setup:ready', (_event, payload) => {
+        if (fromWindow(payload)) sendSetupState();
+    });
+    ipcMain.on('setup:acknowledge', (_event, payload) => {
+        if (!fromWindow(payload)) return;
         try {
             consent.recordAcknowledgement(SUPPORT_DIR);
         } catch (err) {
@@ -3974,21 +4253,133 @@ function registerConsentIpc() {
             console.error(`consent: could not save the acknowledgement: ${String(err)}`);
             notify('Clipwise: could not save your answer',
                 'Nothing was recorded. Try again.');
-            try { consentWindow.win.webContents.send('consent:not-saved'); } catch {}
+            sendSetupState();
             return;
         }
-        const mode = consentWindow.mode;
+        const mode = setupWindow.mode;
         console.error(`[clipwise-recorder] consent: recording notice agreed to (opened as "${mode}")`);
-        closeConsentWindow();
+        if (setupWindow.noticeOnly) closeSetupWindow();
+        else {
+            setupWindow.mode = 'launch';
+            sendSetupState();
+        }
         renderTray();
         resumeBlockedStart(mode);
     });
-    ipcMain.on('consent:later', (_event, payload) => {
-        if (!consentWindow || !payload || payload.token !== consentWindow.token) return;
-        console.error('[clipwise-recorder] consent: "Not now" — gate stays shut');
-        closeConsentWindow();
+    ipcMain.on('setup:later', (_event, payload) => {
+        if (!fromWindow(payload)) return;
+        const screen = setupView().screen;
+        console.error(screen === 'notice'
+            ? '[clipwise-recorder] consent: "Not now" — gate stays shut'
+            : `[clipwise-recorder] setup: "Not now" at "${screen}"`);
+        closeSetupWindow();
         renderTray();
     });
+    ipcMain.on('setup:address', (_event, payload) => {
+        if (!fromWindow(payload) || setupWindow.busy) return;
+        checkTeamAddress(String(payload.address || ''));
+    });
+    ipcMain.on('setup:change-address', (_event, payload) => {
+        if (!fromWindow(payload)) return;
+        Object.assign(setupWindow, { override: 'address', address: undefined, error: '', waiting: false });
+        sendSetupState();
+    });
+    ipcMain.on('setup:signin', (_event, payload) => {
+        if (!fromWindow(payload)) return;
+        if (!readCaptureServerUrl()) {
+            setupWindow.override = 'address';
+            sendSetupState();
+            return;
+        }
+        Object.assign(setupWindow, { error: '', waiting: true });
+        signInToCaptureServer();
+        sendSetupState();
+    });
+    ipcMain.on('setup:permission-request', (_event, payload) => {
+        // Never before the notice is agreed to: the system audio prompt runs a tap.
+        if (!fromWindow(payload) || setupWindow.asking || !consent.isAcknowledged(SUPPORT_DIR)) return;
+        if (payload.which === 'mic' || payload.which === 'tap') requestPermission(payload.which);
+    });
+    ipcMain.on('setup:permission-settings', (_event, payload) => {
+        if (!fromWindow(payload)) return;
+        const pane = SETTINGS_PANE[payload.which === 'mic' ? 'Microphone' : 'System Audio'];
+        if (!pane) return;
+        console.error(`[clipwise-recorder] setup: opening System Settings for ${payload.which}`);
+        shell.openExternal(pane);
+    });
+    ipcMain.on('setup:done', (_event, payload) => {
+        if (fromWindow(payload)) finishSetup();
+    });
+}
+
+// --- launch at login and the move to Applications (SAA-198 step 4) ----------
+
+function openAtLogin() {
+    try { return !!app.getLoginItemSettings().openAtLogin; } catch { return false; }
+}
+
+// The tray's "Open at login". Once the person has chosen either way, the
+// default is never applied over it (login-item.json).
+function setOpenAtLogin(on) {
+    try {
+        app.setLoginItemSettings({ openAtLogin: !!on });
+    } catch (err) {
+        console.error(`login item: could not change it: ${String(err)}`);
+    }
+    try { setup.recordLoginDefaultApplied(SUPPORT_DIR); } catch {}
+    console.error(`[clipwise-recorder] login item: ${on ? 'on' : 'off'} (tray)`);
+    renderTray();
+}
+
+// On by default (Jon's call 6): once, the first time this app runs from
+// Applications with setup finished (setup.shouldApplyLoginDefault).
+function applyLoginDefault() {
+    const decision = {
+        inApplications: app.isInApplicationsFolder(),
+        setupCompleted: setupCompleted(),
+        defaultApplied: setup.loginDefaultApplied(SUPPORT_DIR),
+    };
+    if (!setup.shouldApplyLoginDefault(decision)) return;
+    try {
+        app.setLoginItemSettings({ openAtLogin: true });
+        setup.recordLoginDefaultApplied(SUPPORT_DIR);
+        console.error('[clipwise-recorder] login item: on by default (first run from Applications with setup finished)');
+    } catch (err) {
+        console.error(`login item: could not turn it on: ${String(err)}`);
+    }
+}
+
+// Run from anywhere but Applications (straight from the .dmg, or translocated),
+// the built app offers to move itself there and relaunch, since launch at login
+// needs a path that stays put. Resolves true when the move has started and this
+// process is about to quit, so nothing else should start.
+async function offerMoveToApplications() {
+    if (!setup.shouldOfferMove({ bundled: !!BUILD_INFO, inApplications: app.isInApplicationsFolder() })) return false;
+    console.error(`[clipwise-recorder] move: running from ${app.getPath('exe')}, not Applications — offering to move`);
+    try { app.focus({ steal: true }); } catch {}
+    const { response } = await dialog.showMessageBox({
+        type: 'question',
+        buttons: ['Move and relaunch', 'Not now'],
+        defaultId: 0,
+        cancelId: 1,
+        message: 'Move Clipwise to Applications?',
+        detail: 'Clipwise needs to run from your Applications folder to start when you log in.',
+    });
+    if (response !== 0) {
+        console.error('[clipwise-recorder] move: "Not now"');
+        return false;
+    }
+    try {
+        if (app.moveToApplicationsFolder()) {
+            console.error('[clipwise-recorder] move: moved to Applications, relaunching');
+            return true;
+        }
+        console.error('[clipwise-recorder] move: not moved');
+    } catch (err) {
+        console.error(`move: failed: ${String(err)}`);
+        notify('Clipwise: could not move to Applications', 'Drag Clipwise into your Applications folder instead.');
+    }
+    return false;
 }
 
 function copyRecordingNotice() {
@@ -4019,7 +4410,7 @@ function startRecording() {
         blockedStart = { trigger, at: Date.now() };
         console.error(`[clipwise-recorder] consent: start blocked until the recording notice is agreed to `
             + `(${trigger ? `triggered by ${trigger.key}` : 'manual start'})`);
-        showConsentWindow('blocked');
+        showSetupWindow('blocked');
         // A capture an app asked for would otherwise just not happen, silently.
         if (trigger) {
             notify('Clipwise: agree to the recording notice',
@@ -4390,33 +4781,40 @@ app.setAboutPanelOptions({
     credits: 'Meeting recordings captured on your Mac, intelligence surfaced through Claude.',
 });
 
-app.whenReady().then(() => {
-    // SAA-105 EXPERIMENT, 2026-09-01 — the paired half of LSUIElement in
-    // build-app.sh. Normally this line is `if (app.dock) app.dock.hide();`
-    // and Clipwise is an agent app. Revert to restore it.
-    //
-    // Removed rather than left in place because it sets the activation policy
-    // at runtime: with it here the app returns to accessory whatever the plist
-    // declares, and the experiment would report a clean negative without ever
-    // having tested anything. The plist decides what the app launches as; this
-    // decides what it is a moment later. They only mean something together.
+app.whenReady().then(async () => {
+    // A second launch has already quit (the single-instance lock, above).
+    if (!GOT_SINGLE_INSTANCE_LOCK) return;
+    // Menu bar only, no Dock icon (Jon's call 6). LSUIElement in build-app.sh
+    // keeps a launch from showing one at all; this is the runtime half, and the
+    // two only mean something together (SAA-105).
+    if (app.dock) app.dock.hide();
+    // First, before the tray or any child exists: a move relaunches the app from
+    // Applications, and this process quits.
+    if (await offerMoveToApplications()) return;
     tray = new Tray(iconFor('stopped'));
     {
         const server = readCaptureServerUrl();
         console.error(`[clipwise-recorder] capture server: ${server || 'none (no usable capture-server.json; captures stay on this Mac)'}`);
     }
-    // Before the first render, so the tray knows whether to offer sign-in.
+    // Before the first render, so the tray knows whether to offer sign-in, and
+    // whether setup is done (setupCompleted needs the token and the grants).
     loadCaptureTokens();
+    readPermissions();
     setState('stopped');
     // Whatever was queued before this launch, including a capture whose app quit
     // right after Stop.
     drainUploadQueue('launch');
     registerIdentityIpc();
     registerMeetingsIpc();
-    registerConsentIpc();
-    // Before any call can start a capture, so that a new person has read it by
-    // the time their first one is turned away (SAA-216).
-    if (!consent.isAcknowledged(SUPPORT_DIR)) showConsentWindow('launch');
+    registerSetupIpc();
+    // Before any call can start a capture, so that a new person has read the
+    // notice by the time their first one is turned away (SAA-216). Opens setup
+    // if it was never finished, the notice alone if setup was finished and the
+    // notice is not agreed to, and nothing otherwise.
+    showSetupWindow('launch');
+    // At launch as well as from Done, so an install that finished setup before
+    // it was in Applications gets the default the first time it runs there.
+    applyLoginDefault();
     // Before anything spawns its own children (SAA-152) — see
     // sweepStrayChildren's comment for why that ordering matters.
     sweepStrayChildren();
@@ -4436,6 +4834,13 @@ app.whenReady().then(() => {
     // to cost someone their menu bar icon. A missing or crashing micwatch
     // disables detection and changes nothing else.
     startDetector();
+});
+
+// A second launch was turned away by the lock: an unfinished setup is the one
+// thing it could have been for, so the window comes forward.
+app.on('second-instance', () => {
+    console.error('[clipwise-recorder] a second launch was turned away');
+    if (tray && !setupCompleted()) showSetupWindow('launch');
 });
 
 app.on('will-quit', () => { isQuitting = true; stopDetector(); });

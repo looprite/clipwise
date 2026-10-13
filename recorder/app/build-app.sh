@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build Clipwise.app — a double-clickable menu bar app, signed with the
-# Developer ID from SAA-88, that can be added to Login Items by hand.
+# Developer ID from SAA-88.
 #
 # What this replaces. Nothing: there was no build script. The steps it
 # automates were done by hand from the README, which had drifted (it builds
@@ -11,8 +11,10 @@
 #
 # What it deliberately does not do. No notarization, no stapling and no DMG:
 # those need an Apple notary profile and are notarize.sh's, run after this. No
-# auto-update, and no login-item registration — the app never asks to launch
-# itself, it is added in System Settings by hand.
+# auto-update: a new version replaces the app by hand. Launch at login is not
+# this script's either: the app registers itself the first time it runs from
+# Applications with setup finished, and the tray's "Open at login" turns it off
+# (SAA-198 step 4).
 #
 # Signed with the hardened runtime (SAA-198 engineering call 6, SAA-126): every
 # executable in the bundle, inside-out, with only the entitlements it needs.
@@ -174,12 +176,14 @@ cp "$APP_SRC/autostop.js" "$C/Resources/app/autostop.js"
 # The "Still recording?" reminder's decision. main.js requires it by relative
 # path; a bundle without it fails to launch.
 cp "$APP_SRC/silence-reminder.js" "$C/Resources/app/silence-reminder.js"
-# The first-run acknowledgement (SAA-216). main.js requires consent.js by
-# relative path and loads consent.html by path relative to itself; a bundle
-# without the first fails to launch, and without the second the gate would
-# shut with nothing to open.
+# The first-run acknowledgement (SAA-216) and the setup window it is now the
+# first screen of (SAA-198 step 4). main.js requires consent.js and setup.js by
+# relative path and loads setup.html by path relative to itself; a bundle
+# without either .js fails to launch, and without the page the gate would shut
+# with nothing to open.
 cp "$APP_SRC/consent.js" "$C/Resources/app/consent.js"
-cp "$APP_SRC/consent.html" "$C/Resources/app/consent.html"
+cp "$APP_SRC/setup.js" "$C/Resources/app/setup.js"
+cp "$APP_SRC/setup.html" "$C/Resources/app/setup.html"
 install -m 755 "$SYSTEMTAP_BIN" "$C/Resources/bin/systemtap"
 install -m 755 "$MICCAP_BIN"    "$C/Resources/bin/miccap"
 install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"
@@ -274,24 +278,22 @@ set_key CFBundleDisplayName     string "$APP_NAME"
 set_key CFBundleExecutable      string "$APP_NAME"
 set_key CFBundleIdentifier      string "$BUNDLE_ID"
 set_key CFBundleShortVersionString string "$VERSION"
-set_key CFBundleVersion         string "$VERSION"
-# SAA-105 EXPERIMENT, 2026-09-01 — temporarily false. Revert to restore.
-#
-# Normally true: menu bar only. The paired app.dock.hide() in main.js runs
-# after the app is up, so without this key a login launch flashes a Dock icon
-# and steals focus from whatever the user is doing. That cost is real and is
-# being paid deliberately for the duration of this experiment.
-#
-# Clipwise is evicted from a full menu bar; Granola and Fathom are not. Both
-# are Electron, both use a plain Tray, and none of the three carries a
-# persisted status item position — so agent status is the only structural
-# difference left between us and them. This flips that one variable.
-#
-# This key and main.js's app.dock.hide() are two halves of one setting. Moving
-# only this one changes nothing: the runtime call would put the app straight
-# back into accessory policy and the experiment would read as a clean negative
-# having never run.
-set_key LSUIElement             bool   false
+# The build number goes up with every build (SAA-198 engineering call 11): the
+# build's UTC time to the minute, YYYYMMDDHHMM. No counter file to keep, and a
+# replaced app is always newer by this number than the one it replaced.
+set_key CFBundleVersion         string "$(date -u +%Y%m%d%H%M)"
+# Menu bar only, no Dock icon (SAA-198, Jon's call 6). The paired
+# app.dock.hide() in main.js runs after the app is up, so without this key a
+# login launch flashes a Dock icon and steals focus from whatever the user is
+# doing. The two are halves of one setting (SAA-105, whose experiment set this
+# false and removed the runtime call).
+set_key LSUIElement             bool   true
+# Electron's own permission texts for devices Clipwise never uses (SAA-198
+# engineering call 11): a camera or Bluetooth prompt with "This app needs
+# access to …" would be a prompt for something the app does not do.
+for key in NSCameraUsageDescription NSBluetoothPeripheralUsageDescription NSBluetoothAlwaysUsageDescription; do
+    $PB -c "Delete :$key" "$PLIST" >/dev/null 2>&1 || true
+done
 # Core Audio Taps floor, not Electron's 12.0.
 set_key LSMinimumSystemVersion  string "14.2"
 # The text macOS puts in the permission prompt. The capture runs in spawned
