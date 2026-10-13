@@ -38,6 +38,7 @@
 //       (createAuth's second argument): it fails.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { buildApp } from "../app.js";
 import { authConfigFromEnv, createAuth } from "../auth/auth.js";
@@ -1321,6 +1322,49 @@ async function main(): Promise<void> {
         (mcpOnCapture.headers.get("www-authenticate") ?? "").includes('error="insufficient_scope"'),
       "MCP token: refused on a capture route with 403 insufficient_scope and a challenge naming the scope",
       `${mcpOnCapture.status} ${mcpOnCapture.json?.error ?? ""} ${mcpOnCapture.headers.get("www-authenticate") ?? ""}`,
+    );
+
+    // The recorder's Sign out (SAA-198 step 5): what the tray runs,
+    // recorder/app/capture-sign-out.js, called here against this server, then
+    // the refresh token tried. Loaded the way main.js loads it; code without it
+    // signs out on the Mac only, and the token still works.
+    const signOutModule = (() => {
+      try {
+        return createRequire(import.meta.url)("../../../recorder/app/capture-sign-out.js") as {
+          REVOKE_PATH: string;
+          revokeRefreshToken: (server: string, refresh: string, clientId: string) => Promise<string>;
+        };
+      } catch {
+        return null;
+      }
+    })();
+    const refreshWith = (refresh: string | null) =>
+      http("POST", "/api/auth/oauth2/token", {
+        form: { grant_type: "refresh_token", refresh_token: refresh ?? "", client_id: recorder.clientId, resource: cfg.captureResource },
+      });
+    const signedOut = await recFlow(A);
+    const signOutOutcome = signOutModule ? await signOutModule.revokeRefreshToken(base, signedOut.refresh ?? "", recorder.clientId) : "(Mac's copy only: no revoke)";
+    const afterSignOut = await refreshWith(signedOut.refresh);
+    record(
+      !!signedOut.refresh && afterSignOut.status >= 400 && !afterSignOut.json?.access_token,
+      "recorder Sign out: the refresh token is revoked on the server, and a refresh with it afterwards is refused",
+      `sign-out ${signOutOutcome}; refresh afterwards ${afterSignOut.status} ${afterSignOut.json?.error ?? (afterSignOut.json?.access_token ? "(new access token issued)" : "")}`,
+    );
+    const stillSignedIn = await recFlow(A);
+    const notSignedOut = await refreshWith(stillSignedIn.refresh);
+    record(
+      notSignedOut.status === 200 && !!notSignedOut.json?.access_token,
+      "recorder Sign out, the control: a refresh token that was not signed out still refreshes",
+      `refresh ${notSignedOut.status} ${notSignedOut.json?.error ?? ""}`,
+    );
+    const discovery = await http("GET", "/.well-known/oauth-authorization-server/api/auth");
+    const advertised = String(discovery.json?.revocation_endpoint ?? "");
+    let advertisedPath = "";
+    try { advertisedPath = new URL(advertised).pathname; } catch {}
+    record(
+      !!signOutModule && advertisedPath === signOutModule.REVOKE_PATH,
+      "recorder Sign out: its fixed revoke path is the revocation_endpoint the discovery document names",
+      `discovery ${advertisedPath || "(none)"}, recorder ${signOutModule?.REVOKE_PATH ?? "(no module)"}`,
     );
 
     // Every route that needs a token takes the kind its table entry says, and

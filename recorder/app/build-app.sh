@@ -184,6 +184,9 @@ cp "$APP_SRC/silence-reminder.js" "$C/Resources/app/silence-reminder.js"
 cp "$APP_SRC/consent.js" "$C/Resources/app/consent.js"
 cp "$APP_SRC/setup.js" "$C/Resources/app/setup.js"
 cp "$APP_SRC/setup.html" "$C/Resources/app/setup.html"
+# The tray's Sign out revokes on the server (SAA-198 step 5). main.js requires it
+# by relative path; a bundle without it fails to launch.
+cp "$APP_SRC/capture-sign-out.js" "$C/Resources/app/capture-sign-out.js"
 install -m 755 "$SYSTEMTAP_BIN" "$C/Resources/bin/systemtap"
 install -m 755 "$MICCAP_BIN"    "$C/Resources/bin/miccap"
 install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"

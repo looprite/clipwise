@@ -280,10 +280,17 @@ const CASES = [
     ['tray: signed in -> "Sign out", and no sign-in item', () => {
         const items = setup.trayAccountItems({ setupCompleted: true, acknowledged: true, server: 'https://t.example.com', signedIn: true });
         return items.includes('sign-out') && !items.includes('sign-in'); }],
-    ['tray: main.js labels the items and Sign out calls signOutOfCaptureServer', () =>
-        SRC.includes("label: 'Finish setting up Clipwise…'")
-        && /label: 'Sign out', click: \(\) => signOutOfCaptureServer\('tray'\)/.test(SRC)
-        && SRC.includes('setup.trayAccountItems({ setupCompleted: setupCompleted(), ...setupStatus() })')],
+    ['tray: main.js labels the items, and Sign out revokes on the server before signing out on the Mac (SAA-198 step 5)', () => {
+        const body = fnBody('signOutFromTray');
+        const revoke = body.indexOf('await revokeRefreshToken(held.server, held.refresh, CAPTURE_CLIENT_ID)');
+        const local = body.indexOf("signOutOfCaptureServer('tray')");
+        return SRC.includes("label: 'Finish setting up Clipwise…'")
+            && /label: 'Sign out', click: signOutFromTray \}/.test(SRC)
+            && revoke >= 0 && local > revoke
+            && SRC.includes('setup.trayAccountItems({ setupCompleted: setupCompleted(), ...setupStatus() })'); }],
+    ['build-app.sh copies capture-sign-out.js into the bundle (main.js requires it)', () =>
+        /cp "\$APP_SRC\/capture-sign-out\.js" "\$C\/Resources\/app\/capture-sign-out\.js"/.test(BUILD)
+        && SRC.includes("require('./capture-sign-out.js')")],
     ['address: no scheme means https, and only the origin is kept', () => {
         const a = setup.normalizeTeamAddress('  clipwise.example.com  ');
         const b = setup.normalizeTeamAddress('https://clipwise.example.com/login?x=1');
@@ -358,6 +365,8 @@ const CASES = [
         HTML.includes("const STATE_TEXT = { granted: 'Allowed', denied: 'Off', notDetermined: 'Not yet asked' };")
         && HTML.includes("(STATE_TEXT[state] || 'Not available')")
         && HTML.includes("el.className = `state ${state === 'granted' ? 'granted' : state === 'denied' ? 'denied' : ''}`;")],
+    ['window: the sign-in screen says Google asks once for read-only calendar access (SAA-198 step 5)', () =>
+        HTML.includes('Google asks once for read-only access to your calendar, so your recordings get their meeting&rsquo;s title and invitees.')],
     ['window: setup.html has the four screens and the notice\'s approved title', () =>
         ['screen-notice', 'screen-address', 'screen-signin', 'screen-permissions', '<h1>Before you record</h1>'].every(t => HTML.includes(t))],
     ['Dock: no icon — LSUIElement true in build-app.sh and app.dock.hide() at boot', () =>

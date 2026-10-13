@@ -43,6 +43,8 @@ const consent = require('./consent.js');
 // First-run setup, launch at login, the move to Applications and the recording
 // time in the menu bar (SAA-198 step 4). Pure; the window is below.
 const setup = require('./setup.js');
+// The tray's Sign out revokes the refresh token on the server (SAA-198 step 5).
+const { revokeRefreshToken } = require('./capture-sign-out.js');
 
 // --- constants ------------------------------------------------------------
 // All measurements come from 5-second captures on 2026-08-09. A long
@@ -1497,7 +1499,7 @@ function renderTray() {
         } else if (item === 'sign-in') {
             items.push({ label: 'Sign in to Clipwise…', click: signInToCaptureServer });
         } else if (item === 'sign-out') {
-            items.push({ label: 'Sign out', click: () => signOutOfCaptureServer('tray') });
+            items.push({ label: 'Sign out', click: signOutFromTray });
         }
     }
     items.push(
@@ -2841,6 +2843,18 @@ function loadCaptureTokens() {
     } catch (err) {
         if (err.code !== 'ENOENT') console.error(`[clipwise-recorder] capture token: could not read it: ${err.name}`);
     }
+}
+
+// The tray's Sign out: the refresh token is revoked on the server first
+// (capture-sign-out.js), then the Mac's copy goes whatever the outcome, which is
+// logged as a word and a status, never the token (SAA-198 step 5).
+async function signOutFromTray() {
+    const held = captureTokens;
+    if (held && held.refresh && held.server) {
+        const outcome = await revokeRefreshToken(held.server, held.refresh, CAPTURE_CLIENT_ID);
+        console.error(`[clipwise-recorder] capture token: revoke on the server: ${outcome}`);
+    }
+    signOutOfCaptureServer('tray');
 }
 
 function signOutOfCaptureServer(reason) {

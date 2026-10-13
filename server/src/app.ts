@@ -123,6 +123,7 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   // qualified paths.
   app.use("/recordings", requireMemberOrCaptureWrites);
   app.use("/oauth/google/connect", requireSession);
+  app.use("/oauth/google/status", requireSession);
 
   mount("/accounts/:accountId/people", [requireMember, sameAccountOnly], peopleRouter);
   mount("/accounts/:accountId/recordings", [requireMemberOrCaptureWrites, sameAccountOnly], recordingsRouter);

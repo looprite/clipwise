@@ -84,7 +84,9 @@ refuse() { say "scratch-db: refused: $*" >&2; exit 2; }
 fail() { say "scratch-db: failed: $*" >&2; exit 1; }
 
 # Whatever a tool says on a failure goes through this first.
-scrub() { sed -E 's#postgres(ql)?://[^[:space:]"]+#<url>#g; s#npg_[A-Za-z0-9]+#<secret>#g; s#sk-ant-[A-Za-z0-9_-]+#<secret>#g; s#GOCSPX-[A-Za-z0-9_-]+#<secret>#g'; }
+# Line-buffered (BSD sed -l): without it, serve's own lines sat in sed's buffer
+# while the server ran, and were lost when it was stopped (SAA-198 step 5).
+scrub() { sed -l -E 's#postgres(ql)?://[^[:space:]"]+#<url>#g; s#npg_[A-Za-z0-9]+#<secret>#g; s#sk-ant-[A-Za-z0-9_-]+#<secret>#g; s#GOCSPX-[A-Za-z0-9_-]+#<secret>#g'; }
 
 neon() { neonctl "$@" --project-id "$PROJECT_ID" 2>&1; }
 
