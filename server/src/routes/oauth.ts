@@ -5,17 +5,16 @@
 import { randomBytes } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
+import { eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { accessOf, sessionMember } from "../access/authenticate.js";
-import { normalizeEmail } from "../auth/membership.js";
+import { CALENDAR_READONLY_SCOPE, storeCalendarGrant } from "../auth/google-calendar-grant.js";
 import { asyncHandler, HttpError, parseQuery } from "../lib/http.js";
-import { encrypt } from "../lib/crypto.js";
-import { exchangeCode, listCalendars, selectSearchableCalendars } from "../lib/google-calendar.js";
+import { exchangeCode } from "../lib/google-calendar.js";
 
 export const oauthRouter = Router();
 
 const GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
-const CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 
 // state -> {accountId, memberId, expiresAt}. Generated and validated in this
 // same process, deliberately not persisted (decision 1's ethos on the issue:
@@ -106,57 +105,41 @@ oauthRouter.get(
       // offline + prompt=consent above should always produce one.
       throw new HttpError(502, "google_did_not_return_a_refresh_token");
     }
-    // calendarList, not the userinfo endpoint — see listCalendars' own
-    // comment. Counts and ids only in the log (SAA-227 decision 11): the
-    // list holds calendar addresses and names.
-    const calendars = await listCalendars(tokens.accessToken);
-    console.log(`oauth callback: calendarList for member=${pending.memberId}: ${calendars.length} calendar(s)`);
-    const primary = calendars.find((c) => c.primary);
-    if (!primary) {
-      throw new HttpError(502, "no_primary_calendar_in_calendarlist");
-    }
-    const calendarEmail = primary.id;
-    // Only the member's own calendar (SAA-227 decision 28): the grant's
-    // primary address must be their sign-in address. Anything else is
-    // refused, and nothing is stored.
-    if (normalizeEmail(calendarEmail) !== member.email) {
-      throw new HttpError(403, "calendar_not_own_address");
-    }
-
-    // The list a match actually searches — computed once here, stored,
-    // not recomputed per match. jd@leadiq.com (shared in, accessRole
-    // reader) is included by this; Google's holiday/contacts calendars
-    // and any freeBusyReader-only entry are not.
-    const selection = selectSearchableCalendars(calendars);
-    console.log(
-      `oauth callback: searchable calendars for member=${pending.memberId}: ` +
-        `${selection.included.length} included, ${selection.excluded.length} excluded`,
-    );
-
-    // UNIQUE(member_id, calendar_email) is exactly the conflict target
-    // here — race-free in one statement, and consistent with how
-    // applyCalendarMatch upserts invitees against its own unique index.
-    const values = {
+    // The same store as sign-in's (auth/google-calendar-grant.ts), with decision
+    // 28's check: only the member's own calendar. Anything else is refused, and
+    // nothing is stored.
+    const { outcome, calendarEmail } = await storeCalendarGrant({
       accountId: pending.accountId,
       memberId: pending.memberId,
-      calendarEmail,
-      accessToken: encrypt(tokens.accessToken),
-      refreshToken: encrypt(tokens.refreshToken),
-      tokenExpiresAt: tokens.expiresAt,
+      memberEmail: member.email,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: tokens.expiresAt,
       scope: tokens.scope,
-      searchedCalendarIds: selection.included,
-    };
-    await db
-      .insert(schema.calendarConnections)
-      .values(values)
-      .onConflictDoUpdate({
-        target: [schema.calendarConnections.memberId, schema.calendarConnections.calendarEmail],
-        set: values,
-      });
+    });
+    if (outcome === "no_calendar_scope") throw new HttpError(403, "calendar_scope_not_granted");
+    if (outcome === "no_primary_calendar") throw new HttpError(502, "no_primary_calendar_in_calendarlist");
+    if (outcome === "not_own_address") throw new HttpError(403, "calendar_not_own_address");
 
     res
       .status(200)
       .type("text/plain")
       .send(`Connected ${calendarEmail}. You can close this tab.`);
+  }),
+);
+
+// Whether the signed-in member has a calendar connection, for /login's
+// "Reconnect calendar" (SAA-198 step 5). Mounted behind requireSession (app.ts).
+// A grant Google later refuses is removed by the match job (match-calendar.ts),
+// so "no row" covers both a lost and a revoked connection.
+oauthRouter.get(
+  "/oauth/google/status",
+  asyncHandler(async (req, res) => {
+    const { memberId } = accessOf(req);
+    const [row] = await db
+      .select({ calendarEmail: schema.calendarConnections.calendarEmail })
+      .from(schema.calendarConnections)
+      .where(eq(schema.calendarConnections.memberId, memberId));
+    res.json(row ? { connected: true, calendarEmail: row.calendarEmail } : { connected: false, calendarEmail: null });
   }),
 );

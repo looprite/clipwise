@@ -8,10 +8,16 @@
 //   tsx src/auth/cli.ts remove-member --email <email>
 //   tsx src/auth/cli.ts list-members
 //   tsx src/auth/cli.ts register-recorder
+//   tsx src/auth/cli.ts clear-google-tokens [--apply]
 //
 // register-recorder creates (or repairs) the recorder's OAuth client, the only
 // client that can obtain a capture token (SAA-244). It is a step for every
 // instance, after the server has started once (so the capture resource exists).
+//
+// clear-google-tokens counts the Google accounts that still hold Google's tokens
+// in auth_account, written before sign-in moved them to calendar_connections
+// (SAA-198 step 5); with --apply it sets those columns to null. Run once per
+// instance, at the deploy that brings the change. The count is all it prints.
 //
 // A password is only ever read from the environment variable named by
 // --password-env, never from argv (which lands in shell history and `ps`).
@@ -37,6 +43,7 @@ import {
 } from "./members.js";
 import { endPoolWhenAuthSettled } from "./auth.js";
 import { ensureRecorderClient } from "./recorder-client.js";
+import { clearGoogleTokens } from "./google-calendar-grant.js";
 
 const say = (s: string) => process.stdout.write(`auth: ${s}\n`);
 
@@ -128,6 +135,7 @@ async function main(): Promise<void> {
       role: { type: "string" },
       "password-env": { type: "string" },
       "claim-existing": { type: "boolean" },
+      apply: { type: "boolean" },
     },
   });
   switch (command) {
@@ -152,6 +160,13 @@ async function main(): Promise<void> {
     }
     case "list-members":
       return listMembers();
+    case "clear-google-tokens": {
+      const r = await clearGoogleTokens(values.apply === true);
+      say(`Google accounts still holding tokens in auth_account: ${r.holding}`);
+      if (values.apply === true) say(`cleared: ${r.cleared}`);
+      else if (r.holding > 0) say("nothing changed; run again with --apply to clear them");
+      return;
+    }
     case "register-recorder": {
       const r = await ensureRecorderClient();
       say(`recorder client ${r.created ? "created" : "already existed; set back to its definition"}`);
@@ -162,7 +177,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Refusal(
-        "usage: init-account | bootstrap-admin | add-member | remove-member | list-members | register-recorder (see the header of src/auth/cli.ts)",
+        "usage: init-account | bootstrap-admin | add-member | remove-member | list-members | register-recorder | clear-google-tokens (see the header of src/auth/cli.ts)",
       );
   }
 }
