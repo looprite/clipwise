@@ -145,10 +145,13 @@
   const STATE_TEXT = { granted: 'Allowed', denied: 'Off', notDetermined: 'Not yet asked' };
   let view = null;
 
+  // Any other state audiodevs reports (restricted, unavailable, unexpected) is
+  // "Not available" in the muted style: it does not hold setup open
+  // (setup.js permissionSettled), but it is not a grant either.
   function drawPerm(which, state, asking) {
     const el = $(`${which}-state`);
-    el.textContent = asking ? 'Waiting for your answer…' : (STATE_TEXT[state] || 'Allowed');
-    el.className = `state ${state === 'denied' ? 'denied' : state === 'notDetermined' ? '' : 'granted'}`;
+    el.textContent = asking ? 'Waiting for your answer…' : (STATE_TEXT[state] || 'Not available');
+    el.className = `state ${state === 'granted' ? 'granted' : state === 'denied' ? 'denied' : ''}`;
     const button = $(`${which}-button`);
     button.style.visibility = state === 'notDetermined' || state === 'denied' ? 'visible' : 'hidden';
     button.textContent = state === 'denied' ? 'Open System Settings' : 'Allow…';

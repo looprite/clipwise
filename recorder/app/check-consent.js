@@ -354,6 +354,10 @@ const CASES = [
     ['permissions: the microphone is asked for with macOS\'s own prompt; a denial opens its System Settings pane', () =>
         fnBody('requestPermission').includes("systemPreferences.askForMediaAccess('microphone')")
         && /ipcMain\.on\('setup:permission-settings'[\s\S]{0,300}SETTINGS_PANE\[/.test(SRC)],
+    ['window: a grant that is not granted, denied or notDetermined reads "Not available" in the muted style, never "Allowed" in green', () =>
+        HTML.includes("const STATE_TEXT = { granted: 'Allowed', denied: 'Off', notDetermined: 'Not yet asked' };")
+        && HTML.includes("(STATE_TEXT[state] || 'Not available')")
+        && HTML.includes("el.className = `state ${state === 'granted' ? 'granted' : state === 'denied' ? 'denied' : ''}`;")],
     ['window: setup.html has the four screens and the notice\'s approved title', () =>
         ['screen-notice', 'screen-address', 'screen-signin', 'screen-permissions', '<h1>Before you record</h1>'].every(t => HTML.includes(t))],
     ['Dock: no icon — LSUIElement true in build-app.sh and app.dock.hide() at boot', () =>
