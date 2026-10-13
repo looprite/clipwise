@@ -40,6 +40,59 @@ export type CaptureSidecar = {
 
 const REPO = resolve(import.meta.dirname, "..", "..", "..");
 
+// What this runs, and from where. Run from a checkout, every default below is the
+// checkout's own. Clipwise.app sets each one to its copy inside the bundle
+// (SAA-198), so nothing is read from a checkout or found on PATH. The names past
+// CLIPWISE_* are the ones transcribe.py reads for the same files (its Environment
+// list), and voice-clips.ts reads FFMPEG_BIN; the values here are passed to
+// transcribe.py, so the two never disagree. This log shows what was passed; each
+// tool's own "tools:" line shows what ran.
+const PYTHON = process.env.CLIPWISE_PYTHON ?? "python3";
+const TRANSCRIBE_PY = process.env.CLIPWISE_TRANSCRIBE_PY ?? join(REPO, "recorder", "transcribe.py");
+const FFMPEG_BIN = process.env.FFMPEG_BIN ?? "ffmpeg";
+const PARAKEET_BIN = process.env.PARAKEET_BIN ?? join(REPO, "recorder", "parakeet", ".build", "release", "parakeet");
+const PARAKEET_MODELS = process.env.PARAKEET_MODELS ?? join(REPO, "recorder", "parakeet", "models");
+const AEC_BIN = process.env.AEC_BIN ?? join(REPO, "recorder", "aec", ".build", "release", "aec");
+const DIARIZE_BIN = process.env.DIARIZE_BIN ?? join(REPO, "recorder", "diarize", ".build", "release", "diarize");
+const DIARIZE_MODELS = process.env.DIARIZE_MODELS ?? join(REPO, "recorder", "diarize", "models");
+
+// A bare name is looked up on PATH the way execFileSync will, so the log shows
+// the file that runs, not just the name.
+function onPath(cmd: string): string {
+  if (cmd.includes("/")) return cmd;
+  for (const d of (process.env.PATH ?? "").split(":").filter(Boolean)) {
+    const p = join(d, cmd);
+    if (existsSync(p)) return p;
+  }
+  return `${cmd} (not on PATH)`;
+}
+
+// Once per run: the full path of every tool this run uses (SAA-198).
+function logTools(): void {
+  const tools: Record<string, string> = {
+    node: `${process.execPath} ${process.version}`,
+    python: onPath(PYTHON),
+    transcribe: TRANSCRIBE_PY,
+    ffmpeg: onPath(FFMPEG_BIN),
+    parakeet: PARAKEET_BIN,
+    parakeet_models: PARAKEET_MODELS,
+    aec: AEC_BIN,
+    diarize: DIARIZE_BIN,
+    diarize_models: DIARIZE_MODELS,
+  };
+  log(`tools: ${Object.entries(tools).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+}
+
+const TOOL_ENV = {
+  ...process.env,
+  FFMPEG_BIN,
+  PARAKEET_BIN,
+  PARAKEET_MODELS,
+  AEC_BIN,
+  DIARIZE_BIN,
+  DIARIZE_MODELS,
+};
+
 function log(msg: string): void {
   process.stdout.write(`capture-pipeline: ${msg}\n`);
 }
@@ -52,6 +105,7 @@ export async function runCapturePipelineWithoutDatabase(dir: string, stem: strin
     permissions?: { tap?: string; mic?: string };
   };
   if (!manifest.recording_id) throw new Error(`manifest-${stem}.json has no recording_id`);
+  logTools();
   const sidecar: CaptureSidecar = {
     sidecar_version: 1,
     pipeline: "capture",
@@ -84,9 +138,9 @@ export async function runCapturePipelineWithoutDatabase(dir: string, stem: strin
       log("transcript exists");
       finish("transcribe", "skipped", { transcript: transcriptPath, ran: false });
     } else {
-      const transcribePy = join(REPO, "recorder", "transcribe.py");
-      log(`transcribing → python3 ${transcribePy}`);
-      execFileSync("python3", [transcribePy, join(dir, `system-${stem}.f32le.pcm`), join(dir, `mic-${stem}.wav`), transcriptPath], { stdio: "inherit" });
+      log(`transcribing → ${PYTHON} ${TRANSCRIBE_PY}`);
+      // -I: the bundled Python reads no PYTHON* variables and no user site-packages.
+      execFileSync(PYTHON, ["-I", TRANSCRIBE_PY, join(dir, `system-${stem}.f32le.pcm`), join(dir, `mic-${stem}.wav`), transcriptPath], { stdio: "inherit", env: TOOL_ENV });
       finish("transcribe", "ok", { transcript: transcriptPath, ran: true });
     }
   } catch (err) {
@@ -117,7 +171,7 @@ export async function runCapturePipelineWithoutDatabase(dir: string, stem: strin
   };
   const tapWav = join(dir, `system-${stem}.16k.wav`);
   const micWav = join(dir, `mic-${stem}.16k.wav`);
-  const diarizeBin = join(REPO, "recorder", "diarize", ".build", "release", "diarize");
+  const diarizeBin = DIARIZE_BIN;
   if (process.arch !== "arm64") {
     skip(`Apple Silicon only — this Mac reports process.arch=${process.arch}`);
   } else if (!existsSync(tapWav)) {
@@ -127,7 +181,7 @@ export async function runCapturePipelineWithoutDatabase(dir: string, stem: strin
     try {
       got = sidecarForCapture(join(dir, `diarize-${stem}.json`), tapWav, micWav, () => {
         if (!existsSync(diarizeBin)) throw new Error(`recorder/diarize binary not found at ${diarizeBin}`);
-        execFileSync(diarizeBin, [tapWav, micWav, join(REPO, "recorder", "diarize", "models"), join(dir, `diarize-${stem}.json`)], { stdio: "inherit", timeout: 120_000 });
+        execFileSync(diarizeBin, [tapWav, micWav, DIARIZE_MODELS, join(dir, `diarize-${stem}.json`)], { stdio: "inherit", timeout: 120_000 });
         return JSON.parse(readFileSync(join(dir, `diarize-${stem}.json`), "utf8")) as DiarizeSidecar;
       });
     } catch (err) {
@@ -162,7 +216,9 @@ function usage(): never {
   process.exit(2);
 }
 
-if (process.argv[1] && process.argv[1].endsWith("capture-cli.ts")) {
+// .ts when run through tsx from a checkout, .js when Clipwise.app runs its compiled
+// copy on Electron's Node (SAA-198).
+if (process.argv[1] && /capture-cli\.(ts|js)$/.test(process.argv[1])) {
   const argv = process.argv.slice(2);
   const dir = argv[0] && !argv[0].startsWith("--") ? resolve(argv[0]) : null;
   const at = argv.indexOf("--stem");

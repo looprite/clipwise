@@ -216,8 +216,10 @@ function readManifestRecordingId(dir: string, stem: string): string {
 // person to listen to, not a model to analyze. Raw f32le/48kHz/mono input
 // framing matches transcribe.py's own ffmpeg_downsample_pcm exactly (the
 // only other place this repo reads that file format).
+// FFMPEG_BIN is the bundle's own ffmpeg when Clipwise.app runs this (SAA-198);
+// from a checkout it is unset and ffmpeg comes from PATH, as before.
 function cutClip(tapPcmPath: string, range: ClipRange, outPath: string): void {
-  execFileSync("ffmpeg", [
+  execFileSync(process.env.FFMPEG_BIN ?? "ffmpeg", [
     "-hide_banner", "-loglevel", "error", "-y",
     "-f", "f32le", "-ar", "48000", "-ac", "1",
     "-i", tapPcmPath,

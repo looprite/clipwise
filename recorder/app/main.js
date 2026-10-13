@@ -116,11 +116,10 @@ const TAP_CHANNELS = 1;
 
 // Two layouts, told apart by one file. Run from a checkout (`npm start`),
 // every path is relative to this one. Run from the .app that build-app.sh
-// produces, the three helper binaries ship inside the bundle and the server
-// checkout does not — there is no copy of it to bundle, and the pipeline has
-// to execute the current one. build-app.sh stamps that absolute path into
-// build-info.json at build time, and the presence of that file is what says
-// which layout this is.
+// produces, everything the app and its capture pipeline run ships inside the
+// bundle and is found relative to it (SAA-198): nothing is read from a checkout.
+// build-app.sh writes build-info.json into the bundle, and the presence of that
+// file is what says which layout this is.
 //
 // Presence of the file rather than app.isPackaged: isPackaged is derived from
 // the name of the executable, which is a fact about how the bundle was
@@ -168,13 +167,27 @@ const OUTDIR = path.join(SUPPORT_DIR, 'recordings');
 // recorder/app/dist, and never touches this directory.
 const DETECT_STORE_PATH = path.join(SUPPORT_DIR, 'detected-apps.json');
 
-// The capture pipeline's checkout. Its scripts run through the server's own tsx
-// so the seam always executes current source — a built dist would silently run
-// whatever it was last compiled from. They need no database and no API key: the
-// server ingests and extracts (SAA-227).
-const SERVER_DIR = BUILD_INFO
-    ? BUILD_INFO.server_dir
-    : path.resolve(RECORDER_DIR, '..', 'server');
+// The capture pipeline. They need no database and no API key: the server ingests
+// and extracts (SAA-227).
+//
+// From a checkout, its scripts run through the server's own tsx so the seam
+// always executes current source. From the bundle (SAA-198), build-app.sh has
+// compiled them into Resources/pipeline, and they run on this app's own
+// executable as Node (ELECTRON_RUN_AS_NODE). Every tool they run is the bundle's
+// copy, named in PIPELINE_TOOLS_ENV, so nothing comes from a checkout or PATH.
+const SERVER_DIR = path.resolve(RECORDER_DIR, '..', 'server');
+const RESOURCES_DIR = path.resolve(__dirname, '..');
+const BUNDLED_PIPELINE_DIR = path.join(RESOURCES_DIR, 'pipeline');
+const PIPELINE_TOOLS_ENV = BUILD_INFO ? {
+    CLIPWISE_PYTHON: path.join(RESOURCES_DIR, 'python', 'bin', 'python3'),
+    CLIPWISE_TRANSCRIBE_PY: path.join(BUNDLED_PIPELINE_DIR, 'transcribe.py'),
+    FFMPEG_BIN: path.join(BUNDLED_BIN, 'ffmpeg'),
+    PARAKEET_BIN: path.join(BUNDLED_BIN, 'parakeet'),
+    PARAKEET_MODELS: path.join(RESOURCES_DIR, 'models', 'parakeet'),
+    AEC_BIN: path.join(BUNDLED_BIN, 'aec'),
+    DIARIZE_BIN: path.join(BUNDLED_BIN, 'diarize'),
+    DIARIZE_MODELS: path.join(RESOURCES_DIR, 'models', 'diarize'),
+} : null;
 
 // --- log ------------------------------------------------------------------
 //
@@ -225,11 +238,15 @@ if (BUILD_INFO) {
 const TSX_BIN = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
 // The capture pipeline (SAA-227): transcribe, classify, diarize and naming data,
 // on this Mac and from files only. The upload at its exit hands the rest to the server.
-const CAPTURE_PIPELINE_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'capture-cli.ts');
+const CAPTURE_PIPELINE_ENTRY = BUILD_INFO
+    ? path.join(BUNDLED_PIPELINE_DIR, 'pipeline', 'capture-cli.js')
+    : path.join(SERVER_DIR, 'src', 'pipeline', 'capture-cli.ts');
 // Finds captures whose pipeline never finished, or never started, and finishes
 // them (SAA-136, SAA-227). Spawned on launch and after a pipeline run fails.
 // Driven by the files in OUTDIR.
-const CAPTURE_RECOVER_ENTRY = path.join(SERVER_DIR, 'src', 'pipeline', 'capture-recover.ts');
+const CAPTURE_RECOVER_ENTRY = BUILD_INFO
+    ? path.join(BUNDLED_PIPELINE_DIR, 'pipeline', 'capture-recover.js')
+    : path.join(SERVER_DIR, 'src', 'pipeline', 'capture-recover.ts');
 // How often the naming window polls for diarize's naming data while step 2
 // is in its waiting state (SAA-195). Diarize itself is fast (single-digit
 // seconds), but it runs after transcribe (transcribe and the old on-Mac ingest
@@ -277,15 +294,30 @@ const CAPTURE_TOKEN_PATH = path.join(SUPPORT_DIR, 'capture-token.bin');
 // How long before the access token runs out (600 s on the server) it is refreshed.
 const CAPTURE_REFRESH_EARLY_MS = 60 * 1000;
 
-// A GUI-launched Electron inherits a minimal PATH with no Homebrew on it, and
-// the pipeline shells out to python3, ffmpeg and whisper-cli. Launched from a
-// terminal this changes nothing.
-const PIPELINE_PATH = [
+// From a checkout, a GUI-launched Electron inherits a minimal PATH with no
+// Homebrew on it, and the pipeline shells out to python3 and ffmpeg by name, so
+// Homebrew is added. From the bundle every tool is named by full path
+// (PIPELINE_TOOLS_ENV), so PATH is left as the app received it.
+const PIPELINE_PATH = BUILD_INFO ? (process.env.PATH || '') : [
     ...new Set([
         ...(process.env.PATH || '').split(':').filter(Boolean),
         '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin',
     ]),
 ].join(':');
+
+// How a pipeline script is started: the command, its arguments before the
+// script's own, the working directory and the environment.
+function pipelineSpawn(entry, args) {
+    if (BUILD_INFO) {
+        return {
+            cmd: process.execPath,
+            args: [entry, ...args],
+            cwd: RESOURCES_DIR,
+            env: { ...process.env, PATH: PIPELINE_PATH, ELECTRON_RUN_AS_NODE: '1', ...PIPELINE_TOOLS_ENV },
+        };
+    }
+    return { cmd: TSX_BIN, args: [entry, ...args], cwd: SERVER_DIR, env: { ...process.env, PATH: PIPELINE_PATH } };
+}
 
 // --- state ----------------------------------------------------------------
 
@@ -2445,7 +2477,7 @@ function autostopFinish(s, cause) {
 function startPipeline(stem) {
     if (!stem) return;
     const logPath = path.join(OUTDIR, `pipeline-${stem}.log`);
-    const args = [CAPTURE_PIPELINE_ENTRY, OUTDIR, '--stem', stem];
+    const run = pipelineSpawn(CAPTURE_PIPELINE_ENTRY, [OUTDIR, '--stem', stem]);
     let fd;
     try {
         fd = fs.openSync(logPath, 'a');
@@ -2457,9 +2489,9 @@ function startPipeline(stem) {
         console.error(`pipeline log ${logPath}: ${String(err)}`);
         return;
     }
-    const proc = spawn(TSX_BIN, args, {
-        cwd: SERVER_DIR,
-        env: { ...process.env, PATH: PIPELINE_PATH },
+    const proc = spawn(run.cmd, run.args, {
+        cwd: run.cwd,
+        env: run.env,
         stdio: ['ignore', fd, fd],
         detached: true,
     });
@@ -2565,9 +2597,10 @@ function startRecovery(reason, opts = {}) {
     // it writing to a closed pipe (EPIPE) if that happens — a mid-write crash
     // in exactly the process this exists to make crashes safe from. The
     // withdrawal check below reads a file after the fact instead (SAA-183).
-    const proc = spawn(TSX_BIN, [entry, OUTDIR], {
-        cwd: SERVER_DIR,
-        env: { ...process.env, PATH: PIPELINE_PATH },
+    const run = pipelineSpawn(entry, [OUTDIR]);
+    const proc = spawn(run.cmd, run.args, {
+        cwd: run.cwd,
+        env: run.env,
         stdio: ['ignore', fd, fd],
         detached: true,
     });

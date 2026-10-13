@@ -53,6 +53,10 @@ swift build -c release --package-path "$RECORDER_DIR/diarize"
 swift build -c release --package-path "$RECORDER_DIR/parakeet"
 # SAA-218: WebRTC AEC3, for removing speaker echo from the mic. Needs meson and ninja.
 "$RECORDER_DIR/aec/build.sh"
+# SAA-198: the pipeline's own ffmpeg (LGPL-only) and Python, so the bundle takes
+# neither from the Mac it runs on.
+"$RECORDER_DIR/ffmpeg/build.sh"
+"$RECORDER_DIR/python/fetch.sh"
 
 SYSTEMTAP_BIN="$RECORDER_DIR/systemtap/.build/release/systemtap"
 MICCAP_BIN="$RECORDER_DIR/miccap/.build/release/miccap"
@@ -61,10 +65,15 @@ MICWATCH_BIN="$RECORDER_DIR/micwatch"
 DIARIZE_BIN="$RECORDER_DIR/diarize/.build/release/diarize"
 PARAKEET_BIN="$RECORDER_DIR/parakeet/.build/release/parakeet"
 AEC_BIN="$RECORDER_DIR/aec/.build/release/aec"
+FFMPEG_BIN="$RECORDER_DIR/ffmpeg/.build/release/ffmpeg"
+PYTHON_DIR="$RECORDER_DIR/python/.build/python"
 
-for b in "$SYSTEMTAP_BIN" "$MICCAP_BIN" "$AUDIODEVS_BIN" "$MICWATCH_BIN" "$DIARIZE_BIN" "$PARAKEET_BIN" "$AEC_BIN"; do
+for b in "$SYSTEMTAP_BIN" "$MICCAP_BIN" "$AUDIODEVS_BIN" "$MICWATCH_BIN" "$DIARIZE_BIN" "$PARAKEET_BIN" "$AEC_BIN" "$FFMPEG_BIN" "$PYTHON_DIR/bin/python3"; do
     [ -x "$b" ] || { echo "build-app: missing $b after build" >&2; exit 1; }
 done
+# The ffmpeg that ships must be the LGPL build, never a GPL or nonfree one.
+"$FFMPEG_BIN" -hide_banner -L | grep -q "GNU Lesser General Public" \
+    || { echo "build-app: $FFMPEG_BIN does not report the LGPL" >&2; exit 1; }
 
 # SAA-194: the community-1 model files diarize loads at runtime. Fetched (and
 # checksum-verified against recorder/diarize/models/CHECKSUMS.sha256) rather
@@ -78,11 +87,12 @@ DIARIZE_MODELS_DIR="$RECORDER_DIR/diarize/models/speaker-diarization"
 
 # SAA-220: the Parakeet TDT 0.6B v2 model files transcribe.py's default engine
 # loads at runtime. Fetched and checksum-verified like the diarization models
-# above, and, like them, read from the checkout by the pipeline. Deliberately
-# NOT copied into the bundle: it is 443 MB, nothing reads a bundle copy, and
-# packaging is Phase 4.
+# above. Copied into the bundle (443 MB): the app reads no network at run time
+# (SAA-198, engineering call 2).
 step "fetching Parakeet models"
 "$RECORDER_DIR/parakeet/fetch-models.sh"
+PARAKEET_MODELS_DIR="$RECORDER_DIR/parakeet/models/parakeet-tdt-0.6b-v2"
+[ -d "$PARAKEET_MODELS_DIR" ] || { echo "build-app: missing $PARAKEET_MODELS_DIR after fetch-models.sh" >&2; exit 1; }
 
 # --- 2. the Electron runtime ----------------------------------------------
 #
@@ -177,16 +187,41 @@ install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"
 # Call detection (SAA-113). A bundle without it still records on the hotkey;
 # main.js logs the absence and disables detection rather than failing to start.
 install -m 755 "$MICWATCH_BIN"  "$C/Resources/bin/micwatch"
-# Voice separation (SAA-194). A bundle without it still processes captures —
-# the pipeline's diarize step treats a missing binary as a skip, same as an
-# Intel Mac — but this fulfils the CC-BY-4.0 redistribution story and keeps
-# packaging parity with the other three helper binaries above.
+# The capture pipeline's tools (SAA-198). main.js names each one by its path
+# here (PIPELINE_TOOLS_ENV); the pipeline reads nothing from a checkout or PATH.
 install -m 755 "$DIARIZE_BIN"   "$C/Resources/bin/diarize"
+install -m 755 "$PARAKEET_BIN"  "$C/Resources/bin/parakeet"
+install -m 755 "$AEC_BIN"       "$C/Resources/bin/aec"
+install -m 755 "$FFMPEG_BIN"    "$C/Resources/bin/ffmpeg"
 # .mlmodelc directories are plain resource trees, not nested code — no
 # separate signing step; they're swept into the outer codesign call below
-# the same as the tray PNGs are.
-cp -R "$DIARIZE_MODELS_DIR" "$C/Resources/models/speaker-diarization"
+# the same as the tray PNGs are. Each model set sits in its own directory, the
+# one transcribe.py and diarize are handed (DIARIZE_MODELS, PARAKEET_MODELS).
+mkdir -p "$C/Resources/models/diarize" "$C/Resources/models/parakeet"
+cp -R "$DIARIZE_MODELS_DIR" "$C/Resources/models/diarize/speaker-diarization"
+cp -R "$PARAKEET_MODELS_DIR" "$C/Resources/models/parakeet/parakeet-tdt-0.6b-v2"
+# The standalone Python, whole. ditto keeps its symlinks (bin/python3).
+ditto "$PYTHON_DIR" "$C/Resources/python"
 cp "$REPO_DIR/THIRD_PARTY_NOTICES" "$C/Resources/THIRD_PARTY_NOTICES"
+
+# The pipeline, compiled (SAA-198, engineering call 3): the five files capture-cli
+# and capture-recover reach, as JavaScript that the app's own executable runs as
+# Node. transcribe.py goes beside them. The package.json marks them ES modules.
+# --typeRoots names the server's own @types: with files on the command line tsc
+# reads no tsconfig, and would otherwise look for them from the folder the build
+# was started in.
+step "compiling the capture pipeline"
+PIPELINE_OUT="$C/Resources/pipeline"
+"$SERVER_DIR/node_modules/.bin/tsc" \
+    "$SERVER_DIR/src/pipeline/capture-cli.ts" "$SERVER_DIR/src/pipeline/capture-recover.ts" \
+    --outDir "$PIPELINE_OUT" --rootDir "$SERVER_DIR/src" \
+    --module nodenext --moduleResolution nodenext --target es2023 \
+    --skipLibCheck --types node --typeRoots "$SERVER_DIR/node_modules/@types"
+printf '{ "type": "module" }\n' > "$PIPELINE_OUT/package.json"
+cp "$RECORDER_DIR/transcribe.py" "$PIPELINE_OUT/transcribe.py"
+for f in pipeline/capture-cli.js pipeline/capture-recover.js pipeline/classify-capture.js pipeline/voice-clips.js lib/trash-marker.js; do
+    [ -f "$PIPELINE_OUT/$f" ] || { echo "build-app: missing $PIPELINE_OUT/$f after tsc" >&2; exit 1; }
+done
 
 VERSION="$(/usr/bin/sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$APP_SRC/package.json" | head -1)"
 ELECTRON_VERSION="$(cat "$APP_SRC/node_modules/electron/dist/version")"
@@ -209,19 +244,17 @@ DIRTY=false
 git -C "$REPO_DIR" diff --quiet HEAD -- || DIRTY=true
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# This file is three things at once: the flag that tells main.js it is running
-# from a bundle, the only way the bundle can find the server checkout, and —
-# because built_at changes every run — the thing that guarantees two builds of
-# identical source still hash differently. That last one is what makes "does
-# the grant survive a rebuild?" a real question rather than a tautology about
-# an unchanged binary.
+# This file is two things at once: the flag that tells main.js it is running
+# from a bundle, and — because built_at changes every run — the thing that
+# guarantees two builds of identical source still hash differently. That second
+# one is what makes "does the grant survive a rebuild?" a real question rather
+# than a tautology about an unchanged binary. It names no path on the build
+# machine (SAA-198): the bundle finds everything relative to itself.
 cat > "$C/Resources/app/build-info.json" <<JSON
 {
   "built_at": "$BUILT_AT",
   "commit": "$COMMIT",
   "dirty": $DIRTY,
-  "server_dir": "$SERVER_DIR",
-  "recorder_dir": "$RECORDER_DIR",
   "electron_version": "$ELECTRON_VERSION"
 }
 JSON

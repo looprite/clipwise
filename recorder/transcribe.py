@@ -81,6 +81,8 @@ nothing else: voice separation is an enhancement, never a reason to fail a
 transcript.
 
 Environment:
+    FFMPEG_BIN          ffmpeg binary, for both downsamples. Default: ffmpeg on PATH.
+                        Clipwise.app sets it to the ffmpeg inside the bundle.
     CLIPWISE_AEC        auto | off. Default: auto (the rule above). off skips the step.
     AEC_BIN             aec binary. Default: recorder/aec/.build/release/aec
     CLIPWISE_EARLY_DIARIZE
@@ -316,6 +318,19 @@ def parse_mic_wav_fmt(path: Path) -> dict:
     }
 
 
+def ffmpeg_bin() -> str:
+    """The ffmpeg both downsamples run: FFMPEG_BIN, else ffmpeg on PATH."""
+    return os.environ.get("FFMPEG_BIN", "ffmpeg")
+
+
+def diarize_paths() -> tuple[str, Path]:
+    """The diarize binary and models directory the early start runs with."""
+    return (
+        os.environ.get("DIARIZE_BIN", DEFAULT_DIARIZE_BIN),
+        Path(os.environ.get("DIARIZE_MODELS", DEFAULT_DIARIZE_MODELS)),
+    )
+
+
 def ffmpeg_downsample_pcm(src: Path, dst: Path) -> None:
     """Tap: raw f32le 48k mono → 16 kHz s16 mono WAV.
 
@@ -323,7 +338,7 @@ def ffmpeg_downsample_pcm(src: Path, dst: Path) -> None:
     s16 conversion (documented, verified empirically on this build).
     """
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y",
         "-f", "f32le", "-ar", str(TAP_RATE), "-ac", str(TAP_CH),
         "-i", str(src),
         "-ar", str(TARGET_RATE), "-ac", "1",
@@ -336,7 +351,7 @@ def ffmpeg_downsample_pcm(src: Path, dst: Path) -> None:
 def ffmpeg_downsample_wav(src: Path, dst: Path) -> None:
     """Mic: WAV → 16 kHz s16 mono WAV. Same clip guarantee as above."""
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(src),
         "-ar", str(TARGET_RATE), "-ac", "1",
         "-sample_fmt", "s16", "-c:a", "pcm_s16le", "-f", "wav",
@@ -756,8 +771,7 @@ def start_early_diarize(tap_16k: Path, mic_16k: Path, budget_s: float = DIARIZE_
             print(f"diarize head start: not started — cannot derive a capture stem from {name}")
             return None
         stem = name[len("system-"): -len(".16k.wav")]
-        binary = os.environ.get("DIARIZE_BIN", DEFAULT_DIARIZE_BIN)
-        models = Path(os.environ.get("DIARIZE_MODELS", DEFAULT_DIARIZE_MODELS))
+        binary, models = diarize_paths()
         if not os.access(binary, os.X_OK):
             print(f"diarize head start: not started — no binary at {binary}")
             return None
@@ -1018,6 +1032,17 @@ def main() -> int:
     print(f"aec:      {'RUN' if aec_plan['run'] else 'skipped'} — {aec_plan['reason']}")
     if aec_plan["run"]:
         print(f"aec bin:  {aec_bin}")
+    # Once per run, the full path of every tool this run uses (SAA-198): the
+    # interpreter running this file, and ffmpeg as subprocess will find it.
+    ffmpeg_path = shutil.which(ffmpeg_bin()) or f"{ffmpeg_bin()} (not found)"
+    used = [f"python={sys.executable}", f"ffmpeg={ffmpeg_path}"]
+    if engine == "parakeet":
+        used += [f"parakeet={parakeet_bin}", f"parakeet_models={parakeet_models / PARAKEET_MODEL_NAME}"]
+    used.append(f"aec={aec_bin}" if aec_plan["run"] else "aec=not run")
+    # What the diarize head start runs with, if it starts (its own line says so).
+    diarize_bin, diarize_models = diarize_paths()
+    used += [f"diarize={diarize_bin}", f"diarize_models={diarize_models}"]
+    print(f"tools:    {' '.join(used)}")
 
     tap_bytes = tap_src.stat().st_size
     tap_frames = tap_bytes // (TAP_SAMPLE_BYTES * TAP_CH)
