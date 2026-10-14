@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build Clipwise.app — a double-clickable menu bar app, signed with the
-# Developer ID from SAA-88, that can be added to Login Items by hand.
+# Developer ID from SAA-88.
 #
 # What this replaces. Nothing: there was no build script. The steps it
 # automates were done by hand from the README, which had drifted (it builds
@@ -9,15 +9,16 @@
 # artifact rather than measuring one — baseline.sh is a capture harness and
 # fix-electron-signature.sh is an install hook.
 #
-# What it deliberately does not do. No notarization, no stapling, no DMG, no
-# auto-update, and no login-item registration — the app never asks to launch
-# itself, it is added in System Settings by hand. Those are Phase 4.
+# What it deliberately does not do. No notarization, no stapling and no DMG:
+# those need an Apple notary profile and are notarize.sh's, run after this. No
+# auto-update: a new version replaces the app by hand. Launch at login is not
+# this script's either: the app registers itself the first time it runs from
+# Applications with setup finished, and the tray's "Open at login" turns it off
+# (SAA-198 step 4).
 #
-# No hardened runtime. `--options runtime` is not passed, and that is a choice
-# rather than an oversight: it would extend to the tap, mic and whisper.cpp
-# binaries this app spawns, and library validation is what makes that a
-# notarization-shaped problem. The signature here is a real Developer ID
-# signature without it.
+# Signed with the hardened runtime (SAA-198 engineering call 6, SAA-126): every
+# executable in the bundle, inside-out, with only the entitlements it needs.
+# See section 4.
 
 set -euo pipefail
 
@@ -29,7 +30,8 @@ APP_SRC="$(cd "$(dirname "$0")" && pwd)"
 RECORDER_DIR="$(cd "$APP_SRC/.." && pwd)"
 REPO_DIR="$(cd "$RECORDER_DIR/.." && pwd)"
 SERVER_DIR="$REPO_DIR/server"
-ELECTRON_APP="$APP_SRC/node_modules/electron/dist/Electron.app"
+ELECTRON_DIST="$APP_SRC/node_modules/electron/dist"
+ELECTRON_APP="$ELECTRON_DIST/Electron.app"
 
 # Fixed output path, and that is load-bearing rather than tidiness. A TCC grant
 # may key on the bundle path; Architecture Decision #9 leaves path and signing
@@ -53,6 +55,10 @@ swift build -c release --package-path "$RECORDER_DIR/diarize"
 swift build -c release --package-path "$RECORDER_DIR/parakeet"
 # SAA-218: WebRTC AEC3, for removing speaker echo from the mic. Needs meson and ninja.
 "$RECORDER_DIR/aec/build.sh"
+# SAA-198: the pipeline's own ffmpeg (LGPL-only) and Python, so the bundle takes
+# neither from the Mac it runs on.
+"$RECORDER_DIR/ffmpeg/build.sh"
+"$RECORDER_DIR/python/fetch.sh"
 
 SYSTEMTAP_BIN="$RECORDER_DIR/systemtap/.build/release/systemtap"
 MICCAP_BIN="$RECORDER_DIR/miccap/.build/release/miccap"
@@ -61,10 +67,15 @@ MICWATCH_BIN="$RECORDER_DIR/micwatch"
 DIARIZE_BIN="$RECORDER_DIR/diarize/.build/release/diarize"
 PARAKEET_BIN="$RECORDER_DIR/parakeet/.build/release/parakeet"
 AEC_BIN="$RECORDER_DIR/aec/.build/release/aec"
+FFMPEG_BIN="$RECORDER_DIR/ffmpeg/.build/release/ffmpeg"
+PYTHON_DIR="$RECORDER_DIR/python/.build/python"
 
-for b in "$SYSTEMTAP_BIN" "$MICCAP_BIN" "$AUDIODEVS_BIN" "$MICWATCH_BIN" "$DIARIZE_BIN" "$PARAKEET_BIN" "$AEC_BIN"; do
+for b in "$SYSTEMTAP_BIN" "$MICCAP_BIN" "$AUDIODEVS_BIN" "$MICWATCH_BIN" "$DIARIZE_BIN" "$PARAKEET_BIN" "$AEC_BIN" "$FFMPEG_BIN" "$PYTHON_DIR/bin/python3"; do
     [ -x "$b" ] || { echo "build-app: missing $b after build" >&2; exit 1; }
 done
+# The ffmpeg that ships must be the LGPL build, never a GPL or nonfree one.
+"$FFMPEG_BIN" -hide_banner -L | grep -q "GNU Lesser General Public" \
+    || { echo "build-app: $FFMPEG_BIN does not report the LGPL" >&2; exit 1; }
 
 # SAA-194: the community-1 model files diarize loads at runtime. Fetched (and
 # checksum-verified against recorder/diarize/models/CHECKSUMS.sha256) rather
@@ -78,11 +89,12 @@ DIARIZE_MODELS_DIR="$RECORDER_DIR/diarize/models/speaker-diarization"
 
 # SAA-220: the Parakeet TDT 0.6B v2 model files transcribe.py's default engine
 # loads at runtime. Fetched and checksum-verified like the diarization models
-# above, and, like them, read from the checkout by the pipeline. Deliberately
-# NOT copied into the bundle: it is 443 MB, nothing reads a bundle copy, and
-# packaging is Phase 4.
+# above. Copied into the bundle (443 MB): the app reads no network at run time
+# (SAA-198, engineering call 2).
 step "fetching Parakeet models"
 "$RECORDER_DIR/parakeet/fetch-models.sh"
+PARAKEET_MODELS_DIR="$RECORDER_DIR/parakeet/models/parakeet-tdt-0.6b-v2"
+[ -d "$PARAKEET_MODELS_DIR" ] || { echo "build-app: missing $PARAKEET_MODELS_DIR after fetch-models.sh" >&2; exit 1; }
 
 # --- 2. the Electron runtime ----------------------------------------------
 #
@@ -165,28 +177,99 @@ cp "$APP_SRC/autostop.js" "$C/Resources/app/autostop.js"
 # The "Still recording?" reminder's decision. main.js requires it by relative
 # path; a bundle without it fails to launch.
 cp "$APP_SRC/silence-reminder.js" "$C/Resources/app/silence-reminder.js"
-# The first-run acknowledgement (SAA-216). main.js requires consent.js by
-# relative path and loads consent.html by path relative to itself; a bundle
-# without the first fails to launch, and without the second the gate would
-# shut with nothing to open.
+# The first-run acknowledgement (SAA-216) and the setup window it is now the
+# first screen of (SAA-198 step 4). main.js requires consent.js and setup.js by
+# relative path and loads setup.html by path relative to itself; a bundle
+# without either .js fails to launch, and without the page the gate would shut
+# with nothing to open.
 cp "$APP_SRC/consent.js" "$C/Resources/app/consent.js"
-cp "$APP_SRC/consent.html" "$C/Resources/app/consent.html"
+cp "$APP_SRC/setup.js" "$C/Resources/app/setup.js"
+cp "$APP_SRC/setup.html" "$C/Resources/app/setup.html"
+# The tray's Sign out revokes on the server (SAA-198 step 5). main.js requires it
+# by relative path; a bundle without it fails to launch.
+cp "$APP_SRC/capture-sign-out.js" "$C/Resources/app/capture-sign-out.js"
 install -m 755 "$SYSTEMTAP_BIN" "$C/Resources/bin/systemtap"
 install -m 755 "$MICCAP_BIN"    "$C/Resources/bin/miccap"
 install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"
 # Call detection (SAA-113). A bundle without it still records on the hotkey;
 # main.js logs the absence and disables detection rather than failing to start.
 install -m 755 "$MICWATCH_BIN"  "$C/Resources/bin/micwatch"
-# Voice separation (SAA-194). A bundle without it still processes captures —
-# the pipeline's diarize step treats a missing binary as a skip, same as an
-# Intel Mac — but this fulfils the CC-BY-4.0 redistribution story and keeps
-# packaging parity with the other three helper binaries above.
+# The capture pipeline's tools (SAA-198). main.js names each one by its path
+# here (PIPELINE_TOOLS_ENV); the pipeline reads nothing from a checkout or PATH.
 install -m 755 "$DIARIZE_BIN"   "$C/Resources/bin/diarize"
+install -m 755 "$PARAKEET_BIN"  "$C/Resources/bin/parakeet"
+install -m 755 "$AEC_BIN"       "$C/Resources/bin/aec"
+install -m 755 "$FFMPEG_BIN"    "$C/Resources/bin/ffmpeg"
+# The Swift tools' debug symbols out of their bundle copies, before signing:
+# their debug map names the build machine's paths (the package, SwiftPM's
+# checkouts and intermediates). The build fails if a copy still names the
+# checkout.
+for b in systemtap miccap diarize parakeet; do
+    strip -S "$C/Resources/bin/$b"
+    if grep -qaF "$REPO_DIR" "$C/Resources/bin/$b"; then
+        echo "build-app: $C/Resources/bin/$b still names $REPO_DIR after strip -S" >&2; exit 1
+    fi
+done
 # .mlmodelc directories are plain resource trees, not nested code — no
 # separate signing step; they're swept into the outer codesign call below
-# the same as the tray PNGs are.
-cp -R "$DIARIZE_MODELS_DIR" "$C/Resources/models/speaker-diarization"
+# the same as the tray PNGs are. Each model set sits in its own directory, the
+# one transcribe.py and diarize are handed (DIARIZE_MODELS, PARAKEET_MODELS).
+mkdir -p "$C/Resources/models/diarize" "$C/Resources/models/parakeet"
+cp -R "$DIARIZE_MODELS_DIR" "$C/Resources/models/diarize/speaker-diarization"
+cp -R "$PARAKEET_MODELS_DIR" "$C/Resources/models/parakeet/parakeet-tdt-0.6b-v2"
+# The standalone Python. ditto keeps its symlinks (bin/python3).
+ditto "$PYTHON_DIR" "$C/Resources/python"
+# Less the parts the pipeline never runs (SAA-198 step 7): pip and ensurepip, and
+# Tcl/Tk (its two dylibs, its five folders, and the _tkinter module that loads
+# them). An import trace of transcribe.py on a real capture (10-13) touched none
+# of them; what is left is what THIRD_PARTY_NOTICES covers for Python. Removed
+# here, before signing, so nothing signed is changed afterwards.
+PY="$C/Resources/python"
+rm -rf "$PY/lib/python3.14/site-packages/pip" "$PY/lib/python3.14/site-packages/pip-"*.dist-info \
+       "$PY/lib/python3.14/ensurepip" \
+       "$PY/bin/pip" "$PY/bin/pip3" "$PY/bin/pip3.14" \
+       "$PY/lib/libtcl9.0.dylib" "$PY/lib/libtcl9tk9.0.dylib" \
+       "$PY/lib/tcl9" "$PY/lib/tcl9.0" "$PY/lib/tk9.0" "$PY/lib/itcl4.3.8" "$PY/lib/thread3.0.6" \
+       "$PY/lib/python3.14/lib-dynload/_tkinter.cpython-314-darwin.so"
+# Also the tkinter package and IDLE, which need Tcl/Tk, and _dbm: none is in
+# transcribe.py's import graph (modulefinder, 10-14).
+rm -rf "$PY/lib/python3.14/tkinter" "$PY/lib/python3.14/idlelib" "$PY/bin/idle3" "$PY/bin/idle3.14" \
+       "$PY/lib/python3.14/lib-dynload/_dbm.cpython-314-darwin.so"
+# And every __pycache__ folder the build machine's Python left: compiled files
+# that name its paths. The app's own runs write none (PYTHONDONTWRITEBYTECODE in
+# main.js), so nothing under the signed bundle changes after signing.
+find "$PY" -type d -name __pycache__ -prune -exec rm -rf {} +
+for gone in "$PY/lib/python3.14/site-packages/pip" "$PY/lib/python3.14/ensurepip" "$PY/lib/libtcl9.0.dylib" "$PY/lib/tk9.0" \
+            "$PY/lib/python3.14/tkinter" "$PY/lib/python3.14/idlelib" "$PY/bin/idle3" \
+            "$PY/lib/python3.14/lib-dynload/_dbm.cpython-314-darwin.so"; do
+  [ ! -e "$gone" ] || { echo "build-app: $gone is still in the bundle" >&2; exit 1; }
+done
+[ -z "$(find "$PY" -type d -name __pycache__ -print -quit)" ] || { echo "build-app: a __pycache__ folder is still in the bundle" >&2; exit 1; }
 cp "$REPO_DIR/THIRD_PARTY_NOTICES" "$C/Resources/THIRD_PARTY_NOTICES"
+# Electron's own licence and the notices of everything Chromium bundles (Node.js,
+# V8, Squirrel.Mac and the rest), beside THIRD_PARTY_NOTICES, which names them:
+# LICENSES.chromium.html is about 20 MB, too large to fold into it.
+cp "$ELECTRON_DIST/LICENSE" "$C/Resources/LICENSE.electron"
+cp "$ELECTRON_DIST/LICENSES.chromium.html" "$C/Resources/LICENSES.chromium.html"
+
+# The pipeline, compiled (SAA-198, engineering call 3): the five files capture-cli
+# and capture-recover reach, as JavaScript that the app's own executable runs as
+# Node. transcribe.py goes beside them. The package.json marks them ES modules.
+# --typeRoots names the server's own @types: with files on the command line tsc
+# reads no tsconfig, and would otherwise look for them from the folder the build
+# was started in.
+step "compiling the capture pipeline"
+PIPELINE_OUT="$C/Resources/pipeline"
+"$SERVER_DIR/node_modules/.bin/tsc" \
+    "$SERVER_DIR/src/pipeline/capture-cli.ts" "$SERVER_DIR/src/pipeline/capture-recover.ts" \
+    --outDir "$PIPELINE_OUT" --rootDir "$SERVER_DIR/src" \
+    --module nodenext --moduleResolution nodenext --target es2023 \
+    --skipLibCheck --types node --typeRoots "$SERVER_DIR/node_modules/@types"
+printf '{ "type": "module" }\n' > "$PIPELINE_OUT/package.json"
+cp "$RECORDER_DIR/transcribe.py" "$PIPELINE_OUT/transcribe.py"
+for f in pipeline/capture-cli.js pipeline/capture-recover.js pipeline/classify-capture.js pipeline/voice-clips.js lib/trash-marker.js; do
+    [ -f "$PIPELINE_OUT/$f" ] || { echo "build-app: missing $PIPELINE_OUT/$f after tsc" >&2; exit 1; }
+done
 
 VERSION="$(/usr/bin/sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$APP_SRC/package.json" | head -1)"
 ELECTRON_VERSION="$(cat "$APP_SRC/node_modules/electron/dist/version")"
@@ -209,19 +292,17 @@ DIRTY=false
 git -C "$REPO_DIR" diff --quiet HEAD -- || DIRTY=true
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# This file is three things at once: the flag that tells main.js it is running
-# from a bundle, the only way the bundle can find the server checkout, and —
-# because built_at changes every run — the thing that guarantees two builds of
-# identical source still hash differently. That last one is what makes "does
-# the grant survive a rebuild?" a real question rather than a tautology about
-# an unchanged binary.
+# This file is two things at once: the flag that tells main.js it is running
+# from a bundle, and — because built_at changes every run — the thing that
+# guarantees two builds of identical source still hash differently. That second
+# one is what makes "does the grant survive a rebuild?" a real question rather
+# than a tautology about an unchanged binary. It names no path on the build
+# machine (SAA-198): the bundle finds everything relative to itself.
 cat > "$C/Resources/app/build-info.json" <<JSON
 {
   "built_at": "$BUILT_AT",
   "commit": "$COMMIT",
   "dirty": $DIRTY,
-  "server_dir": "$SERVER_DIR",
-  "recorder_dir": "$RECORDER_DIR",
   "electron_version": "$ELECTRON_VERSION"
 }
 JSON
@@ -242,24 +323,22 @@ set_key CFBundleDisplayName     string "$APP_NAME"
 set_key CFBundleExecutable      string "$APP_NAME"
 set_key CFBundleIdentifier      string "$BUNDLE_ID"
 set_key CFBundleShortVersionString string "$VERSION"
-set_key CFBundleVersion         string "$VERSION"
-# SAA-105 EXPERIMENT, 2026-09-01 — temporarily false. Revert to restore.
-#
-# Normally true: menu bar only. The paired app.dock.hide() in main.js runs
-# after the app is up, so without this key a login launch flashes a Dock icon
-# and steals focus from whatever the user is doing. That cost is real and is
-# being paid deliberately for the duration of this experiment.
-#
-# Clipwise is evicted from a full menu bar; Granola and Fathom are not. Both
-# are Electron, both use a plain Tray, and none of the three carries a
-# persisted status item position — so agent status is the only structural
-# difference left between us and them. This flips that one variable.
-#
-# This key and main.js's app.dock.hide() are two halves of one setting. Moving
-# only this one changes nothing: the runtime call would put the app straight
-# back into accessory policy and the experiment would read as a clean negative
-# having never run.
-set_key LSUIElement             bool   false
+# The build number goes up with every build (SAA-198 engineering call 11): the
+# build's UTC time to the minute, YYYYMMDDHHMM. No counter file to keep, and a
+# replaced app is always newer by this number than the one it replaced.
+set_key CFBundleVersion         string "$(date -u +%Y%m%d%H%M)"
+# Menu bar only, no Dock icon (SAA-198, Jon's call 6). The paired
+# app.dock.hide() in main.js runs after the app is up, so without this key a
+# login launch flashes a Dock icon and steals focus from whatever the user is
+# doing. The two are halves of one setting (SAA-105, whose experiment set this
+# false and removed the runtime call).
+set_key LSUIElement             bool   true
+# Electron's own permission texts for devices Clipwise never uses (SAA-198
+# engineering call 11): a camera or Bluetooth prompt with "This app needs
+# access to …" would be a prompt for something the app does not do.
+for key in NSCameraUsageDescription NSBluetoothPeripheralUsageDescription NSBluetoothAlwaysUsageDescription; do
+    $PB -c "Delete :$key" "$PLIST" >/dev/null 2>&1 || true
+done
 # Core Audio Taps floor, not Electron's 12.0.
 set_key LSMinimumSystemVersion  string "14.2"
 # The text macOS puts in the permission prompt. The capture runs in spawned
@@ -275,15 +354,80 @@ $PB -c "Delete :LSApplicationCategoryType" "$PLIST" >/dev/null 2>&1 || true
 
 # --- 4. sign --------------------------------------------------------------
 #
-# --deep signs inside-out: the framework, its helper apps and the three helper
-# binaries in Resources/bin all get the same identity before the outer bundle
-# is sealed. No --options runtime, no entitlements — see the header.
+# Inside-out, one piece at a time, every piece with the identity, the hardened
+# runtime and a secure timestamp: notarization requires all three on every
+# executable (SAA-126, SAA-198 engineering call 6). Not --deep: it never reaches
+# Resources/bin or Resources/python, which is how the capture binaries stayed
+# ad hoc before (SAA-126). Order is innermost first, so each container is sealed
+# over pieces that are already signed:
+#   1. every Mach-O file under Resources (the capture tools and the Python)
+#   2. what is inside each framework, then the framework
+#   3. the helper apps
+#   4. the app
+# Entitlements, only where needed (recorder/app/entitlements/): the app and the
+# helpers run V8 (allow-jit), and the app, miccap and systemtap record audio
+# (audio-input). Everything else gets none.
+
+ENT="$APP_SRC/entitlements"
+sign() {
+    # sign <path> [entitlements plist]
+    if [ -n "${2:-}" ]; then
+        codesign --force --timestamp --options runtime --entitlements "$2" --sign "$IDENTITY" "$1"
+    else
+        codesign --force --timestamp --options runtime --sign "$IDENTITY" "$1"
+    fi
+}
 
 step "signing as: $IDENTITY"
-codesign --force --deep --sign "$IDENTITY" "$APP"
+SIGNED=0
+while IFS= read -r -d '' f; do
+    file -b "$f" | grep -q "Mach-O" || continue
+    case "$(basename "$f")" in
+        miccap|systemtap) sign "$f" "$ENT/capture.plist" ;;
+        *) sign "$f" ;;
+    esac
+    SIGNED=$((SIGNED + 1))
+done < <(find "$C/Resources" -type f -print0)
+echo "signed $SIGNED Mach-O file(s) under Resources"
+
+FW="$C/Frameworks"
+EF="$FW/Electron Framework.framework/Versions/A"
+for f in "$EF/Libraries/"*.dylib "$EF/Helpers/chrome_crashpad_handler"; do
+    sign "$f"
+done
+sign "$FW/Electron Framework.framework"
+sign "$FW/Squirrel.framework/Versions/A/Resources/ShipIt"
+for fw in Squirrel Mantle ReactiveObjC; do
+    sign "$FW/$fw.framework"
+done
+for helper in "$FW/"*Helper*.app; do
+    sign "$helper" "$ENT/helper.plist"
+done
+sign "$APP" "$ENT/app.plist"
 
 step "codesign --verify --deep --strict --verbose=2 $APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
+
+# The bundle's Python and pipeline, copied to a plain temporary folder and run
+# there as capture-cli runs them (-I -B on transcribe.py). Copied out because
+# macOS's App Management can refuse this shell a write inside an .app (it did,
+# 10-14), which would hide a write the app's own run makes. With no arguments
+# transcribe.py loads its imports and stops at its usage line. The build fails
+# if it did not get there, or if any compiled file appeared.
+step "the bundle's Python, run as capture-cli runs it, writes no compiled files"
+PYCHECK="$(mktemp -d)"
+ditto "$C/Resources/python" "$PYCHECK/python"
+ditto "$PIPELINE_OUT" "$PYCHECK/pipeline"
+PYCHECK_OUT="$("$PYCHECK/python/bin/python3" -I -B "$PYCHECK/pipeline/transcribe.py" 2>&1 || true)"
+case "$PYCHECK_OUT" in
+    *"usage: transcribe.py"*) ;;
+    *) echo "build-app: transcribe.py did not reach its usage line: $PYCHECK_OUT" >&2; rm -rf "$PYCHECK"; exit 1 ;;
+esac
+if [ -n "$(find "$PYCHECK" \( -name '*.pyc' -o -name __pycache__ \) -print -quit)" ]; then
+    echo "build-app: the bundle's Python wrote compiled files when run as capture-cli runs it" >&2; rm -rf "$PYCHECK"; exit 1
+fi
+rm -rf "$PYCHECK"
+echo "no compiled files written"
 
 step "codesign -dvvv $APP"
 codesign -dvvv "$APP" 2>&1 | grep -E "^(Identifier|Format|CodeDirectory|CDHash|Signature|Authority|TeamIdentifier|Info\.plist|Sealed Resources|Timestamp)"

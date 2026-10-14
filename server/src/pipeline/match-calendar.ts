@@ -84,7 +84,22 @@ export async function resolveCalendarConnection(
 
   let accessToken = decrypt(connection.accessToken);
   if (connection.tokenExpiresAt.getTime() <= Date.now()) {
-    const refreshed = await refreshAccessToken(decrypt(connection.refreshToken), signal);
+    let refreshed;
+    try {
+      refreshed = await refreshAccessToken(decrypt(connection.refreshToken), signal);
+    } catch (err) {
+      // A refresh token Google refuses (invalid_grant: revoked, or expired) will
+      // never work again. The connection goes, so the member is shown "Reconnect
+      // calendar" (SAA-198 step 5, which replaces SAA-227 decision 20 for this one
+      // error), and this capture is treated as having no calendar. Any other
+      // failure is thrown, and the job retries as before.
+      if (err instanceof GoogleApiError && err.oauthError === "invalid_grant") {
+        await db.delete(schema.calendarConnections).where(eq(schema.calendarConnections.id, connection.id));
+        console.log(`calendar: refresh refused (invalid_grant) for member=${ownerMemberId}: connection ${connection.id} removed, the member reconnects`);
+        return { reason: "not_connected" };
+      }
+      throw err;
+    }
     accessToken = refreshed.accessToken;
     await db
       .update(schema.calendarConnections)

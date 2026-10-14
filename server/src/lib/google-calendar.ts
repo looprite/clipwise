@@ -34,10 +34,17 @@ const CALENDAR_BASE = "https://www.googleapis.com/calendar/v3";
 // can quote an address or a calendar's name, and the message reaches logs and
 // a job's last_error (SAA-227 decision 21). The reply body is read off and
 // dropped, so the connection is released.
+//
+// The one thing kept from a reply is the token endpoint's OAuth error code
+// (RFC 6749 5.2: a fixed word such as invalid_grant), and only when it is such
+// a word: a refused refresh token is how a revoked grant shows, and the match
+// job removes the connection on it so the member is asked to reconnect
+// (SAA-198 step 5).
 export class GoogleApiError extends Error {
   constructor(
     call: string,
     readonly status: number,
+    readonly oauthError: string | null = null,
   ) {
     super(`google ${call} ${status}`);
     this.name = "GoogleApiError";
@@ -45,8 +52,13 @@ export class GoogleApiError extends Error {
 }
 
 async function googleError(call: string, res: Response): Promise<GoogleApiError> {
-  await res.arrayBuffer().catch(() => undefined);
-  return new GoogleApiError(call, res.status);
+  if (call !== "oauth token") {
+    await res.arrayBuffer().catch(() => undefined);
+    return new GoogleApiError(call, res.status);
+  }
+  const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+  const code = typeof body?.error === "string" && /^[a-z_]{1,64}$/.test(body.error) ? body.error : null;
+  return new GoogleApiError(call, res.status, code);
 }
 
 function credentials(): { clientId: string; clientSecret: string } {

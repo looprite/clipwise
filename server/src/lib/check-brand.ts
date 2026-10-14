@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { FAVICON_SVG } from "./brand.js";
 import { consentPage, loginPage } from "../auth/pages.js";
+import { RECORDER_CLIENT_ID } from "../auth/recorder-client.js";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ""): void {
@@ -30,7 +31,7 @@ check("the icon is a plain image: no script, event handler, link, image or style
 check("the only address in the icon is the SVG namespace", (FAVICON_SVG.match(/https?:\/\/[^"' )<]*/g) ?? []).join(",") === "http://www.w3.org/2000/svg");
 
 type Captured = { status: number; headers: Record<string, string>; body: string };
-function render(handler: (req: any, res: any, next: any) => void): Captured {
+function render(handler: (req: any, res: any, next: any) => void, query: Record<string, string> = {}): Captured {
   const out: Captured = { status: 0, headers: {}, body: "" };
   const res = {
     status(s: number) { out.status = s; return res; },
@@ -38,7 +39,7 @@ function render(handler: (req: any, res: any, next: any) => void): Captured {
     set(h: Record<string, string>) { Object.assign(out.headers, h); return res; },
     send(b: string) { out.body = b; return res; },
   };
-  handler({}, res, () => {});
+  handler({ query }, res, () => {});
   return out;
 }
 
@@ -51,6 +52,11 @@ for (const [name, handler] of [["/login", loginPage], ["/consent", consentPage]]
   check(`${name}: the inline logo is the same mark (the icon's shapes, no xmlns)`, FAVICON_SVG.match(/<(rect|circle)[^>]*>/g)!.every((shape) => page.body.includes(shape.trim())) && !page.body.includes("xmlns"));
   check(`${name}: nothing in the page text names another origin`, !/https?:\/\//i.test(page.body), (page.body.match(/https?:\/\/[^"' )<]*/gi) ?? []).join(" "));
 }
+
+const recorderWording = ["<h1>Allow Clipwise Recorder?</h1>", "<p>Clipwise Recorder on this Mac wants to connect to Clipwise.</p>"];
+const recorderConsent = render(consentPage, { client_id: RECORDER_CLIENT_ID }).body;
+const defaultConsent = render(consentPage).body;
+check("/consent with the recorder's client_id shows the recorder's wording, and without it does not", recorderWording.every((line) => recorderConsent.includes(line)) && recorderWording.every((line) => !defaultConsent.includes(line)));
 
 console.log(failures === 0 ? "\nall passed" : `\n${failures} FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;

@@ -28,6 +28,7 @@ import { randomBytes } from "node:crypto";
 import type { RequestHandler, Response } from "express";
 import { FAVICON_SVG } from "../lib/brand.js";
 import { authConfigFromEnv } from "./auth.js";
+import { RECORDER_CLIENT_ID } from "./recorder-client.js";
 
 function send(res: Response, body: (nonce: string) => string): void {
   const nonce = randomBytes(16).toString("base64");
@@ -117,8 +118,10 @@ ${inner}
 // to their login: implicit linking is off (auth.ts), so this explicit link is
 // the only way a password login gains Google. Google sends the browser back
 // here, with ?error=… when it went wrong; both Google navigations go only to
-// accounts.google.com. The signed-in state also offers Connect calendar
-// (SAA-227 part F), which goes to /oauth/google/connect in this origin.
+// accounts.google.com. Google sign-in also connects the member's calendar
+// (SAA-198 step 5); the signed-in state says whether it is connected, and when
+// it is not, offers Reconnect calendar, which goes to /oauth/google/connect in
+// this origin.
 export const loginPage: RequestHandler = (_req, res) => {
   const cfg = authConfigFromEnv();
   const passwordEnabled = cfg.passwordEnabled;
@@ -137,8 +140,12 @@ export const loginPage: RequestHandler = (_req, res) => {
 <p>Signed in<span id="who"></span>. You can close this tab.</p>
 ${googleEnabled ? `<p id="linked" class="muted" hidden>Google is linked to this login.</p>
 <div class="row" id="linkrow" hidden><button id="link" type="button">Link Google</button></div>` : ""}
-${calendarEnabled ? `<p class="muted">Connect your own Google Calendar, so your recordings get their meeting's title and invitees.</p>
-<div class="row"><button id="calendar" type="button">Connect calendar</button></div>` : ""}
+${calendarEnabled ? `<p id="calconnected" class="muted" hidden>Your calendar is connected<span id="calwho"></span>.</p>
+<div id="calmissing" hidden><p class="muted">Your calendar isn't connected, so your recordings don't get their meeting's title and invitees.</p>
+<div class="row"><button id="calendar" type="button">Reconnect calendar</button></div></div>` : ""}
+<div id="demorow" hidden><p class="muted">Your two demo calls are made-up sample recordings, visible only to you.</p>
+<div class="row"><button id="demotrash" type="button">Move the demo calls to the trash</button></div></div>
+<p id="demodone" class="muted" hidden>The demo calls are in the trash.</p>
 </section>`;
   send(res, (nonce) =>
     shell(
@@ -182,7 +189,35 @@ ${googleEnabled ? `  try {
     el('linked').hidden = !hasGoogle;
     el('linkrow').hidden = hasGoogle;
   } catch { el('linkrow').hidden = false; }` : ""}
+${calendarEnabled ? `  // Sign-in connects the calendar (one Google screen); this offers Reconnect
+  // calendar only when the member has no connection: never granted, lost, or
+  // removed after Google refused it.
+  try {
+    const c = await (await fetch('/oauth/google/status', { credentials: 'same-origin' })).json();
+    if (c && c.connected) {
+      if (c.calendarEmail) el('calwho').textContent = ' (' + c.calendarEmail + ')';
+      el('calconnected').hidden = false;
+    } else {
+      el('calmissing').hidden = false;
+    }
+  } catch { el('calmissing').hidden = false; }` : ""}
+  // The member's own demo calls (SAA-198 step 6): offered for the trash only
+  // while any is still live.
+  try {
+    const d = await (await fetch('/demo/status', { credentials: 'same-origin' })).json();
+    el('demorow').hidden = !(d && d.live > 0);
+  } catch {}
 }
+el('demotrash').addEventListener('click', async () => {
+  el('demotrash').disabled = true;
+  msg.textContent = '';
+  try {
+    const res = await fetch('/demo/trash', { method: 'POST', credentials: 'same-origin' });
+    if (res.ok) { el('demorow').hidden = true; el('demodone').hidden = false; return; }
+    msg.textContent = 'That did not work. Try again.';
+  } catch { msg.textContent = 'Could not reach the server. Try again.'; }
+  el('demotrash').disabled = false;
+});
 async function afterSignIn() {
   // Back into the OAuth request this page was sent from.
   if (oauthRequest) { location.assign('/api/auth/oauth2/authorize' + location.search); return; }
@@ -242,12 +277,23 @@ if (!oauthRequest) {
   );
 };
 
-export const consentPage: RequestHandler = (_req, res) => {
-  send(res, (nonce) =>
-    shell(
-      nonce,
-      "Allow access to Clipwise",
-      `<h1>Allow access?</h1>
+// What the recorder can do with its capture token (SAA-198 step 5, engineering
+// call 9): exactly the capture scope's routes — POST /captures, and a capture's
+// jobs, transcript, trash, restore and delete (routes/captures.ts,
+// routes/capture-scope.ts). The claude.ai and Claude Code wording below it says
+// "It cannot change anything", which is not true of the recorder.
+const RECORDER_CONSENT = `<h1>Allow Clipwise Recorder?</h1>
+<p>Clipwise Recorder on this Mac wants to connect to Clipwise.</p>
+<p class="muted">It will send you back to <span id="host" class="host"></span> once you decide. Only continue if you started this from Clipwise on your Mac.</p>
+<p>It will be able to:</p>
+<ul>
+  <li>add the calls you record on this Mac to your recordings, private to you,</li>
+  <li>see when each one has finished processing,</li>
+  <li>save a recording's transcript, and move your own recordings to the trash, restore them, or delete them for good.</li>
+</ul>
+<p class="muted">It can't search or read your team's calls, and it can't see anyone else's recordings.</p>`;
+
+const CLIENT_CONSENT = `<h1>Allow access?</h1>
 <p><span id="client" class="host">An application</span> wants to connect to Clipwise.</p>
 <p class="muted">It will send you back to <span id="host" class="host"></span> once you decide. Only continue if you started this from a Claude app you trust.</p>
 <p>It will be able to:</p>
@@ -255,7 +301,15 @@ export const consentPage: RequestHandler = (_req, res) => {
   <li>search the moments of the calls you recorded and the calls your team has shared,</li>
   <li>read those calls' transcripts.</li>
 </ul>
-<p class="muted">It cannot change anything, and it cannot see other people's private calls.</p>
+<p class="muted">It cannot change anything, and it cannot see other people's private calls.</p>`;
+
+export const consentPage: RequestHandler = (req, res) => {
+  const recorder = req.query.client_id === RECORDER_CLIENT_ID;
+  send(res, (nonce) =>
+    shell(
+      nonce,
+      recorder ? "Allow Clipwise Recorder" : "Allow access to Clipwise",
+      `${recorder ? RECORDER_CONSENT : CLIENT_CONSENT}
 <div class="row"><button id="no" type="button">Deny</button><button class="primary" id="yes" type="button">Allow</button></div>
 <div id="msg" role="alert" aria-live="polite"></div>`,
       `
@@ -265,7 +319,7 @@ try { document.getElementById('host').textContent = new URL(q.get('redirect_uri'
 catch { document.getElementById('host').textContent = '(unknown)'; yes.disabled = true; msg.textContent = 'This request is missing its redirect address.'; }
 fetch('/api/auth/oauth2/public-client?client_id=' + encodeURIComponent(q.get('client_id') || ''), { credentials: 'same-origin' })
   .then((r) => (r.ok ? r.json() : null))
-  .then((c) => { if (c && c.client_name) document.getElementById('client').textContent = String(c.client_name); })
+  .then((c) => { const n = document.getElementById('client'); if (n && c && c.client_name) n.textContent = String(c.client_name); })
   .catch(() => {});
 // Only ever navigate somewhere that is safe to leave this page for.
 function safe(u) {

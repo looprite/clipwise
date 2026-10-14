@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Clipwise.app's main executable, under the hardened runtime (SAA-198, SAA-126).
+  allow-jit: V8 compiles JavaScript at run time, in the app and in the pipeline,
+  which runs on this same executable as Node (ELECTRON_RUN_AS_NODE).
+  audio-input: TCC attributes the capture children's microphone use to this app.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

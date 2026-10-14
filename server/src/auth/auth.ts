@@ -18,7 +18,7 @@
 // same code runs the CLI, the server and the checks.
 
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware, getOAuthState, getSessionFromCtx } from "better-auth/api";
 import { jwt } from "better-auth/plugins";
 import { mcp } from "@better-auth/mcp";
 import { pool } from "../db/index.js";
@@ -30,6 +30,7 @@ import {
   linkMemberToUser,
 } from "./membership.js";
 import { CAPTURE_RESOURCE_SCOPES, CAPTURE_SCOPE, MCP_SCOPES } from "./scopes.js";
+import { CALENDAR_READONLY_SCOPE, consentAfterSignIn, parkGoogleTokens, storeParkedGrant } from "./google-calendar-grant.js";
 
 export type AuthConfig = {
   secret: string;
@@ -116,22 +117,27 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
       minPasswordLength: 12,
     },
 
-    // Google sign-in asks for identity only (the provider's default scopes:
-    // openid, email, profile); calendar access is a separate grant. hd asks
-    // Google for the allowed domain and is checked against the id token's hd
-    // claim (@better-auth/core social-providers/google.mjs:114, :120-123); the
-    // domain rule at user creation below still applies on top of it. A user
-    // created by a password login gains Google only through the explicit link
-    // call while signed in, because implicit linking is off.
-    // includeGrantedScopes is off: the provider's default sends
-    // include_granted_scopes=true (google.mjs:84), and Google then adds every
-    // scope this user granted this client before, the calendar's included, to
-    // the sign-in's token (seen on scratch 2026-10-12, 5a).
+    // Google sign-in is one screen for identity and the calendar (SAA-198 step 5,
+    // Jon's call 5, reversing K decision 5): the provider's default scopes
+    // (openid, email, profile) plus calendar.readonly, with offline access so a
+    // first grant brings a refresh token. No prompt is forced, so a returning
+    // member is not asked again (engineering call 12), unless they have no
+    // calendar connection (the after-hook below, Jon's call 12). The tokens never reach
+    // auth_account: the account hooks below hand them to google-calendar-grant.ts,
+    // which stores them encrypted in calendar_connections. hd asks Google for the
+    // allowed domain and is checked against the id token's hd claim
+    // (@better-auth/core social-providers/google.mjs:114, :120-123); the domain
+    // rule at user creation below still applies on top of it. A user created by a
+    // password login gains Google only through the explicit link call while
+    // signed in, because implicit linking is off. includeGrantedScopes stays off:
+    // the request names every scope it wants.
     socialProviders: cfg.google
       ? {
           google: {
             clientId: cfg.google.clientId,
             clientSecret: cfg.google.clientSecret,
+            scope: [CALENDAR_READONLY_SCOPE],
+            accessType: "offline",
             includeGrantedScopes: false,
             ...(cfg.allowedDomain ? { hd: cfg.allowedDomain } : {}),
           },
@@ -180,6 +186,23 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
           },
         },
       },
+      // Google's tokens go to calendar_connections, encrypted, and never into
+      // auth_account (google-calendar-grant.ts). Every path that writes a Google
+      // account passes one of these.
+      account: {
+        create: {
+          before: async (account) => parkGoogleTokens(account),
+          after: async (account, context) => {
+            await storeParkedGrant(account, context);
+          },
+        },
+        update: {
+          before: async (account) => parkGoogleTokens(account),
+          after: async (account, context) => {
+            await storeParkedGrant(account, context);
+          },
+        },
+      },
       session: {
         create: {
           // A removed member's existing login must not mint new sessions.
@@ -189,6 +212,30 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
           },
         },
       },
+    },
+
+    // Google's callback, where every Google sign-in ends (/login, the
+    // recorder's and claude.ai's OAuth requests, and Link Google). When this
+    // request's grant came without a refresh token and the member has no
+    // calendar connection, the browser goes on to Google's consent screen
+    // instead, and from there to the sign-in's own destination
+    // (google-calendar-grant.ts consentAfterSignIn), for the session this
+    // sign-in made (a sign-in) or already had (Link Google). Anything else,
+    // including an error redirect, keeps Better Auth's redirect.
+    hooks: {
+      after: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/callback/:id") return;
+        const destination = ctx.context.responseHeaders?.get("location");
+        const state = await getOAuthState();
+        if (!destination || destination !== state?.callbackURL) return;
+        const session = ctx.context.newSession ?? (await getSessionFromCtx(ctx));
+        if (!session) return;
+        const consent = await consentAfterSignIn(ctx, destination, new URL(ctx.context.baseURL).origin, {
+          sessionId: session.session.id,
+          secret: cfg.secret,
+        });
+        if (consent) throw ctx.redirect(consent);
+      }),
     },
 
     plugins: [

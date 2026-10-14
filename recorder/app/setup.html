@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- First-run setup (SAA-198 steps 4 and 6), and the recording notice (SAA-216) shown
+     on its own once setup has been finished. See setup.js for the rules and
+     main.js's setup window section for what each button does.
+
+     The page holds no state of its own: main.js sends 'setup:state' with the
+     screen to show and everything on it, after every answer and whenever the
+     window comes back to the front, and the page draws that. Every button sends
+     one message with the window's token.
+
+     The notice screen's text is the approved text from SAA-216, unchanged. Its
+     primary button's label comes from main.js (consent.js buttonLabel): "I
+     understand" when it opened by itself, "I understand — start recording" when
+     something tried to start a capture. "Not now" and closing the window are the
+     same thing: nothing is written and the gate stays shut.
+
+     Loaded from file:// with nodeIntegration on, same reasoning as
+     identity.html: ships inside the bundle, loads no remote content. -->
+<title>Set up Clipwise</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1d1d1f;
+    --muted: #6e6e73;
+    --bg: #ececee;
+    --accent: #0a68d8;
+    --accent-fg: #ffffff;
+    --secondary-bg: #ffffff;
+    --secondary-border: #c6c6c8;
+    --error: #c4291c;
+    --ok: #1f7a35;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #f5f5f7;
+      --muted: #98989d;
+      --bg: #2a2a2c;
+      --accent: #4a9dff;
+      --accent-fg: #0b0b0c;
+      --secondary-bg: #1e1e20;
+      --secondary-border: #48484a;
+      --error: #ff6b5e;
+      --ok: #4cd06a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    padding: 20px 22px 18px;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    user-select: none;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .screen { flex: 1 1 auto; overflow-y: auto; min-height: 0; display: none; }
+  .screen.shown { display: block; }
+  #step { color: var(--muted); font-size: 11px; margin: 0 0 6px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 10px; }
+  p { margin: 0 0 10px; }
+  .muted { color: var(--muted); }
+  .error { color: var(--error); min-height: 1.45em; }
+  input[type=text] {
+    font: inherit; width: 100%; padding: 6px 8px; margin: 2px 0 8px;
+    border-radius: 6px; border: 1px solid var(--secondary-border);
+    background: var(--secondary-bg); color: var(--fg); user-select: text;
+  }
+  .perm { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--secondary-border); }
+  .perm:last-of-type { border-bottom: 1px solid var(--secondary-border); }
+  .perm .name { flex: 1 1 auto; font-weight: 600; }
+  .perm .state { color: var(--muted); }
+  .perm .state.granted { color: var(--ok); }
+  .perm .state.denied { color: var(--error); }
+  a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  .copyrow { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; }
+  .address {
+    flex: 1 1 auto; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--secondary-border);
+    background: var(--secondary-bg); font: 12px/1.4 ui-monospace, Menlo, monospace; user-select: text; overflow-wrap: anywhere;
+  }
+  ol { margin: 0 0 10px; padding-left: 20px; }
+  li { margin: 0 0 4px; }
+  #actions { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; }
+  button {
+    font: inherit;
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--secondary-border);
+    background: var(--secondary-bg);
+    color: var(--fg);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  button:disabled { opacity: 0.5; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+  <p id="step"></p>
+
+  <div class="screen" id="screen-notice">
+    <h1>Before you record</h1>
+    <p>Clipwise records calls on this Mac without joining them. No bot appears in the meeting, so nobody else on the call can see that it is recording.</p>
+    <p>You are responsible for telling the people you record, and for following the laws and workplace rules that apply to you. In many places everyone on a call has to agree to be recorded.</p>
+    <p>When you start recording, Clipwise shows a short line you can say to let everyone know. On calls with a chat, &ldquo;Copy recording notice&rdquo; in the menu bar copies it for you.</p>
+  </div>
+
+  <div class="screen" id="screen-address">
+    <h1>Your team&rsquo;s Clipwise address</h1>
+    <p class="muted">Whoever set up Clipwise for your team can tell you what it is.</p>
+    <input id="address" type="text" placeholder="clipwise.yourcompany.com" spellcheck="false" autocomplete="off">
+    <p class="error" id="address-error"></p>
+  </div>
+
+  <div class="screen" id="screen-signin">
+    <h1>Sign in</h1>
+    <p>Your browser opens your team&rsquo;s sign-in page at <span id="signin-host"></span>. Come back here when it says you&rsquo;re signed in.</p>
+    <p class="muted">Google asks once for read-only access to your calendar, so your recordings get their meeting&rsquo;s title and invitees.</p>
+    <p class="muted" id="signin-status"></p>
+    <p><a id="change-address">Use a different address</a></p>
+  </div>
+
+  <div class="screen" id="screen-permissions">
+    <h1>Allow audio recording</h1>
+    <p>Clipwise records two tracks of each call: your microphone, and the sound your Mac plays. macOS asks you once for each.</p>
+    <div class="perm">
+      <span class="name">Microphone</span>
+      <span class="state" id="mic-state"></span>
+      <button id="mic-button" type="button"></button>
+    </div>
+    <div class="perm">
+      <span class="name">System audio</span>
+      <span class="state" id="tap-state"></span>
+      <button id="tap-button" type="button"></button>
+    </div>
+    <p class="error" id="perm-error"></p>
+  </div>
+
+  <div class="screen" id="screen-claude">
+    <h1>Use Clipwise in Claude</h1>
+    <p>Ask Claude about your calls. Add this address to Claude as a custom connector:</p>
+    <div class="copyrow">
+      <span id="claude-address" class="address"></span>
+      <button id="copy-address" type="button">Copy</button>
+    </div>
+    <p>In Claude:</p>
+    <ol>
+      <li>Go to Customize, then Connectors, and click Add.</li>
+      <li>Hover over Custom, then choose Web.</li>
+      <li>Name it Clipwise, paste the address above, and click Continue.</li>
+      <li>Under Authentication, choose Sign in now, then click Add. Sign in with Google when Clipwise asks.</li>
+      <li>In a chat, click + (or type /), hover over Connectors, and turn Clipwise on.</li>
+    </ol>
+    <p>To try it, ask: &ldquo;What changed in the Panfold project between the two calls, and is anyone behind on what they committed to?&rdquo;</p>
+    <p class="muted">The two demo calls are made-up samples in your recordings, visible only to you. You can remove them any time from your sign-in page.</p>
+  </div>
+
+  <div id="actions">
+    <button id="later" type="button">Not now</button>
+    <button id="primary" class="primary" type="button"></button>
+  </div>
+<script>
+  const { ipcRenderer } = require('electron');
+  const token = new URLSearchParams(location.search).get('token');
+  const $ = (id) => document.getElementById(id);
+  const send = (channel, extra) => ipcRenderer.send(channel, { token, ...(extra || {}) });
+
+  const STATE_TEXT = { granted: 'Allowed', denied: 'Off', notDetermined: 'Not yet asked' };
+  let view = null;
+
+  // Any other state audiodevs reports (restricted, unavailable, unexpected) is
+  // "Not available" in the muted style: it does not hold setup open
+  // (setup.js permissionSettled), but it is not a grant either.
+  function drawPerm(which, state, asking) {
+    const el = $(`${which}-state`);
+    el.textContent = asking ? 'Waiting for your answer…' : (STATE_TEXT[state] || 'Not available');
+    el.className = `state ${state === 'granted' ? 'granted' : state === 'denied' ? 'denied' : ''}`;
+    const button = $(`${which}-button`);
+    button.style.visibility = state === 'notDetermined' || state === 'denied' ? 'visible' : 'hidden';
+    button.textContent = state === 'denied' ? 'Open System Settings' : 'Allow…';
+    button.disabled = !!asking;
+  }
+
+  function draw(v) {
+    view = v;
+    for (const s of document.querySelectorAll('.screen')) s.classList.toggle('shown', s.id === `screen-${v.screen}`);
+    $('step').textContent = v.stepText || '';
+    $('step').style.display = v.stepText ? 'block' : 'none';
+    const primary = $('primary');
+    const later = $('later');
+    primary.disabled = !!v.busy;
+    later.textContent = v.screen === 'permissions' ? 'Finish later' : 'Not now';
+    if (v.screen === 'notice') {
+      primary.textContent = v.noticeLabel || 'I understand';
+    } else if (v.screen === 'address') {
+      primary.textContent = v.busy ? 'Checking…' : 'Continue';
+      if (v.address !== undefined && document.activeElement !== $('address')) $('address').value = v.address;
+      $('address').disabled = !!v.busy;
+      $('address-error').textContent = v.error || '';
+      if (!v.busy) $('address').focus();
+    } else if (v.screen === 'signin') {
+      $('signin-host').textContent = v.host || '';
+      primary.textContent = 'Sign in with Google';
+      $('signin-status').textContent = v.waiting ? 'Waiting for your browser…' : (v.error || '');
+      $('signin-status').className = v.error && !v.waiting ? 'error' : 'muted';
+    } else if (v.screen === 'permissions') {
+      // The window moves on to the last screen by itself once both are settled.
+      drawPerm('mic', v.mic, v.asking === 'mic');
+      drawPerm('tap', v.tap, v.asking === 'tap');
+      $('perm-error').textContent = v.error || '';
+    } else if (v.screen === 'claude') {
+      $('claude-address').textContent = v.claudeAddress || '';
+      primary.textContent = 'Done';
+    }
+    primary.style.display = v.screen === 'permissions' ? 'none' : '';
+    later.style.display = v.screen === 'claude' ? 'none' : '';
+  }
+
+  ipcRenderer.on('setup:state', (_event, v) => draw(v));
+
+  $('primary').addEventListener('click', () => {
+    if (!view || $('primary').disabled) return;
+    $('primary').disabled = true;
+    if (view.screen === 'notice') send('setup:acknowledge');
+    else if (view.screen === 'address') send('setup:address', { address: $('address').value });
+    else if (view.screen === 'signin') send('setup:signin');
+    else if (view.screen === 'claude') send('setup:done');
+  });
+  $('copy-address').addEventListener('click', () => {
+    send('setup:copy-claude-address');
+    $('copy-address').textContent = 'Copied';
+    setTimeout(() => { $('copy-address').textContent = 'Copy'; }, 2000);
+  });
+  $('address').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('primary').click(); });
+  $('later').addEventListener('click', () => send('setup:later'));
+  $('change-address').addEventListener('click', () => send('setup:change-address'));
+  for (const which of ['mic', 'tap']) {
+    $(`${which}-button`).addEventListener('click', () => {
+      if (!view) return;
+      send(view[which] === 'denied' ? 'setup:permission-settings' : 'setup:permission-request', { which });
+    });
+  }
+  send('setup:ready');
+</script>
+</body>
+</html>

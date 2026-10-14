@@ -159,7 +159,9 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] && process.argv[1].endsWith("capture-recover.ts")) {
+// .ts when run through tsx from a checkout, .js when Clipwise.app runs its compiled
+// copy on Electron's Node (SAA-198).
+if (process.argv[1] && /capture-recover\.(ts|js)$/.test(process.argv[1])) {
   main().catch((err) => {
     process.stderr.write(`capture-recover: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}\n`);
     process.exitCode = 1;

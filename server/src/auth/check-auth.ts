@@ -10,6 +10,13 @@
 // caller says the database is a scratch one. The database must already be
 // provisioned (db:provision) and have its account (auth init-account).
 //
+// One write is not confined to its own rows: the clear-google-tokens --apply
+// case (SAA-198 step 5) clears the Google tokens of EVERY Google account in
+// auth_account on the database it runs on, as the command itself does, not
+// only the fixture row it inserts. scratch-db.sh's guard is what confines that
+// to the scratch branch. A sign-in done on that branch before a run loses its
+// Google tokens with it.
+//
 // Usage:
 //   CLIPWISE_CHECK_SCRATCH_DB=1 tsx src/auth/check-auth.ts
 // with DATABASE_URL, BETTER_AUTH_SECRET, BETTER_AUTH_URL and
@@ -23,7 +30,9 @@ import { buildApp } from "../app.js";
 import { db, pool, schema } from "../db/index.js";
 import { authConfigFromEnv, createAuth, getAuth } from "./auth.js";
 import { addMember, createPasswordLogin, removeMember, requireAccount, Refusal } from "./members.js";
+import { findMemberByEmail } from "./membership.js";
 import { mountAuth } from "./mount.js";
+import { oauthRouter } from "../routes/oauth.js";
 
 if (process.env.CLIPWISE_CHECK_SCRATCH_DB !== "1") {
   process.stderr.write(
@@ -99,6 +108,9 @@ async function cleanup(): Promise<void> {
       await pool.query(`delete from auth_account where "userId" in (select id from auth_user where email like $1)`, [like]);
       await pool.query(`delete from auth_user where email like $1`, [like]);
       await pool.query(`delete from calendar_connections where member_id in (select id from account_members where email like $1)`, [like]);
+      // Every member added here gets the two demo calls (demo/seed.ts); they go
+      // first, since recordings.owner_member_id holds the member row (RESTRICT).
+      await pool.query(`delete from recordings where owner_member_id in (select id from account_members where email like $1)`, [like]);
       await pool.query(`delete from account_members where email like $1`, [like]);
     }
     await pool.query(`delete from "oauthClient" where name like $1`, [`check-${tag}%`]);
@@ -190,10 +202,14 @@ async function main(): Promise<void> {
     const realFetch = globalThis.fetch;
     let googleCalls = 0;
     let primaryAddress = "";
+    let tokenRefusal: { status: number; error: string } | null = null;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (url.startsWith("https://oauth2.googleapis.com/token")) {
         googleCalls++;
+        // A refused refresh, as Google sends one (RFC 6749 5.2), for the
+        // invalid_grant cases; null otherwise.
+        if (tokenRefusal) return Response.json({ error: tokenRefusal.error, error_description: "check" }, { status: tokenRefusal.status });
         return Response.json({ access_token: "check-access", refresh_token: "check-refresh", expires_in: 3600, scope: CALENDAR_SCOPE });
       }
       if (url.startsWith("https://www.googleapis.com/calendar/v3/users/me/calendarList")) {
@@ -290,6 +306,170 @@ async function main(): Promise<void> {
         own.status === 200 && ownRows === 1,
         "calendar callback: the member's own session and own address are stored as their connection (the control for both refusals)",
         `status ${own.status} ${String(own.error)}, rows for the member ${ownRows}`,
+      );
+
+      // 5–7. The scope a grant carries (SAA-198 step 5): stored only when
+      // calendar.readonly is among the scopes Google reported; a grant that
+      // reported none stores nothing. storeCalendarGrant is what sign-in's hook
+      // and Reconnect calendar's callback both store through. Imported here, so
+      // code without it fails these cases rather than the run.
+      const grantModule = await import("./google-calendar-grant.js").catch(() => null);
+      const scopeEmail = emailFor("calendar-scope");
+      await addMember({ email: scopeEmail, role: "member", name: null });
+      const scopeMember = await findMemberByEmail(scopeEmail);
+      const tryGrant = async (scope: string | null) => {
+        await pool.query(`delete from calendar_connections where member_id = $1`, [scopeMember!.id]);
+        primaryAddress = scopeEmail;
+        let outcome = "(no storeCalendarGrant)";
+        try {
+          outcome = (
+            await grantModule!.storeCalendarGrant({
+              accountId: scopeMember!.accountId,
+              memberId: scopeMember!.id,
+              memberEmail: scopeEmail,
+              accessToken: "check-access",
+              refreshToken: "check-refresh",
+              expiresAt: new Date(Date.now() + 3600 * 1000),
+              scope: scope as string,
+            })
+          ).outcome;
+        } catch (err) {
+          outcome = `threw ${err instanceof Error ? err.name : String(err)}`;
+        }
+        return { outcome, rows: await rowsOfMember(scopeEmail) };
+      };
+      const g5 = await tryGrant(`openid email ${CALENDAR_SCOPE}`);
+      record(
+        g5.outcome === "stored" && g5.rows === 1,
+        "calendar scope: a grant whose reported scope includes calendar.readonly is stored",
+        `outcome ${g5.outcome}, rows ${g5.rows}`,
+      );
+      const g6 = await tryGrant("openid email profile");
+      record(
+        g6.outcome === "no_calendar_scope" && g6.rows === 0,
+        "calendar scope: a reported scope without calendar.readonly stores nothing (no_calendar_scope)",
+        `outcome ${g6.outcome}, rows ${g6.rows}`,
+      );
+      const g7 = await tryGrant(null);
+      record(
+        g7.outcome === "no_calendar_scope" && g7.rows === 0,
+        "calendar scope, Reconnect's strict check: no reported scope stores nothing (no_calendar_scope)",
+        `outcome ${g7.outcome}, rows ${g7.rows}`,
+      );
+
+      // 8–9. A refresh Google refuses with invalid_grant removes the connection,
+      // so the member is shown Reconnect calendar; any other refusal keeps it
+      // and is thrown, for the job to retry (the control).
+      const { resolveCalendarConnection } = await import("../pipeline/match-calendar.js");
+      const { encrypt } = await import("../lib/crypto.js");
+      const expiredRow = async () => {
+        await pool.query(`delete from calendar_connections where member_id = $1`, [scopeMember!.id]);
+        await db.insert(schema.calendarConnections).values({
+          accountId: scopeMember!.accountId,
+          memberId: scopeMember!.id,
+          calendarEmail: scopeEmail,
+          accessToken: encrypt("check-expired-access"),
+          refreshToken: encrypt("check-revoked-refresh"),
+          tokenExpiresAt: new Date(Date.now() - 60_000),
+          scope: CALENDAR_SCOPE,
+          searchedCalendarIds: [scopeEmail],
+        });
+      };
+      const resolveWith = async (refusal: { status: number; error: string }) => {
+        await expiredRow();
+        tokenRefusal = refusal;
+        let result = "";
+        try {
+          const r = await resolveCalendarConnection(scopeMember!.id);
+          result = "reason" in r ? r.reason : "connection";
+        } catch (err) {
+          result = `threw ${err instanceof Error ? err.message : String(err)}`;
+        } finally {
+          tokenRefusal = null;
+        }
+        return { result, rows: await rowsOfMember(scopeEmail) };
+      };
+      const revoked = await resolveWith({ status: 400, error: "invalid_grant" });
+      record(
+        revoked.result === "not_connected" && revoked.rows === 0,
+        "calendar refresh refused with invalid_grant: the connection is removed and the capture has no calendar",
+        `result ${revoked.result}, rows ${revoked.rows}`,
+      );
+      const flaky = await resolveWith({ status: 500, error: "server_error" });
+      record(
+        flaky.result.startsWith("threw") && flaky.rows === 1,
+        "calendar refresh failing another way: the connection stays and the error is thrown (the control)",
+        `result ${flaky.result}, rows ${flaky.rows}`,
+      );
+
+      // 10–12. GET /oauth/google/status, for /login's Reconnect calendar.
+      const status = async (cookie: string | null) => {
+        const res = await realFetch(`${rsrv.base}/oauth/google/status`, { headers: { origin, ...(cookie ? { cookie } : {}) } });
+        return { status: res.status, body: (await res.json().catch(() => null)) as { connected?: unknown; calendarEmail?: unknown } | null };
+      };
+      const sConnected = await status(good.cookie);
+      record(
+        sConnected.status === 200 && sConnected.body?.connected === true && sConnected.body?.calendarEmail === memberEmail,
+        "calendar status: a member with a connection is told it is connected, and to which address",
+        `status ${sConnected.status} ${JSON.stringify(sConnected.body)}`,
+      );
+      const sMissing = await status(other.cookie);
+      record(
+        sMissing.status === 200 && sMissing.body?.connected === false,
+        "calendar status: a member with none is told it is not connected (never another member's)",
+        `status ${sMissing.status} ${JSON.stringify(sMissing.body)}`,
+      );
+      const sAnon = await status(null);
+      record(sAnon.status === 401, "calendar status: without a session it is refused", `status ${sAnon.status}`);
+
+      // 13. /login: Reconnect calendar, shown by the status above, in place of
+      // the always-on Connect calendar.
+      const login = await (await realFetch(`${rsrv.base}/login`)).text();
+      record(
+        login.includes(">Reconnect calendar</button>") && login.includes("/oauth/google/status") && !login.includes(">Connect calendar</button>"),
+        "/login offers Reconnect calendar from the member's calendar status, and no longer an always-on Connect calendar",
+      );
+
+      // 14–17. /consent: the recorder's own wording, and claude.ai's unchanged.
+      const page = async (clientId: string) => (await (await realFetch(`${rsrv.base}/consent?client_id=${encodeURIComponent(clientId)}&redirect_uri=http%3A%2F%2F127.0.0.1%3A5555%2Fcallback`)).text());
+      const once = (html: string, s: string) => html.split(s).length - 1 === 1;
+      const listClosed = (html: string) => {
+        const count = (s: string) => html.split(s).length - 1;
+        return count("<ul>") === 1 && count("</ul>") === 1 && count("<li>") === count("</li>") && count("<li>") > 0
+          && html.indexOf("<ul>") < html.indexOf("<li>") && html.lastIndexOf("</li>") < html.indexOf("</ul>");
+      };
+      const recorderPage = await page("clipwise-recorder");
+      const recorderSentences = [
+        "<h1>Allow Clipwise Recorder?</h1>",
+        "Clipwise Recorder on this Mac wants to connect to Clipwise.",
+        "It will send you back to",
+        "Only continue if you started this from Clipwise on your Mac.",
+        "It will be able to:",
+        "<li>add the calls you record on this Mac to your recordings, private to you,</li>",
+        "<li>see when each one has finished processing,</li>",
+        "<li>save a recording's transcript, and move your own recordings to the trash, restore them, or delete them for good.</li>",
+        "It can't search or read your team's calls, and it can't see anyone else's recordings.",
+      ];
+      const recorderMissing = recorderSentences.filter((s) => !once(recorderPage, s));
+      record(recorderMissing.length === 0, "consent, recorder: each sentence of its own wording appears exactly once", `not exactly once: ${JSON.stringify(recorderMissing)}`);
+      record(listClosed(recorderPage), "consent, recorder: the list of what it can do is one closed <ul>, every <li> closed");
+      const claudeWords = ["cannot change anything", "Claude app you trust", "search the moments", "read those calls"];
+      const leaked = claudeWords.filter((w) => recorderPage.includes(w));
+      record(leaked.length === 0, "consent, recorder: none of the claude.ai wording appears", `found: ${JSON.stringify(leaked)}`);
+      const claudePage = await page("some-claude-client");
+      const claudeSentences = [
+        "<h1>Allow access?</h1>",
+        "wants to connect to Clipwise.",
+        "Only continue if you started this from a Claude app you trust.",
+        "<li>search the moments of the calls you recorded and the calls your team has shared,</li>",
+        "<li>read those calls' transcripts.</li>",
+        "It cannot change anything, and it cannot see other people's private calls.",
+      ];
+      const claudeMissing = claudeSentences.filter((s) => !once(claudePage, s));
+      record(
+        claudeMissing.length === 0 && listClosed(claudePage) && !claudePage.includes("Clipwise Recorder"),
+        "consent, claude.ai: its wording unchanged, each sentence exactly once, the list closed, nothing of the recorder's",
+        `not exactly once: ${JSON.stringify(claudeMissing)}`,
       );
     } finally {
       await rsrv.close();
@@ -409,8 +589,15 @@ async function main(): Promise<void> {
       const u = startUrl ? new URL(startUrl) : null;
       record(u?.host === "accounts.google.com", "with Google configured, sign-in starts at Google", `status ${start.status}`);
       record(u?.searchParams.get("hd") === "clipwise.test", "it asks Google for the allowed domain (hd)", `hd ${u?.searchParams.get("hd")}`);
+      // One Google screen for sign-in and the calendar (SAA-198 step 5): identity
+      // plus calendar.readonly, with offline access, and no forced consent.
       const scopes = (u?.searchParams.get("scope") ?? "").split(" ").sort().join(" ");
-      record(scopes === "email openid profile", "it asks only for identity (openid, email, profile)", `scope ${scopes}`);
+      record(scopes === `email ${CALENDAR_SCOPE} openid profile`, "it asks for identity and calendar.readonly on one screen (openid, email, profile, calendar.readonly)", `scope ${scopes}`);
+      record(
+        u?.searchParams.get("access_type") === "offline" && !u?.searchParams.has("prompt"),
+        "it asks for offline access (a refresh token on a first grant) and forces no consent prompt",
+        `access_type ${u?.searchParams.get("access_type")}, prompt ${u?.searchParams.get("prompt") ?? "(absent)"}`,
+      );
       const granted = u?.searchParams.get("include_granted_scopes") ?? null;
       record(
         granted === null || granted === "false",
@@ -485,6 +672,367 @@ async function main(): Promise<void> {
       );
       const anon = await call(gsrv.base, "POST", "/api/auth/link-social", { body: { provider: "google", callbackURL: "/" }, headers: gip });
       record(anon.status === 401, "and linking without a session is refused", `status ${anon.status}`);
+
+      // --- Google's tokens: calendar_connections, never auth_account --------
+      // (SAA-198 step 5.) Better Auth writes a Google account's tokens through
+      // internalAdapter.createAccount (a first sign-in or a link) and
+      // updateAccount (a returning sign-in), with the account hooks around both
+      // (oauth2/link-account.mjs), so the cases call those two with what a
+      // sign-in carries. Google is stubbed as in the calendar section: only its
+      // calendar list answers, with gPrimary as the primary address.
+      const gEnv = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "CALENDAR_TOKEN_ENCRYPTION_KEY"] as const;
+      const gSaved = gEnv.map((k) => [k, process.env[k]] as const);
+      process.env.GOOGLE_CLIENT_ID = "check-client.apps.googleusercontent.com";
+      process.env.GOOGLE_CLIENT_SECRET = "check-placeholder";
+      process.env.CALENDAR_TOKEN_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+      const gRealFetch = globalThis.fetch;
+      let gPrimary = "";
+      // calendarList refused as Google refuses a token without a calendar scope
+      // (403), and how often calendarList was asked.
+      let gListRefused = false;
+      let gListCalls = 0;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.startsWith("https://www.googleapis.com/calendar/v3/users/me/calendarList")) {
+          gListCalls++;
+          if (gListRefused) return Response.json({ error: { code: 403, message: "insufficient scopes" } }, { status: 403 });
+          return Response.json({ items: [{ id: gPrimary, primary: true, accessRole: "owner" }] });
+        }
+        return gRealFetch(input, init);
+      }) as typeof fetch;
+      try {
+        // An id token as Better Auth hands it on (already verified by then): only
+        // its subject is read.
+        const idTokenFor = (sub: string) =>
+          [{ alg: "none" }, { sub, iss: "https://accounts.google.com" }, "sig"]
+            .map((p) => (typeof p === "string" ? p : Buffer.from(JSON.stringify(p)).toString("base64url")))
+            .join(".");
+        const userIdOf = async (email: string) =>
+          (await pool.query<{ id: string }>(`select id from auth_user where email = $1`, [email])).rows[0]?.id ?? null;
+        const accountTokens = async (sub: string) =>
+          (
+            await pool.query<{ a: string | null; r: string | null; i: string | null }>(
+              `select "accessToken" a, "refreshToken" r, "idToken" i from auth_account where "providerId" = 'google' and "accountId" = $1`,
+              [sub],
+            )
+          ).rows[0] ?? null;
+        const connectionOf = async (email: string) =>
+          (
+            await pool.query<{ refresh: string; calendar_email: string }>(
+              `select c.refresh_token refresh, c.calendar_email from calendar_connections c join account_members m on m.id = c.member_id where m.email = $1`,
+              [email],
+            )
+          ).rows;
+        const { decrypt } = await import("../lib/crypto.js");
+        const fullScope = `openid,email,profile,${CALENDAR_SCOPE}`;
+
+        // A first grant: the member googleMemberEmail, created by Google above.
+        const sub1 = `sub-first-${tag}`;
+        gPrimary = googleMemberEmail;
+        const firstUser = await userIdOf(googleMemberEmail);
+        const firstAccount = await gctx.internalAdapter.createAccount({
+          userId: firstUser!,
+          providerId: "google",
+          accountId: sub1,
+          accessToken: "check-google-access-1",
+          refreshToken: "check-google-refresh-1",
+          idToken: idTokenFor(sub1),
+          scope: fullScope,
+        });
+        const t1 = await accountTokens(sub1);
+        record(
+          !!t1 && t1.a === null && t1.r === null && t1.i === null,
+          "first grant: auth_account keeps no Google token (access, refresh and id token all null)",
+          `access ${t1?.a === null ? "null" : "SET"}, refresh ${t1?.r === null ? "null" : "SET"}, id ${t1?.i === null ? "null" : "SET"}`,
+        );
+        const c1 = await connectionOf(googleMemberEmail);
+        record(
+          c1.length === 1 && c1[0].calendar_email === googleMemberEmail && decrypt(c1[0].refresh) === "check-google-refresh-1" && c1[0].refresh !== "check-google-refresh-1",
+          "first grant: the calendar connection is stored for the member, refresh token encrypted",
+          `rows ${c1.length}`,
+        );
+
+        // A returning sign-in, Google sending no refresh token: the row stays.
+        await gctx.internalAdapter.updateAccount(firstAccount.id, {
+          providerId: "google",
+          idToken: idTokenFor(sub1),
+          accessToken: "check-google-access-2",
+        });
+        const t2 = await accountTokens(sub1);
+        const c2 = await connectionOf(googleMemberEmail);
+        record(
+          !!t2 && t2.a === null && t2.i === null && c2.length === 1 && decrypt(c2[0].refresh) === "check-google-refresh-1",
+          "returning sign-in, no refresh token: auth_account stays empty, and the connection is left as it is",
+          `access ${t2?.a === null ? "null" : "SET"}, rows ${c2.length}`,
+        );
+
+        // A returning sign-in that Google re-asked (consent, a refresh token)
+        // but whose scope Better Auth's update path does not carry: on the
+        // sign-in path, a calendarList that succeeds proves the grant, and the
+        // connection is stored with calendar.readonly as its scope.
+        const listedBefore = gListCalls;
+        await gctx.internalAdapter.updateAccount(firstAccount.id, {
+          providerId: "google",
+          idToken: idTokenFor(sub1),
+          accessToken: "check-google-access-3",
+          refreshToken: "check-google-refresh-3",
+        });
+        const t3 = await accountTokens(sub1);
+        const c3 = await connectionOf(googleMemberEmail);
+        const scope3 = (await pool.query<{ scope: string | null }>(
+          `select c.scope from calendar_connections c join account_members m on m.id = c.member_id where m.email = $1`,
+          [googleMemberEmail],
+        )).rows[0]?.scope;
+        record(
+          !!t3 && t3.a === null && t3.r === null && c3.length === 1 && decrypt(c3[0].refresh) === "check-google-refresh-3"
+            && scope3 === CALENDAR_SCOPE && gListCalls - listedBefore === 1,
+          "returning sign-in, refresh token, no scope reported, calendarList succeeds: the connection is stored with calendar.readonly, auth_account empty",
+          `refresh in row ${c3.length ? (decrypt(c3[0].refresh) === "check-google-refresh-3" ? "the new one" : "the old one") : "none"}, scope ${scope3}, calendarList asked ${gListCalls - listedBefore}`,
+        );
+
+        // The same, but Google refuses calendarList (403, no calendar scope on
+        // the token): nothing stored, after calendarList was asked.
+        await pool.query(`delete from calendar_connections where member_id = (select id from account_members where email = $1)`, [googleMemberEmail]);
+        const listedBefore4 = gListCalls;
+        gListRefused = true;
+        try {
+          await gctx.internalAdapter.updateAccount(firstAccount.id, {
+            providerId: "google",
+            idToken: idTokenFor(sub1),
+            accessToken: "check-google-access-4",
+            refreshToken: "check-google-refresh-4",
+          });
+        } finally {
+          gListRefused = false;
+        }
+        const t3b = await accountTokens(sub1);
+        const c3b = await connectionOf(googleMemberEmail);
+        record(
+          !!t3b && t3b.a === null && t3b.r === null && c3b.length === 0 && gListCalls - listedBefore4 === 1,
+          "returning sign-in, refresh token, no scope reported, calendarList refused (403): nothing stored, auth_account empty",
+          `rows ${c3b.length}, calendarList asked ${gListCalls - listedBefore4}`,
+        );
+
+        // Decision 28 on the sign-in path: Google's primary address is not the member's.
+        const otherGoogleEmail = emailFor("google-other-address");
+        await addMember({ email: otherGoogleEmail, role: "member", name: null });
+        await createdByGoogle(otherGoogleEmail);
+        const sub2 = `sub-other-${tag}`;
+        gPrimary = emailFor("someone-else");
+        await gctx.internalAdapter.createAccount({
+          userId: (await userIdOf(otherGoogleEmail))!,
+          providerId: "google",
+          accountId: sub2,
+          accessToken: "check-google-access-4",
+          refreshToken: "check-google-refresh-4",
+          idToken: idTokenFor(sub2),
+          scope: fullScope,
+        });
+        const t4 = await accountTokens(sub2);
+        const c4 = await connectionOf(otherGoogleEmail);
+        const c4other = (await pool.query(`select 1 from calendar_connections where calendar_email = $1`, [gPrimary])).rowCount;
+        record(
+          !!t4 && t4.a === null && t4.r === null && c4.length === 0 && c4other === 0,
+          "sign-in with a Google account whose primary address is not the member's (decision 28): nothing stored, auth_account empty",
+          `rows for the member ${c4.length}, for the address ${c4other}`,
+        );
+
+        // clear-google-tokens: an account written before the hooks (raw SQL,
+        // as hosted's identity-only sign-ins were) is counted, left alone
+        // without --apply, cleared with it; a non-Google account is untouched.
+        // --apply clears EVERY Google account's tokens on the database this
+        // runs on, not only the fixture row (see the header); scratch-db.sh's
+        // guard confines that to the scratch branch.
+        const grantModule = await import("./google-calendar-grant.js").catch(() => null);
+        const oldSub = `sub-old-${tag}`;
+        await pool.query(
+          `insert into auth_account (id, "accountId", "providerId", "userId", "accessToken", "idToken", "createdAt", "updatedAt") ` +
+            `values ($1, $2, 'google', $3, 'check-old-access', 'check-old-id', now(), now()), ($4, $5, 'check-other', $3, 'check-other-access', null, now(), now())`,
+          [`old-${tag}`, oldSub, firstUser, `other-${tag}`, `other-${tag}`],
+        );
+        let dry: { holding: number; cleared: number } | null = null;
+        let applied: { holding: number; cleared: number } | null = null;
+        let after: { holding: number; cleared: number } | null = null;
+        try {
+          dry = await grantModule!.clearGoogleTokens(false);
+          const stillThere = await accountTokens(oldSub);
+          applied = await grantModule!.clearGoogleTokens(true);
+          after = await grantModule!.clearGoogleTokens(false);
+          const cleared = await accountTokens(oldSub);
+          const other = (await pool.query<{ a: string | null }>(`select "accessToken" a from auth_account where id = $1`, [`other-${tag}`])).rows[0];
+          record(
+            dry.holding >= 1 && dry.cleared === 0 && stillThere?.a === "check-old-access",
+            "clear-google-tokens without --apply counts the old Google accounts and changes nothing",
+            `holding ${dry.holding}, the old row's access ${stillThere?.a === "check-old-access" ? "still set" : "CHANGED"}`,
+          );
+          record(
+            applied.cleared === dry.holding && after.holding === 0 && cleared?.a === null && cleared?.i === null && other?.a === "check-other-access",
+            "clear-google-tokens --apply clears them all and leaves another provider's account alone",
+            `cleared ${applied.cleared} of ${dry.holding}, holding after ${after.holding}, other provider's token ${other?.a === "check-other-access" ? "kept" : "CHANGED"}`,
+          );
+        } catch (err) {
+          record(false, "clear-google-tokens without --apply counts the old Google accounts and changes nothing", `threw ${err instanceof Error ? err.message : String(err)}`);
+          record(false, "clear-google-tokens --apply clears them all and leaves another provider's account alone", "not run");
+        }
+
+        // --- a member Google remembers (SAA-198, Jon's call 12) ---------------
+        // Google's callback driven over HTTP, as Google's redirect would arrive:
+        // the sign-in starts at /api/auth/sign-in/social (its state cookie kept),
+        // and Google's token endpoint is answered here with an id token, the
+        // nonce from the authorization URL echoed, and a refresh token only when
+        // the case says so. Better Auth reads that id token without verifying it
+        // (@better-auth/core social-providers/google.mjs:116-119), so it is built
+        // unsigned. Reconnect's routes are added to this app for the callback.
+        const gRedirectSaved = process.env.GOOGLE_OAUTH_REDIRECT_URI;
+        process.env.GOOGLE_OAUTH_REDIRECT_URI = `${origin}/oauth/google/callback`;
+        gapp.use(oauthRouter);
+        const outerFetch = globalThis.fetch;
+        let signInGrant: { sub: string; email: string; refresh: boolean; nonce: string | null } | null = null;
+        // A token request outside a sign-in (a Reconnect code exchange): counted,
+        // and refused here as Google refuses an unknown code, so none goes out.
+        let exchangeCalls = 0;
+        globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          if (url.startsWith("https://oauth2.googleapis.com/token") && !signInGrant) {
+            exchangeCalls++;
+            return Response.json({ error: "invalid_grant", error_description: "check" }, { status: 400 });
+          }
+          if (url.startsWith("https://oauth2.googleapis.com/token") && signInGrant) {
+            const claims = {
+              iss: "https://accounts.google.com",
+              aud: "check-client.apps.googleusercontent.com",
+              sub: signInGrant.sub,
+              email: signInGrant.email,
+              email_verified: true,
+              hd: "clipwise.test",
+              name: "Google User",
+              ...(signInGrant.nonce ? { nonce: signInGrant.nonce } : {}),
+            };
+            const idToken = [{ alg: "none" }, claims, "sig"]
+              .map((p) => (typeof p === "string" ? p : Buffer.from(JSON.stringify(p)).toString("base64url")))
+              .join(".");
+            return Response.json({
+              access_token: "check-signin-access",
+              id_token: idToken,
+              expires_in: 3600,
+              token_type: "Bearer",
+              scope: `openid email profile ${CALENDAR_SCOPE}`,
+              ...(signInGrant.refresh ? { refresh_token: "check-signin-refresh" } : {}),
+            });
+          }
+          return outerFetch(input, init);
+        }) as typeof fetch;
+        try {
+          // A Google sign-in to /login, through the callback, not followed.
+          const googleSignIn = async (sub: string, email: string, refresh: boolean) => {
+            const start = await call(gsrv.base, "POST", "/api/auth/sign-in/social", { body: { provider: "google", callbackURL: "/login" }, headers: gip });
+            const startUrl = new URL((start.json as { url: string }).url);
+            signInGrant = { sub, email, refresh, nonce: startUrl.searchParams.get("nonce") };
+            const res = await fetch(
+              `${gsrv.base}/api/auth/callback/google?code=check-signin-code&state=${encodeURIComponent(startUrl.searchParams.get("state") ?? "")}`,
+              { headers: { origin, cookie: start.cookie, ...gip }, redirect: "manual" },
+            );
+            signInGrant = null;
+            const cookie = res.headers
+              .getSetCookie()
+              .map((c) => c.split(";")[0])
+              .join("; ");
+            return { status: res.status, location: res.headers.get("location"), cookie };
+          };
+
+          // No refresh token, no calendar connection: on to Google's consent screen.
+          const rememberedEmail = emailFor("google-remembered");
+          await addMember({ email: rememberedEmail, role: "member", name: null });
+          const remembered = await googleSignIn(`sub-remembered-${tag}`, rememberedEmail, false);
+          const consentAt = remembered.location?.startsWith("https://") ? new URL(remembered.location) : null;
+          record(
+            remembered.status === 302 &&
+              consentAt?.host === "accounts.google.com" &&
+              consentAt.searchParams.get("prompt") === "consent" &&
+              consentAt.searchParams.get("scope") === CALENDAR_SCOPE &&
+              consentAt.searchParams.get("login_hint") === rememberedEmail &&
+              remembered.cookie.includes("session_token="),
+            "Google sign-in with no refresh token, for a member with no calendar connection: signed in, then on to Google's consent screen (prompt=consent, calendar.readonly, login_hint the member's address)",
+            `status ${remembered.status}, location ${consentAt ? `${consentAt.host} prompt=${consentAt.searchParams.get("prompt")}` : remembered.location}`,
+          );
+
+          const consentState = consentAt?.searchParams.get("state") ?? "";
+          const consentCallback = (query: string, cookie: string | null) =>
+            fetch(`${gsrv.base}/oauth/google/callback?${query}&state=${encodeURIComponent(consentState)}`, {
+              headers: { origin, ...(cookie ? { cookie } : {}) },
+              redirect: "manual",
+            });
+
+          // The same state from a browser without that sign-in's session.
+          const elsewhere = await consentCallback("error=access_denied", null);
+          record(
+            elsewhere.headers.get("location") !== "/login",
+            "that consent state from a browser without the sign-in's session: not sent on to the sign-in's destination",
+            `status ${elsewhere.status}, location ${elsewhere.headers.get("location")}`,
+          );
+
+          // The state altered (the first character after "c1.", inside the signed
+          // payload): not sent on either.
+          const altered = consentState.slice(0, 3) + (consentState[3] === "A" ? "B" : "A") + consentState.slice(4);
+          const tampered = await fetch(`${gsrv.base}/oauth/google/callback?error=access_denied&state=${encodeURIComponent(altered)}`, {
+            headers: { origin, cookie: remembered.cookie },
+            redirect: "manual",
+          });
+          record(
+            altered !== consentState && tampered.headers.get("location") !== "/login",
+            "that consent state altered: not sent on to the sign-in's destination",
+            `status ${tampered.status}, location ${tampered.headers.get("location")}`,
+          );
+
+          // That consent denied: Google comes back with an error and no code.
+          const denied = await fetch(
+            `${gsrv.base}/oauth/google/callback?error=access_denied&state=${encodeURIComponent(consentAt?.searchParams.get("state") ?? "")}`,
+            { headers: { origin, cookie: remembered.cookie }, redirect: "manual" },
+          );
+          const deniedRows = (await connectionOf(rememberedEmail)).length;
+          record(
+            denied.status === 302 && denied.headers.get("location") === "/login" && deniedRows === 0,
+            "that consent denied: the browser reaches the sign-in's own destination (/login), and nothing is stored",
+            `status ${denied.status}, location ${denied.headers.get("location")}, rows ${deniedRows}`,
+          );
+
+          // The same state again, now that the server holds no entry for it (as
+          // after a sweep or a restart), this time with a code: the browser still
+          // reaches the destination, and with no entry nothing is exchanged or stored.
+          const exchangesBefore = exchangeCalls;
+          const lost = await consentCallback("code=check-lost-code", remembered.cookie);
+          const lostRows = (await connectionOf(rememberedEmail)).length;
+          record(
+            lost.status === 302 && lost.headers.get("location") === "/login" && lostRows === 0 && exchangeCalls === exchangesBefore,
+            "that consent state once the server no longer holds it, with a code: on to the sign-in's destination (/login), no code exchanged, nothing stored",
+            `status ${lost.status}, location ${lost.headers.get("location")}, rows ${lostRows}, code exchanges ${exchangeCalls - exchangesBefore}`,
+          );
+
+          // No refresh token, but a calendar connection: straight to the destination.
+          const connectedEmail = emailFor("google-connected");
+          await addMember({ email: connectedEmail, role: "member", name: null });
+          gPrimary = connectedEmail;
+          const connectedSub = `sub-connected-${tag}`;
+          const firstGrant = await googleSignIn(connectedSub, connectedEmail, true);
+          const returning = await googleSignIn(connectedSub, connectedEmail, false);
+          const connectedRows = (await connectionOf(connectedEmail)).length;
+          record(
+            returning.status === 302 && returning.location === "/login" && connectedRows === 1,
+            "Google sign-in with no refresh token, for a member who has a calendar connection: straight to the sign-in's destination (/login)",
+            `first grant ${firstGrant.status} ${firstGrant.location}, returning ${returning.status} ${returning.location}, rows ${connectedRows}`,
+          );
+        } finally {
+          globalThis.fetch = outerFetch;
+          if (gRedirectSaved === undefined) delete process.env.GOOGLE_OAUTH_REDIRECT_URI;
+          else process.env.GOOGLE_OAUTH_REDIRECT_URI = gRedirectSaved;
+        }
+      } finally {
+        globalThis.fetch = gRealFetch;
+        for (const [k, v] of gSaved) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+      }
     } finally {
       await gsrv.close();
     }
