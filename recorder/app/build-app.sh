@@ -200,6 +200,16 @@ install -m 755 "$DIARIZE_BIN"   "$C/Resources/bin/diarize"
 install -m 755 "$PARAKEET_BIN"  "$C/Resources/bin/parakeet"
 install -m 755 "$AEC_BIN"       "$C/Resources/bin/aec"
 install -m 755 "$FFMPEG_BIN"    "$C/Resources/bin/ffmpeg"
+# The Swift tools' debug symbols out of their bundle copies, before signing:
+# their debug map names the build machine's paths (the package, SwiftPM's
+# checkouts and intermediates). The build fails if a copy still names the
+# checkout.
+for b in systemtap miccap diarize parakeet; do
+    strip -S "$C/Resources/bin/$b"
+    if grep -qaF "$REPO_DIR" "$C/Resources/bin/$b"; then
+        echo "build-app: $C/Resources/bin/$b still names $REPO_DIR after strip -S" >&2; exit 1
+    fi
+done
 # .mlmodelc directories are plain resource trees, not nested code — no
 # separate signing step; they're swept into the outer codesign call below
 # the same as the tray PNGs are. Each model set sits in its own directory, the
@@ -221,9 +231,20 @@ rm -rf "$PY/lib/python3.14/site-packages/pip" "$PY/lib/python3.14/site-packages/
        "$PY/lib/libtcl9.0.dylib" "$PY/lib/libtcl9tk9.0.dylib" \
        "$PY/lib/tcl9" "$PY/lib/tcl9.0" "$PY/lib/tk9.0" "$PY/lib/itcl4.3.8" "$PY/lib/thread3.0.6" \
        "$PY/lib/python3.14/lib-dynload/_tkinter.cpython-314-darwin.so"
-for gone in "$PY/lib/python3.14/site-packages/pip" "$PY/lib/python3.14/ensurepip" "$PY/lib/libtcl9.0.dylib" "$PY/lib/tk9.0"; do
+# Also the tkinter package and IDLE, which need Tcl/Tk, and _dbm: none is in
+# transcribe.py's import graph (modulefinder, 10-14).
+rm -rf "$PY/lib/python3.14/tkinter" "$PY/lib/python3.14/idlelib" "$PY/bin/idle3" "$PY/bin/idle3.14" \
+       "$PY/lib/python3.14/lib-dynload/_dbm.cpython-314-darwin.so"
+# And every __pycache__ folder the build machine's Python left: compiled files
+# that name its paths. The app's own runs write none (PYTHONDONTWRITEBYTECODE in
+# main.js), so nothing under the signed bundle changes after signing.
+find "$PY" -type d -name __pycache__ -prune -exec rm -rf {} +
+for gone in "$PY/lib/python3.14/site-packages/pip" "$PY/lib/python3.14/ensurepip" "$PY/lib/libtcl9.0.dylib" "$PY/lib/tk9.0" \
+            "$PY/lib/python3.14/tkinter" "$PY/lib/python3.14/idlelib" "$PY/bin/idle3" \
+            "$PY/lib/python3.14/lib-dynload/_dbm.cpython-314-darwin.so"; do
   [ ! -e "$gone" ] || { echo "build-app: $gone is still in the bundle" >&2; exit 1; }
 done
+[ -z "$(find "$PY" -type d -name __pycache__ -print -quit)" ] || { echo "build-app: a __pycache__ folder is still in the bundle" >&2; exit 1; }
 cp "$REPO_DIR/THIRD_PARTY_NOTICES" "$C/Resources/THIRD_PARTY_NOTICES"
 # Electron's own licence and the notices of everything Chromium bundles (Node.js,
 # V8, Squirrel.Mac and the rest), beside THIRD_PARTY_NOTICES, which names them:

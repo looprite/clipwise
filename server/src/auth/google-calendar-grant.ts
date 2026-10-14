@@ -30,7 +30,7 @@
 // machine (SAA-227 decision 22), and the after hook runs in the same request
 // as the before hook.
 
-import { randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
 import { encrypt } from "../lib/crypto.js";
@@ -182,15 +182,67 @@ export async function clearGoogleTokens(apply: boolean): Promise<{ holding: numb
 
 // Google consents in flight for the calendar: Reconnect calendar's
 // (routes/oauth.ts) and the one a sign-in starts (consentAfterSignIn below).
-// state -> the member who started it, and, for a sign-in, where that sign-in
-// was going. Generated and validated in this same process, deliberately not
-// persisted (hosted runs one machine, SAA-227 decision 22), so a consent
-// started right before a server restart has to be retried. Single-use: deleted
-// when taken. Expired entries are swept on every new entry.
-export type PendingConsent = { accountId: string; memberId: string; expiresAt: number; returnTo: string | null };
+// state -> the member who started it. Generated and validated in this same
+// process, deliberately not persisted (hosted runs one machine, SAA-227
+// decision 22), so a Reconnect started right before a server restart has to be
+// retried. Single-use: deleted when taken. Expired entries are swept on every
+// new entry.
+export type PendingConsent = { accountId: string; memberId: string; expiresAt: number };
 const pendingConsents = new Map<string, PendingConsent>();
 const CONSENT_TTL_MS = 10 * 60 * 1000;
 const GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
+
+// A sign-in's consent state is signed rather than random: "c1." + payload +
+// "." + MAC, both base64url. The payload holds the sign-in's destination, an
+// expiry, and a hash of the browser session the sign-in made, so the callback
+// can send that same session on to the destination even when this process no
+// longer holds the entry (swept, or a restart). The MAC is HMAC-SHA256 under a
+// key derived from the server's auth secret.
+const SIGNED_STATE_PREFIX = "c1.";
+const SIGNED_STATE_TTL_MS = 60 * 60 * 1000;
+export type SignInConsent = { returnTo: string; sessionId: string; secret: string };
+
+function signedStateKey(secret: string): Buffer {
+  return createHmac("sha256", secret).update("clipwise calendar consent state").digest();
+}
+
+function sessionHash(sessionId: string): string {
+  return createHash("sha256").update(sessionId).digest("base64url");
+}
+
+function signedState(signIn: SignInConsent, expiresAt: number): string {
+  const payload = Buffer.from(
+    JSON.stringify({ r: signIn.returnTo, e: expiresAt, s: sessionHash(signIn.sessionId), n: randomBytes(16).toString("base64url") }),
+  ).toString("base64url");
+  const mac = createHmac("sha256", signedStateKey(signIn.secret)).update(payload).digest("base64url");
+  return `${SIGNED_STATE_PREFIX}${payload}.${mac}`;
+}
+
+// Whether a state is shaped as a sign-in's consent state (not yet whether it is valid).
+export function isSignInConsentState(state: string): boolean {
+  return state.startsWith(SIGNED_STATE_PREFIX);
+}
+
+// The destination a sign-in's consent state carries, when its MAC is this
+// server's (compared in constant time), it has not expired, it was made for
+// this browser session, and it is a path on this server; null otherwise.
+export function signInConsentReturnTo(state: string, secret: string, sessionId: string | null, origin: string): string | null {
+  if (!isSignInConsentState(state) || !sessionId) return null;
+  const [payload, mac, extra] = state.slice(SIGNED_STATE_PREFIX.length).split(".");
+  if (!payload || !mac || extra !== undefined) return null;
+  const expected = createHmac("sha256", signedStateKey(secret)).update(payload).digest();
+  const given = Buffer.from(mac, "base64url");
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  let claim: { r?: unknown; e?: unknown; s?: unknown };
+  try {
+    claim = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as typeof claim;
+  } catch {
+    return null;
+  }
+  if (typeof claim.r !== "string" || typeof claim.e !== "number" || typeof claim.s !== "string") return null;
+  if (claim.e < Date.now() || claim.s !== sessionHash(sessionId)) return null;
+  return isOwnPath(claim.r, origin) ? claim.r : null;
+}
 
 // The Google client and redirect address Reconnect uses, or null when either is unset.
 export function calendarOAuthConfig(): { clientId: string; redirectUri: string } | null {
@@ -202,18 +254,19 @@ export function calendarOAuthConfig(): { clientId: string; redirectUri: string }
 // Records a consent in flight and returns Google's consent screen for it:
 // calendar.readonly with offline access, consent asked every time, and the
 // member's own address as the account Google offers (decision 28 refuses a
-// grant for any other).
+// grant for any other). A sign-in's consent gets a signed state; Reconnect's a
+// random one.
 export function startCalendarConsent(
   oauth: { clientId: string; redirectUri: string },
   member: ConsentMember,
-  returnTo: string | null,
+  signIn: SignInConsent | null,
 ): string {
   const now = Date.now();
   for (const [key, value] of pendingConsents) {
     if (value.expiresAt < now) pendingConsents.delete(key);
   }
-  const state = randomBytes(16).toString("hex");
-  pendingConsents.set(state, { accountId: member.accountId, memberId: member.memberId, expiresAt: now + CONSENT_TTL_MS, returnTo });
+  const state = signIn ? signedState(signIn, now + SIGNED_STATE_TTL_MS) : randomBytes(16).toString("hex");
+  pendingConsents.set(state, { accountId: member.accountId, memberId: member.memberId, expiresAt: now + CONSENT_TTL_MS });
   const url = new URL(GOOGLE_AUTH_ENDPOINT);
   url.searchParams.set("client_id", oauth.clientId);
   url.searchParams.set("redirect_uri", oauth.redirectUri);
@@ -233,15 +286,6 @@ export function takeCalendarConsent(state: string): PendingConsent | undefined {
   return pending;
 }
 
-// The consent in flight for a state when a sign-in started it, removed;
-// undefined, with nothing removed, for any other state.
-export function takeSignInConsent(state: string): (PendingConsent & { returnTo: string }) | undefined {
-  const pending = pendingConsents.get(state);
-  if (!pending || pending.returnTo === null) return undefined;
-  pendingConsents.delete(state);
-  return { ...pending, returnTo: pending.returnTo };
-}
-
 // A path on this server: one leading "/" (not "//" or "/\"), resolving to origin.
 function isOwnPath(destination: string, origin: string): boolean {
   if (!destination.startsWith("/") || destination.startsWith("//") || destination.startsWith("/\\")) return false;
@@ -254,11 +298,16 @@ function isOwnPath(destination: string, origin: string): boolean {
 
 // After Google's callback (auth.ts): when this request's grant came without a
 // refresh token and the member has no calendar connection, Google's consent
-// screen, to come back from to the sign-in's own destination. Null when there
-// is nothing to ask, when the destination is not a path on this server, when
-// Reconnect is not configured, and on any failure, which is logged: the
-// sign-in then goes where Better Auth sends it.
-export async function consentAfterSignIn(request: RequestContext, destination: string, origin: string): Promise<string | null> {
+// screen, to come back from to the sign-in's own destination, for the session
+// the sign-in made. Null when there is nothing to ask, when the destination is
+// not a path on this server, when Reconnect is not configured, and on any
+// failure, which is logged: the sign-in then goes where Better Auth sends it.
+export async function consentAfterSignIn(
+  request: RequestContext,
+  destination: string,
+  origin: string,
+  session: { sessionId: string; secret: string },
+): Promise<string | null> {
   const member = (request.context as CarriesConsent)[CONSENT_AFTER_SIGN_IN];
   if (!member) return null;
   if (!isOwnPath(destination, origin)) return null;
@@ -271,7 +320,7 @@ export async function consentAfterSignIn(request: RequestContext, destination: s
       .where(eq(schema.calendarConnections.memberId, member.memberId));
     if (row) return null;
     console.log(`google sign-in: calendar for member=${member.memberId}: no connection; on to Google's consent screen`);
-    return startCalendarConsent(oauth, member, destination);
+    return startCalendarConsent(oauth, member, { returnTo: destination, ...session });
   } catch (err) {
     logError(`google sign-in: calendar for member=${member.memberId}: consent not started`, err);
     return null;

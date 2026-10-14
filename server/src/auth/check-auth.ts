@@ -888,8 +888,15 @@ async function main(): Promise<void> {
         gapp.use(oauthRouter);
         const outerFetch = globalThis.fetch;
         let signInGrant: { sub: string; email: string; refresh: boolean; nonce: string | null } | null = null;
+        // A token request outside a sign-in (a Reconnect code exchange): counted,
+        // and refused here as Google refuses an unknown code, so none goes out.
+        let exchangeCalls = 0;
         globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
           const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          if (url.startsWith("https://oauth2.googleapis.com/token") && !signInGrant) {
+            exchangeCalls++;
+            return Response.json({ error: "invalid_grant", error_description: "check" }, { status: 400 });
+          }
           if (url.startsWith("https://oauth2.googleapis.com/token") && signInGrant) {
             const claims = {
               iss: "https://accounts.google.com",
@@ -949,6 +956,34 @@ async function main(): Promise<void> {
             `status ${remembered.status}, location ${consentAt ? `${consentAt.host} prompt=${consentAt.searchParams.get("prompt")}` : remembered.location}`,
           );
 
+          const consentState = consentAt?.searchParams.get("state") ?? "";
+          const consentCallback = (query: string, cookie: string | null) =>
+            fetch(`${gsrv.base}/oauth/google/callback?${query}&state=${encodeURIComponent(consentState)}`, {
+              headers: { origin, ...(cookie ? { cookie } : {}) },
+              redirect: "manual",
+            });
+
+          // The same state from a browser without that sign-in's session.
+          const elsewhere = await consentCallback("error=access_denied", null);
+          record(
+            elsewhere.headers.get("location") !== "/login",
+            "that consent state from a browser without the sign-in's session: not sent on to the sign-in's destination",
+            `status ${elsewhere.status}, location ${elsewhere.headers.get("location")}`,
+          );
+
+          // The state altered (the first character after "c1.", inside the signed
+          // payload): not sent on either.
+          const altered = consentState.slice(0, 3) + (consentState[3] === "A" ? "B" : "A") + consentState.slice(4);
+          const tampered = await fetch(`${gsrv.base}/oauth/google/callback?error=access_denied&state=${encodeURIComponent(altered)}`, {
+            headers: { origin, cookie: remembered.cookie },
+            redirect: "manual",
+          });
+          record(
+            altered !== consentState && tampered.headers.get("location") !== "/login",
+            "that consent state altered: not sent on to the sign-in's destination",
+            `status ${tampered.status}, location ${tampered.headers.get("location")}`,
+          );
+
           // That consent denied: Google comes back with an error and no code.
           const denied = await fetch(
             `${gsrv.base}/oauth/google/callback?error=access_denied&state=${encodeURIComponent(consentAt?.searchParams.get("state") ?? "")}`,
@@ -959,6 +994,18 @@ async function main(): Promise<void> {
             denied.status === 302 && denied.headers.get("location") === "/login" && deniedRows === 0,
             "that consent denied: the browser reaches the sign-in's own destination (/login), and nothing is stored",
             `status ${denied.status}, location ${denied.headers.get("location")}, rows ${deniedRows}`,
+          );
+
+          // The same state again, now that the server holds no entry for it (as
+          // after a sweep or a restart), this time with a code: the browser still
+          // reaches the destination, and with no entry nothing is exchanged or stored.
+          const exchangesBefore = exchangeCalls;
+          const lost = await consentCallback("code=check-lost-code", remembered.cookie);
+          const lostRows = (await connectionOf(rememberedEmail)).length;
+          record(
+            lost.status === 302 && lost.headers.get("location") === "/login" && lostRows === 0 && exchangeCalls === exchangesBefore,
+            "that consent state once the server no longer holds it, with a code: on to the sign-in's destination (/login), no code exchanged, nothing stored",
+            `status ${lost.status}, location ${lost.headers.get("location")}, rows ${lostRows}, code exchanges ${exchangeCalls - exchangesBefore}`,
           );
 
           // No refresh token, but a calendar connection: straight to the destination.

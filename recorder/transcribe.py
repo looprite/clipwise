@@ -1222,11 +1222,8 @@ def main() -> int:
         # Which engine wrote the segments. A file written before SAA-220 has no
         # `engine` key; every one of those came from whisper.cpp.
         "engine": "parakeet" if engine == "parakeet" else "whisper.cpp",
-        "model": (
-            str(parakeet_models / PARAKEET_MODEL_NAME)
-            if engine == "parakeet"
-            else str(model_path)
-        ),
+        # The model's name, not where it sits on this Mac.
+        "model": PARAKEET_MODEL_NAME if engine == "parakeet" else model_path.name,
         # How the audio was gated, so a transcript carries the reason it looks
         # the way it does. A file written before SAA-91 has no `vad` key at
         # all, which is how an ungated one is told apart from a gated one.
