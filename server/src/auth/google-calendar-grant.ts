@@ -21,15 +21,20 @@
 // Google sends a refresh token only when it asks for consent: a first grant,
 // or Reconnect calendar (routes/oauth.ts, prompt=consent). A returning member
 // who granted before gets none, and their connection is left as it is; one
-// with no connection is shown Reconnect calendar on /login. Sign-in never
-// fails because of the calendar: every outcome here is logged and that is all.
+// with no connection is sent on to Google's consent screen right after the
+// sign-in (consentAfterSignIn below) and then to where the sign-in was going.
+// Sign-in never fails because of the calendar: every outcome here is logged
+// and that is all.
 //
-// In memory, like the connect state in routes/oauth.ts: hosted runs one
+// In memory, like the consents in flight below: hosted runs one
 // machine (SAA-227 decision 22), and the after hook runs in the same request
 // as the before hook.
 
+import { randomBytes } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
 import { encrypt } from "../lib/crypto.js";
+import { logError } from "../lib/safe-error.js";
 import { GoogleApiError, listCalendars, selectSearchableCalendars } from "../lib/google-calendar.js";
 import { findMemberByAuthUserId, normalizeEmail } from "./membership.js";
 
@@ -107,9 +112,18 @@ export type GrantOutcome =
   | "failed"
   | "not_google";
 
-// account.create.after and account.update.after. The outcome is returned for
-// the checks and logged by ids only (SAA-227 decision 11).
-export async function storeParkedGrant(account: Record<string, unknown>): Promise<GrantOutcome> {
+// The member whose sign-in grant came without a refresh token, carried from the
+// account hook to the after-hook on Google's callback (auth.ts) on that
+// request's own auth context: the object Better Auth hands both hooks.
+const CONSENT_AFTER_SIGN_IN = Symbol("consent after sign-in");
+type ConsentMember = { accountId: string; memberId: string; email: string };
+type RequestContext = { context: object };
+type CarriesConsent = { [CONSENT_AFTER_SIGN_IN]?: ConsentMember };
+
+// account.create.after and account.update.after, with the request's auth
+// context (null outside a request). The outcome is returned for the checks and
+// logged by ids only (SAA-227 decision 11).
+export async function storeParkedGrant(account: Record<string, unknown>, request: RequestContext | null): Promise<GrantOutcome> {
   if (account.providerId !== "google") return "not_google";
   const subject = asString(account.accountId);
   const grant = subject ? parked.get(subject) : undefined;
@@ -123,6 +137,9 @@ export async function storeParkedGrant(account: Record<string, unknown>): Promis
   }
   if (!grant.refreshToken) {
     console.log(`google sign-in: calendar for member=${member.id}: no refresh token (granted before); connection left as it is`);
+    if (request) {
+      (request.context as CarriesConsent)[CONSENT_AFTER_SIGN_IN] = { accountId: member.accountId, memberId: member.id, email: member.email };
+    }
     return "no_refresh_token";
   }
   try {
@@ -161,6 +178,104 @@ export async function clearGoogleTokens(apply: boolean): Promise<{ holding: numb
       `"accessTokenExpiresAt" = null, "refreshTokenExpiresAt" = null where ${holding}`,
   );
   return { holding: count, cleared: res.rowCount ?? 0 };
+}
+
+// Google consents in flight for the calendar: Reconnect calendar's
+// (routes/oauth.ts) and the one a sign-in starts (consentAfterSignIn below).
+// state -> the member who started it, and, for a sign-in, where that sign-in
+// was going. Generated and validated in this same process, deliberately not
+// persisted (hosted runs one machine, SAA-227 decision 22), so a consent
+// started right before a server restart has to be retried. Single-use: deleted
+// when taken. Expired entries are swept on every new entry.
+export type PendingConsent = { accountId: string; memberId: string; expiresAt: number; returnTo: string | null };
+const pendingConsents = new Map<string, PendingConsent>();
+const CONSENT_TTL_MS = 10 * 60 * 1000;
+const GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
+
+// The Google client and redirect address Reconnect uses, or null when either is unset.
+export function calendarOAuthConfig(): { clientId: string; redirectUri: string } | null {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI;
+  return clientId && redirectUri ? { clientId, redirectUri } : null;
+}
+
+// Records a consent in flight and returns Google's consent screen for it:
+// calendar.readonly with offline access, consent asked every time, and the
+// member's own address as the account Google offers (decision 28 refuses a
+// grant for any other).
+export function startCalendarConsent(
+  oauth: { clientId: string; redirectUri: string },
+  member: ConsentMember,
+  returnTo: string | null,
+): string {
+  const now = Date.now();
+  for (const [key, value] of pendingConsents) {
+    if (value.expiresAt < now) pendingConsents.delete(key);
+  }
+  const state = randomBytes(16).toString("hex");
+  pendingConsents.set(state, { accountId: member.accountId, memberId: member.memberId, expiresAt: now + CONSENT_TTL_MS, returnTo });
+  const url = new URL(GOOGLE_AUTH_ENDPOINT);
+  url.searchParams.set("client_id", oauth.clientId);
+  url.searchParams.set("redirect_uri", oauth.redirectUri);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", CALENDAR_READONLY_SCOPE);
+  url.searchParams.set("access_type", "offline");
+  url.searchParams.set("prompt", "consent");
+  url.searchParams.set("login_hint", member.email);
+  url.searchParams.set("state", state);
+  return url.toString();
+}
+
+// The consent in flight for a state, removed whatever comes next.
+export function takeCalendarConsent(state: string): PendingConsent | undefined {
+  const pending = pendingConsents.get(state);
+  pendingConsents.delete(state);
+  return pending;
+}
+
+// The consent in flight for a state when a sign-in started it, removed;
+// undefined, with nothing removed, for any other state.
+export function takeSignInConsent(state: string): (PendingConsent & { returnTo: string }) | undefined {
+  const pending = pendingConsents.get(state);
+  if (!pending || pending.returnTo === null) return undefined;
+  pendingConsents.delete(state);
+  return { ...pending, returnTo: pending.returnTo };
+}
+
+// A path on this server: one leading "/" (not "//" or "/\"), resolving to origin.
+function isOwnPath(destination: string, origin: string): boolean {
+  if (!destination.startsWith("/") || destination.startsWith("//") || destination.startsWith("/\\")) return false;
+  try {
+    return new URL(destination, origin).origin === origin;
+  } catch {
+    return false;
+  }
+}
+
+// After Google's callback (auth.ts): when this request's grant came without a
+// refresh token and the member has no calendar connection, Google's consent
+// screen, to come back from to the sign-in's own destination. Null when there
+// is nothing to ask, when the destination is not a path on this server, when
+// Reconnect is not configured, and on any failure, which is logged: the
+// sign-in then goes where Better Auth sends it.
+export async function consentAfterSignIn(request: RequestContext, destination: string, origin: string): Promise<string | null> {
+  const member = (request.context as CarriesConsent)[CONSENT_AFTER_SIGN_IN];
+  if (!member) return null;
+  if (!isOwnPath(destination, origin)) return null;
+  const oauth = calendarOAuthConfig();
+  if (!oauth) return null;
+  try {
+    const [row] = await db
+      .select({ id: schema.calendarConnections.id })
+      .from(schema.calendarConnections)
+      .where(eq(schema.calendarConnections.memberId, member.memberId));
+    if (row) return null;
+    console.log(`google sign-in: calendar for member=${member.memberId}: no connection; on to Google's consent screen`);
+    return startCalendarConsent(oauth, member, destination);
+  } catch (err) {
+    logError(`google sign-in: calendar for member=${member.memberId}: consent not started`, err);
+    return null;
+  }
 }
 
 // Whether the scopes Google reported for a grant include calendar.readonly.

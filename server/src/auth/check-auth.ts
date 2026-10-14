@@ -32,6 +32,7 @@ import { authConfigFromEnv, createAuth, getAuth } from "./auth.js";
 import { addMember, createPasswordLogin, removeMember, requireAccount, Refusal } from "./members.js";
 import { findMemberByEmail } from "./membership.js";
 import { mountAuth } from "./mount.js";
+import { oauthRouter } from "../routes/oauth.js";
 
 if (process.env.CLIPWISE_CHECK_SCRATCH_DB !== "1") {
   process.stderr.write(
@@ -872,6 +873,111 @@ async function main(): Promise<void> {
         } catch (err) {
           record(false, "clear-google-tokens without --apply counts the old Google accounts and changes nothing", `threw ${err instanceof Error ? err.message : String(err)}`);
           record(false, "clear-google-tokens --apply clears them all and leaves another provider's account alone", "not run");
+        }
+
+        // --- a member Google remembers (SAA-198, Jon's call 12) ---------------
+        // Google's callback driven over HTTP, as Google's redirect would arrive:
+        // the sign-in starts at /api/auth/sign-in/social (its state cookie kept),
+        // and Google's token endpoint is answered here with an id token, the
+        // nonce from the authorization URL echoed, and a refresh token only when
+        // the case says so. Better Auth reads that id token without verifying it
+        // (@better-auth/core social-providers/google.mjs:116-119), so it is built
+        // unsigned. Reconnect's routes are added to this app for the callback.
+        const gRedirectSaved = process.env.GOOGLE_OAUTH_REDIRECT_URI;
+        process.env.GOOGLE_OAUTH_REDIRECT_URI = `${origin}/oauth/google/callback`;
+        gapp.use(oauthRouter);
+        const outerFetch = globalThis.fetch;
+        let signInGrant: { sub: string; email: string; refresh: boolean; nonce: string | null } | null = null;
+        globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          if (url.startsWith("https://oauth2.googleapis.com/token") && signInGrant) {
+            const claims = {
+              iss: "https://accounts.google.com",
+              aud: "check-client.apps.googleusercontent.com",
+              sub: signInGrant.sub,
+              email: signInGrant.email,
+              email_verified: true,
+              hd: "clipwise.test",
+              name: "Google User",
+              ...(signInGrant.nonce ? { nonce: signInGrant.nonce } : {}),
+            };
+            const idToken = [{ alg: "none" }, claims, "sig"]
+              .map((p) => (typeof p === "string" ? p : Buffer.from(JSON.stringify(p)).toString("base64url")))
+              .join(".");
+            return Response.json({
+              access_token: "check-signin-access",
+              id_token: idToken,
+              expires_in: 3600,
+              token_type: "Bearer",
+              scope: `openid email profile ${CALENDAR_SCOPE}`,
+              ...(signInGrant.refresh ? { refresh_token: "check-signin-refresh" } : {}),
+            });
+          }
+          return outerFetch(input, init);
+        }) as typeof fetch;
+        try {
+          // A Google sign-in to /login, through the callback, not followed.
+          const googleSignIn = async (sub: string, email: string, refresh: boolean) => {
+            const start = await call(gsrv.base, "POST", "/api/auth/sign-in/social", { body: { provider: "google", callbackURL: "/login" }, headers: gip });
+            const startUrl = new URL((start.json as { url: string }).url);
+            signInGrant = { sub, email, refresh, nonce: startUrl.searchParams.get("nonce") };
+            const res = await fetch(
+              `${gsrv.base}/api/auth/callback/google?code=check-signin-code&state=${encodeURIComponent(startUrl.searchParams.get("state") ?? "")}`,
+              { headers: { origin, cookie: start.cookie, ...gip }, redirect: "manual" },
+            );
+            signInGrant = null;
+            const cookie = res.headers
+              .getSetCookie()
+              .map((c) => c.split(";")[0])
+              .join("; ");
+            return { status: res.status, location: res.headers.get("location"), cookie };
+          };
+
+          // No refresh token, no calendar connection: on to Google's consent screen.
+          const rememberedEmail = emailFor("google-remembered");
+          await addMember({ email: rememberedEmail, role: "member", name: null });
+          const remembered = await googleSignIn(`sub-remembered-${tag}`, rememberedEmail, false);
+          const consentAt = remembered.location?.startsWith("https://") ? new URL(remembered.location) : null;
+          record(
+            remembered.status === 302 &&
+              consentAt?.host === "accounts.google.com" &&
+              consentAt.searchParams.get("prompt") === "consent" &&
+              consentAt.searchParams.get("scope") === CALENDAR_SCOPE &&
+              consentAt.searchParams.get("login_hint") === rememberedEmail &&
+              remembered.cookie.includes("session_token="),
+            "Google sign-in with no refresh token, for a member with no calendar connection: signed in, then on to Google's consent screen (prompt=consent, calendar.readonly, login_hint the member's address)",
+            `status ${remembered.status}, location ${consentAt ? `${consentAt.host} prompt=${consentAt.searchParams.get("prompt")}` : remembered.location}`,
+          );
+
+          // That consent denied: Google comes back with an error and no code.
+          const denied = await fetch(
+            `${gsrv.base}/oauth/google/callback?error=access_denied&state=${encodeURIComponent(consentAt?.searchParams.get("state") ?? "")}`,
+            { headers: { origin, cookie: remembered.cookie }, redirect: "manual" },
+          );
+          const deniedRows = (await connectionOf(rememberedEmail)).length;
+          record(
+            denied.status === 302 && denied.headers.get("location") === "/login" && deniedRows === 0,
+            "that consent denied: the browser reaches the sign-in's own destination (/login), and nothing is stored",
+            `status ${denied.status}, location ${denied.headers.get("location")}, rows ${deniedRows}`,
+          );
+
+          // No refresh token, but a calendar connection: straight to the destination.
+          const connectedEmail = emailFor("google-connected");
+          await addMember({ email: connectedEmail, role: "member", name: null });
+          gPrimary = connectedEmail;
+          const connectedSub = `sub-connected-${tag}`;
+          const firstGrant = await googleSignIn(connectedSub, connectedEmail, true);
+          const returning = await googleSignIn(connectedSub, connectedEmail, false);
+          const connectedRows = (await connectionOf(connectedEmail)).length;
+          record(
+            returning.status === 302 && returning.location === "/login" && connectedRows === 1,
+            "Google sign-in with no refresh token, for a member who has a calendar connection: straight to the sign-in's destination (/login)",
+            `first grant ${firstGrant.status} ${firstGrant.location}, returning ${returning.status} ${returning.location}, rows ${connectedRows}`,
+          );
+        } finally {
+          globalThis.fetch = outerFetch;
+          if (gRedirectSaved === undefined) delete process.env.GOOGLE_OAUTH_REDIRECT_URI;
+          else process.env.GOOGLE_OAUTH_REDIRECT_URI = gRedirectSaved;
         }
       } finally {
         globalThis.fetch = gRealFetch;
