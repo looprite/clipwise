@@ -2,51 +2,32 @@
 // index.ts, like transcriptRouter — its paths are fully qualified, not
 // nested under /accounts/:accountId.
 
-import { randomBytes } from "node:crypto";
+import type { Request } from "express";
 import { Router } from "express";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { accessOf, sessionMember } from "../access/authenticate.js";
-import { CALENDAR_READONLY_SCOPE, storeCalendarGrant } from "../auth/google-calendar-grant.js";
+import {
+  calendarOAuthConfig,
+  startCalendarConsent,
+  storeCalendarGrant,
+  takeCalendarConsent,
+  takeSignInConsent,
+  type PendingConsent,
+} from "../auth/google-calendar-grant.js";
 import { asyncHandler, HttpError, parseQuery } from "../lib/http.js";
 import { exchangeCode } from "../lib/google-calendar.js";
+import { logError } from "../lib/safe-error.js";
 
 export const oauthRouter = Router();
 
-const GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
-
-// state -> {accountId, memberId, expiresAt}. Generated and validated in this
-// same process, deliberately not persisted (decision 1's ethos on the issue:
-// no polling, no sync cursor, no jobs table — this is one flow, run once per
-// calendar connection; hosted runs one machine, SAA-227 decision 22). The
-// member is who started it, and the callback requires that same member signed
-// in. Single-use: deleted on lookup.
-// Cost of the simpler choice: a connect attempt started right before a
-// server restart has to be retried.
-const pendingStates = new Map<string, { accountId: string; memberId: string; expiresAt: number }>();
-const STATE_TTL_MS = 10 * 60 * 1000;
-
-// A connect that's started and never completed (closed tab, denied
-// consent) would otherwise sit in the map until restart — trivial for one
-// user, unbounded in principle. Swept on every new entry rather than on a
-// timer, so there's no extra scheduled thing running for a flow used this
-// rarely.
-function setState(state: string, accountId: string, memberId: string): void {
-  const now = Date.now();
-  for (const [key, value] of pendingStates) {
-    if (value.expiresAt < now) pendingStates.delete(key);
-  }
-  pendingStates.set(state, { accountId, memberId, expiresAt: now + STATE_TTL_MS });
-}
-
 function oauthConfig(): { clientId: string; redirectUri: string } {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI;
-  if (!clientId || !redirectUri) {
+  const config = calendarOAuthConfig();
+  if (!config) {
     throw new HttpError(500, "google_oauth_not_configured");
   }
-  return { clientId, redirectUri };
+  return config;
 }
 
 oauthRouter.get(
@@ -56,23 +37,39 @@ oauthRouter.get(
     // browser, connects their own calendar (SAA-227 decision 9). The account
     // and the member come from the session. /callback is deliberately not
     // behind it: it runs its own session check against the state's member.
-    const { accountId, memberId } = accessOf(req);
-
-    const { clientId, redirectUri } = oauthConfig();
-    const state = randomBytes(16).toString("hex");
-    setState(state, accountId, memberId);
-
-    const url = new URL(GOOGLE_AUTH_ENDPOINT);
-    url.searchParams.set("client_id", clientId);
-    url.searchParams.set("redirect_uri", redirectUri);
-    url.searchParams.set("response_type", "code");
-    url.searchParams.set("scope", CALENDAR_READONLY_SCOPE);
-    url.searchParams.set("access_type", "offline");
-    url.searchParams.set("prompt", "consent");
-    url.searchParams.set("state", state);
-    res.redirect(url.toString());
+    const { accountId, memberId, email } = accessOf(req);
+    res.redirect(startCalendarConsent(oauthConfig(), { accountId, memberId, email }, null));
   }),
 );
+
+// A consent a sign-in started (auth/google-calendar-grant.ts
+// consentAfterSignIn): what came of it, for the log. Nothing is stored unless
+// the member who started it is signed in here, Google sent a code, and the
+// grant passes storeCalendarGrant's checks.
+async function signInConsentOutcome(req: Request, pending: PendingConsent): Promise<string> {
+  if (pending.expiresAt < Date.now()) return "expired";
+  const member = await sessionMember(req);
+  if (!member || member.memberId !== pending.memberId) return "not_this_member";
+  const code = typeof req.query.code === "string" && req.query.code ? req.query.code : null;
+  if (!code) return "no_code";
+  try {
+    const tokens = await exchangeCode(code, oauthConfig().redirectUri);
+    if (!tokens.refreshToken) return "no_refresh_token";
+    const { outcome } = await storeCalendarGrant({
+      accountId: pending.accountId,
+      memberId: pending.memberId,
+      memberEmail: member.email,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: tokens.expiresAt,
+      scope: tokens.scope,
+    });
+    return outcome;
+  } catch (err) {
+    logError(`calendar consent after sign-in for member=${pending.memberId}: failed`, err);
+    return "failed";
+  }
+}
 
 const callbackQuerySchema = z.object({
   code: z.string().min(1),
@@ -82,10 +79,19 @@ const callbackQuerySchema = z.object({
 oauthRouter.get(
   "/oauth/google/callback",
   asyncHandler(async (req, res) => {
+    // A consent a sign-in started: whatever Google answered, the browser goes
+    // on to where that sign-in was going.
+    const signIn = typeof req.query.state === "string" ? takeSignInConsent(req.query.state) : undefined;
+    if (signIn) {
+      const outcome = await signInConsentOutcome(req, signIn);
+      console.log(`calendar consent after sign-in for member=${signIn.memberId}: ${outcome}`);
+      res.redirect(signIn.returnTo);
+      return;
+    }
+
     const { code, state } = parseQuery(callbackQuerySchema, req);
 
-    const pending = pendingStates.get(state);
-    pendingStates.delete(state); // single-use regardless of outcome
+    const pending = takeCalendarConsent(state); // single-use regardless of outcome
     if (!pending || pending.expiresAt < Date.now()) {
       throw new HttpError(400, "invalid_or_expired_state");
     }
