@@ -5,6 +5,7 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
 import { getAuth } from "./auth.js";
 import { normalizeEmail, type MemberRow } from "./membership.js";
+import { seedDemoForNewMember } from "../demo/seed.js";
 
 // A refusal is a normal "no" with a message meant for the person running the
 // command, as opposed to a bug.
@@ -32,6 +33,10 @@ export function requireEmail(value: string | undefined): string {
   return email;
 }
 
+// Every new membership is saved here (add-member and bootstrap-admin), and its
+// two demo calls are seeded right after (demo/seed.ts, SAA-198 step 6): after
+// the row is saved, not inside its insert, so a seeding failure is logged and
+// never stops a member being added.
 export async function insertMember(
   accountId: string,
   email: string,
@@ -42,6 +47,7 @@ export async function insertMember(
     .insert(schema.accountMembers)
     .values({ accountId, email, role, displayName: name })
     .returning();
+  await seedDemoForNewMember({ id: row.id, accountId: row.accountId });
   return row;
 }
 

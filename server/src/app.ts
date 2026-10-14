@@ -35,6 +35,7 @@ import { momentsRouter } from "./routes/moments.js";
 import { capturesPost } from "./routes/captures.js";
 import { captureScopeRouter } from "./routes/capture-scope.js";
 import { oauthRouter } from "./routes/oauth.js";
+import { demoRouter } from "./routes/demo.js";
 import { peopleRouter } from "./routes/people.js";
 import { recordingsRouter } from "./routes/recordings.js";
 import { transcriptRouter } from "./routes/transcript.js";
@@ -123,6 +124,8 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   // qualified paths.
   app.use("/recordings", requireMemberOrCaptureWrites);
   app.use("/oauth/google/connect", requireSession);
+  app.use("/oauth/google/status", requireSession);
+  app.use("/demo", requireSession);
 
   mount("/accounts/:accountId/people", [requireMember, sameAccountOnly], peopleRouter);
   mount("/accounts/:accountId/recordings", [requireMemberOrCaptureWrites, sameAccountOnly], recordingsRouter);
@@ -131,6 +134,7 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   mount("/", [], transcriptRouter);
   mount("/", [], captureScopeRouter);
   mount("/", [], oauthRouter);
+  mount("/", [], demoRouter);
 
   app.use(errorHandler);
   return { app, mounts };

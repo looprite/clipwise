@@ -224,8 +224,15 @@ async function main(): Promise<void> {
       if (url.startsWith("https://oauth2.googleapis.com/token")) {
         const form = new URLSearchParams(String(init?.body ?? ""));
         if (form.get("grant_type") === "refresh_token") {
-          served.push("refresh 400");
-          return new Response(JSON.stringify({ error: "invalid_grant", error_description: `${PHRASE} token for ${low}-cal@clipwise.test revoked` }), { status: 400 });
+          // E5's grant is refused for good (invalid_grant: the connection is
+          // removed, SAA-198 step 5); E3's fails another way (500), so its job
+          // still fails and the failure path's lines still run.
+          if (form.get("refresh_token") === "e-revoked-token-refresh") {
+            served.push("refresh 400 invalid_grant");
+            return new Response(JSON.stringify({ error: "invalid_grant", error_description: `${PHRASE} token for ${low}-cal@clipwise.test revoked` }), { status: 400 });
+          }
+          served.push("refresh 500");
+          return new Response(JSON.stringify({ error: "server_error", error_description: `${PHRASE} backend error for ${low}-cal@clipwise.test` }), { status: 500 });
         }
         served.push("exchange 200");
         return Response.json({ access_token: "e-callback-token", refresh_token: "e-callback-refresh", expires_in: 3600, scope: "https://www.googleapis.com/auth/calendar.readonly" });
@@ -291,16 +298,22 @@ async function main(): Promise<void> {
     const mOk = fx.memberId;
     const mDenied = await eMember("e-denied");
     const mExpired = await eMember("e-expired");
+    const mRevoked = await eMember("e-revoked");
     await eConnect(mOk, "e-ok-token", false);
     await eConnect(mDenied, "e-denied-token", false);
     await eConnect(mExpired, "e-expired-token", true);
+    await eConnect(mRevoked, "e-revoked-token", true);
+    const connectionOf = async (memberId: string) =>
+      (await db.select({ id: schema.calendarConnections.id }).from(schema.calendarConnections).where(eq(schema.calendarConnections.memberId, memberId)))[0]?.id ?? null;
+    const revokedConnectionId = await connectionOf(mRevoked);
     // E1's title is placeholder-shaped for another stem, so the mismatch warning
     // runs; it quoted both titles before.
     const e1 = await eRecording(mOk, "check-e1", titlePlaceholderFor(`${PHRASE}-other-stem`));
     const e2 = await eRecording(mDenied, "check-e2", titlePlaceholderFor("check-e2"));
     const e3 = await eRecording(mExpired, "check-e3", titlePlaceholderFor("check-e3"));
+    const e5 = await eRecording(mRevoked, "check-e5", titlePlaceholderFor("check-e5"));
     const eJobs: string[] = [];
-    for (const rec of [e1, e2, e3]) {
+    for (const rec of [e1, e2, e3, e5]) {
       const id = await enqueueJob(db, { accountId: fx.accountId, recordingId: rec, kind: "match" });
       if (id) eJobs.push(id);
     }
@@ -313,7 +326,7 @@ async function main(): Promise<void> {
       const t0 = Date.now();
       for (;;) {
         jobRows = (await pool.query<JobState>("select id, recording_id, state, error_class, last_error from jobs where id = any($1::uuid[])", [eJobs])).rows;
-        if (jobRows.length === 3 && jobRows.every((j) => j.state === "done" || j.state === "failed")) break;
+        if (jobRows.length === eJobs.length && jobRows.every((j) => j.state === "done" || j.state === "failed")) break;
         if (Date.now() - t0 > 30_000) break;
         await new Promise((r) => setTimeout(r, 50));
       }
@@ -330,9 +343,33 @@ async function main(): Promise<void> {
       jobOf(e1)?.state === "done" && e1Invitees.length === 1 && holds(e1Invitees[0].email) && holds(e1Invitees[0].name) && holds(e1Title) &&
         jobOf(e2)?.state === "failed" && jobOf(e2)?.error_class === "CalendarFetchError" &&
         jobOf(e3)?.state === "failed" && jobOf(e3)?.error_class === "GoogleApiError",
-      JSON.stringify({ jobs: jobRows.map((j) => [j.recording_id === e1 ? "E1" : j.recording_id === e2 ? "E2" : "E3", j.state, j.error_class]), invitees: e1Invitees.length }),
+      JSON.stringify({ jobs: jobRows.map((j) => [j.recording_id === e1 ? "E1" : j.recording_id === e2 ? "E2" : j.recording_id === e3 ? "E3" : "E5", j.state, j.error_class]), invitees: e1Invitees.length }),
     );
-    check("E positive control: Google was asked for E1's events, E2's (401) and E3's refresh (400), each with the phrase in its reply", ["events 200", "events 401", "refresh 400"].every((s) => served.includes(s)), served.join(", "));
+    check(
+      "E positive control: Google was asked for E1's events, E2's (401), E3's refresh (500) and E5's (400 invalid_grant), each with the phrase in its reply",
+      ["events 200", "events 401", "refresh 500", "refresh 400 invalid_grant"].every((s) => served.includes(s)),
+      served.join(", "),
+    );
+    // E5. A refresh Google refuses with invalid_grant (SAA-198 step 5): the job is
+    // done, the connection is gone, and the one line it logs names the member
+    // and the connection by id, never the address or a token. E3, refused another
+    // way, keeps its connection (the control).
+    const revokedLines = jobLines.filter((l) => /refresh refused \(invalid_grant\)/.test(l));
+    check(
+      "E5 invalid_grant: the job is done and the connection removed; E3's (500) is kept (the control)",
+      jobOf(e5)?.state === "done" && (await connectionOf(mRevoked)) === null && (await connectionOf(mExpired)) !== null,
+      JSON.stringify({ e5: jobOf(e5)?.state, e5Connection: await connectionOf(mRevoked), e3Connection: !!(await connectionOf(mExpired)) }),
+    );
+    check(
+      "E5 positive control: the removal line ran once, naming the member and the connection by id",
+      revokedLines.length === 1 && revokedLines[0].includes(`member=${mRevoked}`) && !!revokedConnectionId && revokedLines[0].includes(revokedConnectionId),
+      revokedLines.join("\n     ") || "(no line)",
+    );
+    check(
+      "E5 the removal line holds ids only: no address, no phrase, no token",
+      revokedLines.length === 1 && !holds(revokedLines[0]) && !/@/.test(revokedLines[0]) && !/e-revoked-token/.test(revokedLines[0]),
+      revokedLines.join("\n     ") || "(no line)",
+    );
     check(
       "E positive control: the job lines ran: the worker's match line, the placeholder mismatch warning, the skipped-invitee line and the fetch-failure warning",
       jobLines.some((l) => /calendar matched/.test(l)) && jobLines.some((l) => /placeholder mismatch/.test(l)) && jobLines.some((l) => /invitee with no email skipped/.test(l)) && jobLines.some((l) => /calendar fetch failed/.test(l)),

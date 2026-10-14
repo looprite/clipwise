@@ -207,6 +207,15 @@ const CASES: Case[] = [
       return null;
     },
   },
+  {
+    name: "capture-cli.ts: Python is started once, with -I and -B (no PYTHON* variables, no compiled files written into the bundle)",
+    run: () => {
+      const src = readFileSync(resolve(import.meta.dirname, "..", "..", "src", "pipeline", "capture-cli.ts"), "utf8");
+      const calls = src.match(/execFileSync\(PYTHON, \[[^\]]*/g) ?? [];
+      if (calls.length !== 1) return `execFileSync(PYTHON, …) appears ${calls.length} time(s)`;
+      return /"-I", "-B", TRANSCRIBE_PY/.test(calls[0]) ? null : `the call's arguments start: ${calls[0].slice(0, 60)}`;
+    },
+  },
 ];
 
 function main(): number {
