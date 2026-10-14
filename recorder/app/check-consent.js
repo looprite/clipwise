@@ -64,6 +64,13 @@ const SRC = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
 const readOr = (name) => { try { return fs.readFileSync(path.join(__dirname, name), 'utf8'); } catch { return ''; } };
 const HTML = readOr('setup.html');
 const BUILD = fs.readFileSync(path.join(__dirname, 'build-app.sh'), 'utf8');
+// Group 8, the notices (SAA-198 step 7): the repo's THIRD_PARTY_NOTICES, the
+// README, notarize.sh and ffmpeg's build script. Missing reads as empty.
+const readRepo = (rel) => { try { return fs.readFileSync(path.join(__dirname, '..', '..', rel), 'utf8'); } catch { return ''; } };
+const NOTICES = readRepo('THIRD_PARTY_NOTICES');
+const README = readRepo('README.md');
+const NOTARIZE = readOr('notarize.sh');
+const FFMPEG_BUILD = readRepo('recorder/ffmpeg/build.sh');
 // Required lazily for the same reason: without setup.js its cases fail one by one.
 let setup = null;
 try { setup = require('./setup.js'); } catch {}
@@ -418,6 +425,69 @@ const CASES = [
         && /\$PB -c "Delete :\$key" "\$PLIST"/.test(BUILD)],
     ['build-app.sh header: no longer says "no login-item registration"', () =>
         !BUILD.includes('no login-item registration') && BUILD.includes('Launch at login')],
+
+    // 8. Every bundled component against THIRD_PARTY_NOTICES (SAA-198 step 7)
+    ['notices: every binary build-app.sh installs has an entry, apart from Clipwise\'s own four', () => {
+        const OWN = new Set(['systemtap', 'miccap', 'audiodevs', 'micwatch']);
+        const ENTRY = {
+            diarize: 'Speaker separation\n---',
+            parakeet: 'The transcription engine that runs this model is built with the FluidAudio SDK,',
+            aec: 'Echo cancellation\n---',
+            ffmpeg: 'Clipwise converts each recorded track to 16 kHz with FFmpeg 9.0.2',
+        };
+        const names = [...BUILD.matchAll(/install -m 755 "\$\w+"\s+"\$C\/Resources\/bin\/([\w-]+)"/g)].map(m => m[1]);
+        const unlisted = names.filter(n => !OWN.has(n) && !(ENTRY[n] && NOTICES.includes(ENTRY[n])));
+        return names.length === 8 && unlisted.length === 0; }],
+    ['notices: both model sets have an entry (speaker separation, Parakeet)', () =>
+        /cp -R "\$DIARIZE_MODELS_DIR" "\$C\/Resources\/models\/diarize/.test(BUILD) && NOTICES.includes('Clipwise bundles these files, which are modified Core ML conversions:')
+        && /cp -R "\$PARAKEET_MODELS_DIR" "\$C\/Resources\/models\/parakeet/.test(BUILD) && NOTICES.includes('NVIDIA Parakeet TDT 0.6B v2')],
+    ['notices: Python has an entry: the release, the asset\'s SHA-256, and CPython\'s licence with its incorporated-software acknowledgements', () =>
+        NOTICES.includes('Python\n-----------------------------')
+        && NOTICES.includes('Python 3.14.7 from python-build-standalone, release\n20260924')
+        && NOTICES.includes('f0fb6b233971672dd7add4efa90f8c209a63253e457ffabd0148b9f734638319')
+        && NOTICES.includes('PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2')
+        && NOTICES.includes('Licenses and Acknowledgements for Incorporated Software')],
+    ['notices: each library PYTHON.json lists for the bundled Python has its licence text', () =>
+        ['bzip2 (LICENSE.bzip2.txt):', 'OpenSSL (OpenSSL 3 licence) (LICENSE.openssl-3.txt):', 'OpenSSL (OpenSSL 1.1 licence, as python-build-standalone lists it) (LICENSE.openssl-1.1.txt):',
+         'expat (LICENSE.expat.txt):', 'libffi (LICENSE.libffi.txt):', 'liblzma (xz) (LICENSE.liblzma.txt):', 'mpdecimal (LICENSE.mpdecimal.txt):',
+         'SQLite (LICENSE.sqlite.txt):', 'libuuid (LICENSE.libuuid.txt):', 'zstd 1.5.7 (LICENSE from https://github.com/python/cpython-source-deps, tag']
+            .every(h => NOTICES.split(h).length - 1 === 1)
+        && NOTICES.includes('BSD License\n\n    For Zstandard software')],
+    ['notices: what the notices say is removed from Python, build-app.sh removes before signing', () => {
+        const rm = BUILD.indexOf('rm -rf "$PY/lib/python3.14/site-packages/pip"');
+        const sign = BUILD.indexOf('# --- 4. sign');
+        return rm > 0 && sign > rm
+            && ['"$PY/lib/python3.14/ensurepip"', '"$PY/lib/libtcl9.0.dylib"', '"$PY/lib/libtcl9tk9.0.dylib"', '"$PY/lib/tcl9"', '"$PY/lib/tcl9.0"',
+                '"$PY/lib/tk9.0"', '"$PY/lib/itcl4.3.8"', '"$PY/lib/thread3.0.6"', '_tkinter.cpython-314-darwin.so'].every(p => BUILD.includes(p))
+            && NOTICES.includes('pip, ensurepip and Tcl/Tk are removed from the copy Clipwise carries.'); }],
+    ['notices: Electron\'s LICENSE and LICENSES.chromium.html ship beside the notices, which name them', () =>
+        BUILD.includes('cp "$ELECTRON_DIST/LICENSE" "$C/Resources/LICENSE.electron"')
+        && BUILD.includes('cp "$ELECTRON_DIST/LICENSES.chromium.html" "$C/Resources/LICENSES.chromium.html"')
+        && NOTICES.includes('LICENSE.electron') && NOTICES.includes('LICENSES.chromium.html')],
+    ['notices: every framework Electron bundles is covered: Squirrel.Mac by LICENSES.chromium.html, Mantle and ReactiveObjC by their own entries', () => {
+        const fw = (() => { try { return fs.readdirSync(path.join(__dirname, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'Frameworks')); } catch { return []; } })();
+        const chromium = (() => { try { return fs.readFileSync(path.join(__dirname, 'node_modules', 'electron', 'dist', 'LICENSES.chromium.html'), 'utf8'); } catch { return ''; } })();
+        const covered = (f) =>
+            /^Electron (Framework\.framework|Helper)/.test(f) ? NOTICES.includes('LICENSES.chromium.html')
+            : f === 'Squirrel.framework' ? chromium.includes('<span class="title">Squirrel</span>') && NOTICES.includes('Squirrel.Mac')
+            : f === 'Mantle.framework' ? NOTICES.includes('Mantle (https://github.com/Mantle/Mantle, commit 2a8e2123a3931038179ee06105c9e6ec336b12ea):')
+            : f === 'ReactiveObjC.framework' ? NOTICES.includes('ReactiveObjC (https://github.com/ReactiveCocoa/ReactiveObjC, commit 74ab5baccc6f7202c8ac69a8d1e152c29dc1ea76):')
+            : false;
+        return fw.length >= 4 && fw.every(covered); }],
+    ['notices: ffmpeg\'s entry gives the upstream source and its SHA-256, says a copy is available beside the app, and ends with the full LGPL 2.1', () =>
+        NOTICES.includes('Source: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz')
+        && NOTICES.includes('SHA-256: 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e')
+        && NOTICES.includes('A copy of that exact source tarball is available from the same place as the\nClipwise app.')
+        && NOTICES.includes('GNU LESSER GENERAL PUBLIC LICENSE') && NOTICES.includes('Version 2.1, February 1999')],
+    ['notices: notarize.sh puts the verified ffmpeg source tarball beside the .dmg (build.sh --source)', () =>
+        NOTARIZE.includes('FFMPEG_SOURCE="$("$APP_SRC/../ffmpeg/build.sh" --source)"')
+        && NOTARIZE.includes('cp "$FFMPEG_SOURCE" "$OUT_DIR/$(basename "$FFMPEG_SOURCE")"')
+        && /if \[ "\$\{1:-\}" = "--source" \]; then[\s\S]{0,300}fetch_source/.test(FFMPEG_BUILD)
+        && /shasum -a 256 -c -/.test(FFMPEG_BUILD)],
+    ['README: an install section says Apple silicon and macOS 14.2, and ffmpeg on PATH is for a checkout only', () =>
+        README.includes('## Installing the app\n\nClipwise needs an Apple silicon Mac with macOS 14.2 or later. It doesn\'t open on an Intel Mac.')
+        && README.includes('`brew install ffmpeg`, for running from a checkout only.')
+        && !README.includes('`brew install ffmpeg`. Not optional')],
 ];
 
 console.log(`rule: ${useNaive ? 'NAIVE (any existing file counts as agreed to)' : 'consent.js'}`);

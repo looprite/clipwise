@@ -34,6 +34,33 @@ URL="https://ffmpeg.org/releases/$TARBALL"
 SHA256="8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e"
 SRC="$BUILD/ffmpeg-$VERSION"
 
+# The source tarball, fetched once and verified against SHA256 every time.
+fetch_source() {
+    mkdir -p "$BUILD"
+    if [ ! -f "$BUILD/$TARBALL" ]; then
+        echo "ffmpeg: fetching $URL" >&2
+        curl -sSfL -o "$BUILD/$TARBALL.part" "$URL"
+        mv "$BUILD/$TARBALL.part" "$BUILD/$TARBALL"
+    fi
+    if ! (cd "$BUILD" && echo "$SHA256  $TARBALL" | shasum -a 256 -c - >/dev/null); then
+        echo "ffmpeg: $TARBALL does not match its SHA-256 — removing it" >&2
+        rm -f "$BUILD/$TARBALL"
+        exit 1
+    fi
+}
+
+# --source: only the verified tarball, its path printed. notarize.sh puts this
+# exact file beside Clipwise.dmg, so the source of the ffmpeg the app carries is
+# available from the same place as the app (Jon's call 11, SAA-198 step 7).
+if [ "${1:-}" = "--source" ]; then
+    for tool in curl shasum; do
+        command -v "$tool" >/dev/null || { echo "ffmpeg: $tool not found" >&2; exit 1; }
+    done
+    fetch_source
+    echo "$BUILD/$TARBALL"
+    exit 0
+fi
+
 if [ -x "$OUT" ] && [ "$OUT" -nt "$0" ]; then
     echo "ffmpeg: $OUT already built"
     exit 0
@@ -43,17 +70,7 @@ for tool in curl shasum tar make clang; do
     command -v "$tool" >/dev/null || { echo "ffmpeg: $tool not found" >&2; exit 1; }
 done
 
-mkdir -p "$BUILD"
-if [ ! -f "$BUILD/$TARBALL" ]; then
-    echo "ffmpeg: fetching $URL"
-    curl -sSfL -o "$BUILD/$TARBALL.part" "$URL"
-    mv "$BUILD/$TARBALL.part" "$BUILD/$TARBALL"
-fi
-if ! (cd "$BUILD" && echo "$SHA256  $TARBALL" | shasum -a 256 -c - >/dev/null); then
-    echo "ffmpeg: $TARBALL does not match its SHA-256 — removing it" >&2
-    rm -f "$BUILD/$TARBALL"
-    exit 1
-fi
+fetch_source
 
 rm -rf "$SRC"
 tar -xJf "$BUILD/$TARBALL" -C "$BUILD"
