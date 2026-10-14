@@ -4009,7 +4009,9 @@ function showSetupWindow(mode = 'launch') {
         win = new BrowserWindow({
             useContentSize: true,
             width: 460,
-            height: 360,
+            // Setup's last screen (Use Clipwise in Claude) is the longest; the
+            // notice alone keeps its size.
+            height: noticeOnly ? 360 : 520,
             show: false,
             resizable: false,
             minimizable: false,
@@ -4058,9 +4060,10 @@ function showSetupWindow(mode = 'launch') {
 function setupView() {
     const w = setupWindow;
     const status = setupStatus();
+    // With the four done, the last screen: Use Clipwise in Claude (SAA-198 step 6).
     const screen = w.noticeOnly
         ? 'notice'
-        : (w.override || setup.firstIncompleteScreen(status) || 'permissions');
+        : (w.override || setup.firstIncompleteScreen(status) || 'claude');
     const host = status.server ? new URL(status.server).host : '';
     return {
         screen,
@@ -4075,6 +4078,7 @@ function setupView() {
         mic: status.mic,
         tap: status.tap,
         permissionsSettled: setup.permissionSettled(status.mic) && setup.permissionSettled(status.tap),
+        claudeAddress: setup.claudeAddress(status.server),
     };
 }
 
@@ -4323,6 +4327,15 @@ function registerSetupIpc() {
     });
     ipcMain.on('setup:done', (_event, payload) => {
         if (fromWindow(payload)) finishSetup();
+    });
+    // The last screen's Copy: the team's Claude address, to paste into Claude's
+    // custom connector. Nothing checks the connection.
+    ipcMain.on('setup:copy-claude-address', (_event, payload) => {
+        if (!fromWindow(payload)) return;
+        const address = setup.claudeAddress(readCaptureServerUrl());
+        if (!address) return;
+        clipboard.writeText(address);
+        console.error('[clipwise-recorder] setup: Claude address copied to the clipboard');
     });
 }
 

@@ -1,0 +1,45 @@
+Maya: Okay, I think we're all here. Thanks for jumping on. The goal today is simple: lock the plan for the beta launch of the Panfold app, and leave with names next to every open item.
+Daniel: Sounds good. Before we start, I should say up front that the sync bug isn't fixed yet. Recipes saved offline still sometimes show up twice when the phone reconnects.
+Maya: How bad is it?
+Daniel: About one in twenty test devices. It's annoying, not dangerous. Nobody loses a recipe, they just see a duplicate. But I wouldn't want two hundred strangers seeing it on day one.
+Rosa: Can we launch with it and fix it in the first update?
+Daniel: We could, but the fix is small. I think it's two days of work. I'd rather ship without it.
+Maya: Then that's the first commitment. Daniel, you'll have the duplicate-recipe fix in by Friday?
+Daniel: Yes, Friday. If it slips, I'll tell you Wednesday, not Friday night.
+Maya: Perfect. Which brings us to the date. We said May sixth. With the fix landing Friday and a few days of testing after, the sixth feels tight.
+Rosa: It does. And honestly, the sixth is a Wednesday right after a holiday weekend for some of our testers. The thirteenth would be better for me anyway. It gives me a full week for the invite email.
+Daniel: The thirteenth works for engineering.
+Maya: Okay, decision: the beta moves from May sixth to May thirteenth. I'll update the plan doc after this call.
+Rosa: Next is the size of the beta. We talked about five hundred people. I'd still like five hundred.
+Daniel: I'd push back on that. Support is basically me and Maya answering emails. Five hundred people in the first week is a lot of email.
+Maya: What would you be comfortable with?
+Daniel: Two hundred. Then open it up in waves.
+Rosa: My worry is that two hundred isn't enough to learn anything about which recipes people actually cook. The whole point of the beta is the weekly plan feature, and we need people using it for a few weeks.
+Maya: That's fair. What if we start at two hundred, and if support is quiet after two weeks, we add another three hundred?
+Rosa: I can live with that, as long as the second wave actually happens and doesn't quietly disappear.
+Maya: It won't. Decision: the beta starts with two hundred people, with a second wave of three hundred after two weeks if support volume is manageable. Rosa, can you own the waitlist and decide who goes in which wave?
+Rosa: Yes, I'll own the waitlist.
+Maya: Great. Daniel, platforms. Are we doing Android in the beta?
+Daniel: I'd say no. The Android build works, but the share sheet is broken and the notifications are unreliable. iPhone only for the beta, Android in the summer.
+Rosa: About forty percent of the waitlist is on Android, though.
+Daniel: I know. But a bad first impression on Android is worse than a short wait.
+Maya: I agree with Daniel here. Decision: the beta is iPhone only. Rosa, we'll need a line in the invite email for the Android people so they don't feel forgotten.
+Rosa: I'll write that. Something like: "Android is coming this summer, and you'll be first in line."
+Maya: Good. That leads to the invite email itself. When can we see a draft?
+Rosa: I'll have a draft to you by Wednesday. It'll include the Android line and the date change.
+Maya: By Wednesday, to me. Got it. And I'll review it the same day.
+Daniel: One thing on the email: please don't promise the meal-plan export. It's not going to be in the beta.
+Rosa: Noted. No export in the email.
+Maya: Let's talk about learning from the beta. I want real conversations, not just a survey. I'll book five user interviews for the second week of the beta, thirty minutes each.
+Rosa: Can I sit in on a couple?
+Maya: Of course. I'll send you the times when they're booked.
+Daniel: And I'd like the crash reports going to the shared channel, not just my inbox. I'll set that up before launch.
+Maya: Thank you. So the open question I don't want to lose is pricing after the beta. Do we charge from day one when the beta ends, or give beta users a free period?
+Rosa: I'd give them three free months. They're doing us a favor.
+Daniel: I don't have a strong view, but I'd want to know the cost first.
+Maya: I don't think we can decide this today without numbers. Let's leave pricing open and come back to it next week, when I've got the cost estimate.
+Rosa: Fine by me.
+Maya: Okay, let me read back what we've got. Decisions: the beta moves to May thirteenth; it starts with two hundred people, with a second wave of three hundred after two weeks if support is manageable; and it's iPhone only, with Android in the summer. Commitments: Daniel fixes the duplicate-recipe bug by Friday and warns us by Wednesday if it slips. Daniel also sends crash reports to the shared channel before launch. Rosa owns the waitlist, and sends me the invite email draft by Wednesday, with the Android line, the new date, and no mention of export. I update the plan doc today, review Rosa's draft the same day it arrives, and book five user interviews for the second week. Open: pricing after the beta, next week.
+Daniel: That's everything from my side.
+Rosa: Same here.
+Maya: Great. Thanks, both. Talk Friday.

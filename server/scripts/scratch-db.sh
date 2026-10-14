@@ -46,6 +46,11 @@
 #   scratch-db.sh jobs <args>     src/jobs/cli.ts <args> (list, retry,
 #                                 match-backlog) on the scratch branch, after
 #                                 the guard
+#   scratch-db.sh demo-produce    src/demo/produce.ts on the scratch branch, after
+#                                 the guard, with ANTHROPIC_API_KEY and
+#                                 VOYAGE_API_KEY: the two demo calls' moments
+#                                 and embeddings, made once and written to
+#                                 src/demo/demo-call.json
 #   scratch-db.sh sql < file      psql on the scratch branch after the guard, the
 #                                 statements from stdin inside BEGIN READ ONLY
 #                                 ... ROLLBACK
@@ -611,6 +616,23 @@ cmd_jobs() {
   exit "${PIPESTATUS[0]}"
 }
 
+# The two demo calls' moments and embeddings, made once (SAA-198 step 6):
+# src/demo/produce.ts runs the real extraction and embedding on scratch, from the
+# synthetic scripts src/demo/demo-script.txt and demo-script-2.txt, and writes
+# src/demo/demo-call.json for review and commit. It gets the two keys serve
+# gets, and nothing else.
+cmd_demo_produce() {
+  [ $# -eq 0 ] || refuse "usage: scratch-db.sh demo-produce"
+  scratch_ready
+  [ "$MODE" != data ] || refuse "this scratch branch has main's data; demo-produce runs on an empty scratch branch only"
+  ANTHROPIC_VALUE="$(real_env_value ANTHROPIC_API_KEY)" || exit 2
+  VOYAGE_VALUE="$(real_env_value VOYAGE_API_KEY)" || exit 2
+  say "demo-produce: src/demo/produce.ts, with ANTHROPIC_API_KEY and VOYAGE_API_KEY"
+  clean_exec "$F" DATABASE_URL CLIPWISE_CHECK_SCRATCH_DB ANTHROPIC_API_KEY VOYAGE_API_KEY -- \
+    npx --no-install tsx src/demo/produce.ts 2>&1 | scrub
+  exit "${PIPESTATUS[0]}"
+}
+
 # psql against the scratch branch, the connection given as PG* variables taken
 # apart from DATABASE_URL, so the URL is on no command line.
 PSQL_JS='
@@ -802,9 +824,10 @@ case "${1:-}" in
   serve) shift; cmd_serve "$@" ;;
   cli) shift; cmd_cli "$@" ;;
   jobs) shift; cmd_jobs "$@" ;;
+  demo-produce) shift; cmd_demo_produce "$@" ;;
   sql) shift; cmd_sql "$@" ;;
   push) shift; cmd_push "$@" ;;
   push-check) shift; cmd_push_check "$@" ;;
   down) cmd_down ;;
-  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | cli <command> | jobs <command> | sql | down" >&2; exit 2 ;;
+  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | cli <command> | jobs <command> | demo-produce | sql | down" >&2; exit 2 ;;
 esac

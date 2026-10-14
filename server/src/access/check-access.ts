@@ -267,6 +267,9 @@ async function cleanup(accountId: string | null): Promise<void> {
   await run(`delete from auth_account where "userId" in (select id from auth_user where email like $1)`, [like]);
   await run(`delete from auth_user where email like $1`, [like]);
   await run(`delete from calendar_connections where member_id in (select id from account_members where email like $1)`, [like]);
+  // Every member added here gets the two demo calls (demo/seed.ts); they go
+  // first, since recordings.owner_member_id holds the member row (RESTRICT).
+  await run(`delete from recordings where owner_member_id in (select id from account_members where email like $1)`, [like]);
   await run(`delete from account_members where email like $1`, [like]);
   await run(`delete from "oauthClient" where name like $1`, [`check-access-${tag}%`]);
   // The recorder's client is the instance's own; remove it only if this run made it.
@@ -1296,6 +1299,162 @@ async function main(): Promise<void> {
     const getMcp = await http("GET", "/mcp", { token: A.token });
     const delMcp = await http("DELETE", "/mcp", { token: A.token });
     record(getMcp.status === 405 && delMcp.status === 405 && (await http("GET", "/mcp")).status === 401, "mcp: GET and DELETE are 405 once authenticated, 401 before");
+
+    // ---- the demo calls (SAA-198 step 6) ------------------------------------
+    // A new member gets the two demo calls right after their membership is
+    // saved: private, theirs, titled as demos, with their moments and stored
+    // embeddings, and nothing else (no people, attendee, invitee or job row, no
+    // model call). seed.ts is imported here, so code without it fails these
+    // cases rather than the run.
+    const seedModule = await import("../demo/seed.js").catch(() => null);
+    const demoTitles = [
+      "Demo 1 of 2: Panfold beta planning (sample call, not a real meeting)",
+      "Demo 2 of 2: Panfold beta check-in, a week later (sample call, not a real meeting)",
+    ];
+    const demoRows = async (memberId: string) =>
+      (
+        await pool.query<{ id: string; title: string; source_id: string; visibility: string; status: string; scope: string; started_at: Date; trashed_at: Date | null }>(
+          `select id, title, source_id, visibility, status, scope, started_at, trashed_at from recordings where owner_member_id = $1 and source = 'clipwise-demo' order by started_at`,
+          [memberId],
+        )
+      ).rows;
+    const countIn = async (table: string, ids: string[]) =>
+      ids.length === 0 ? 0 : Number((await pool.query<{ n: string }>(`select count(*)::text n from ${table} where recording_id = any($1::uuid[])`, [ids])).rows[0].n);
+    const peopleBefore = Number((await pool.query<{ n: string }>(`select count(*)::text n from people where account_id = $1`, [acc])).rows[0].n);
+    const realFetchDemo = globalThis.fetch;
+    let modelCalls = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.startsWith("https://api.anthropic.com/") || url.startsWith("https://api.voyageai.com/")) modelCalls++;
+      return realFetchDemo(input, init);
+    }) as typeof fetch;
+    const seededAt = Date.now();
+    let D: Who;
+    try {
+      D = await makeUser("dana", "member");
+    } finally {
+      globalThis.fetch = realFetchDemo;
+    }
+    const dDemos = await demoRows(D.memberId);
+    const dIds = dDemos.map((r) => r.id);
+    const daysBefore = (r: { started_at: Date }) => (seededAt - new Date(r.started_at).getTime()) / (24 * 3600 * 1000);
+    record(
+      dDemos.length === 2 &&
+        dDemos[0].title === demoTitles[0] && dDemos[1].title === demoTitles[1] &&
+        dDemos[0].source_id === `${D.memberId}:1` && dDemos[1].source_id === `${D.memberId}:2` &&
+        dDemos.every((r) => r.visibility === "private" && r.status === "ready" && r.scope === "work" && r.trashed_at === null) &&
+        Math.abs(daysBefore(dDemos[0]) - 8) < 0.01 && Math.abs(daysBefore(dDemos[1]) - 1) < 0.01,
+      "demo: a new member gets two private demo calls of their own, titled as demos, 8 days and 1 day back",
+      JSON.stringify(dDemos.map((r) => ({ title: r.title, source_id: r.source_id, visibility: r.visibility, days: daysBefore(r).toFixed(3) }))),
+    );
+    const demoMoments = dIds.length
+      ? (
+          await pool.query<{ recording_id: string; kind: string; title: string; dims: number; model: string | null; run_ok: boolean }>(
+            `select m.recording_id, m.kind, m.title, vector_dims(m.embedding) dims, m.embedding_model model,
+                    (m.metadata->>'extraction_run') = (r.metadata->>'current_extraction_run') run_ok
+               from moments m join recordings r on r.id = m.recording_id where m.recording_id = any($1::uuid[]) order by m.start_sec`,
+            [dIds],
+          )
+        ).rows
+      : [];
+    const perCall = dIds.map((id) => demoMoments.filter((m) => m.recording_id === id).length);
+    record(
+      perCall.join("+") === "13+12" && demoMoments.every((m) => m.dims === 1024 && m.model === "voyage-4" && m.run_ok),
+      "demo: the moments are copied from demo-call.json (13 and 12), each with a 1024-dimension voyage-4 embedding and the recording's current run",
+      `moments ${perCall.join("+") || "0"}`,
+    );
+    const peopleAfter = Number((await pool.query<{ n: string }>(`select count(*)::text n from people where account_id = $1`, [acc])).rows[0].n);
+    const attendeesD = await countIn("attendees", dIds);
+    const inviteesD = await countIn("invitees", dIds);
+    record(
+      dIds.length === 2 && peopleAfter === peopleBefore && attendeesD === 0 && inviteesD === 0,
+      "demo: seeding adds no people, attendee or invitee rows",
+      `people ${peopleBefore}→${peopleAfter}, attendees ${attendeesD}, invitees ${inviteesD}`,
+    );
+    const jobsD = await countIn("jobs", dIds);
+    record(dIds.length === 2 && jobsD === 0, "demo: the demo calls start no jobs (no extract, match or embed)", `jobs ${jobsD}`);
+    record(dIds.length === 2 && modelCalls === 0, "demo: seeding calls no model (no Anthropic or Voyage request): $0 per member", `model calls ${modelCalls}`);
+
+    // Every demo moment, searched for by its own title within its recording,
+    // comes back to its owner with its kind and title.
+    const missing: string[] = [];
+    for (const m of demoMoments) {
+      const r = await call(D, "search_moments", { query: m.title, recordingId: m.recording_id, scope: "all", limit: 50 });
+      let body: any = {};
+      try { body = JSON.parse(r.text); } catch {}
+      const hit = (body.moments ?? []).some((x: any) => x.title === m.title && x.kind === m.kind);
+      if (!hit) missing.push(`${m.kind}: ${m.title}`);
+    }
+    record(
+      demoMoments.length === 25 && missing.length === 0,
+      "demo: search_moments returns each of the 25 demo moments to its owner, with its kind and title",
+      `not returned: ${JSON.stringify(missing.slice(0, 5))}${missing.length > 5 ? ` and ${missing.length - 5} more` : ""}`,
+    );
+    const otherSees: string[] = [];
+    for (const id of dIds) {
+      const first = demoMoments.find((m) => m.recording_id === id);
+      const r = await call(B, "search_moments", { query: first?.title ?? "Panfold", recordingId: id, scope: "all", limit: 50 });
+      let body: any = {};
+      try { body = JSON.parse(r.text); } catch {}
+      if ((body.moments ?? []).length > 0) otherSees.push(id);
+    }
+    record(dIds.length === 2 && otherSees.length === 0, "demo: another member's search returns none of them", `visible to another member: ${otherSees.length}`);
+
+    // Seeding again for the same member writes nothing.
+    const again = seedModule ? await seedModule.seedDemoForNewMember({ id: D.memberId, accountId: acc }) : -1;
+    record(again === 0 && (await demoRows(D.memberId)).length === 2, "demo: seeding the same member again adds nothing", `seeded again ${again}`);
+
+    // A seeding failure never stops a member being added: forced here by a
+    // trigger that refuses a demo recording, on this scratch branch only, and
+    // dropped straight after.
+    const refuseFn = `check_access_refuse_demo_${tag}`;
+    await pool.query(`create function ${refuseFn}() returns trigger language plpgsql as $f$ begin if new.source = 'clipwise-demo' then raise exception 'check-access refuses a demo here'; end if; return new; end $f$`);
+    await pool.query(`create trigger ${refuseFn} before insert on recordings for each row execute function ${refuseFn}()`);
+    const logged: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+    let failedMember: { id: string } | null = null;
+    let addError: string | null = null;
+    try {
+      failedMember = await addMember({ email: `erin-${tag}@clipwise.test`, role: "member", name: "Check erin" });
+    } catch (err) {
+      addError = err instanceof Error ? err.message : String(err);
+    } finally {
+      console.log = realLog;
+      await pool.query(`drop trigger if exists ${refuseFn} on recordings`);
+      await pool.query(`drop function if exists ${refuseFn}()`);
+    }
+    const failedDemos = failedMember ? await demoRows(failedMember.id) : [];
+    const failLine = failedMember ? logged.find((l) => l.includes(`demo: seeding failed for member=${failedMember!.id}`)) : undefined;
+    record(
+      !!failedMember && !addError && failedDemos.length === 0 && !!failLine && !/@/.test(failLine),
+      "demo: a seeding failure is logged by member id (no address) and the member is still added, without a demo",
+      `added ${!!failedMember}${addError ? ` (threw ${addError})` : ""}, demos ${failedDemos.length}, line ${failLine ?? "(none)"}`,
+    );
+
+    // /login's item and its two routes: the member's own demo calls only.
+    const login = await (await fetch(`${base}/login`)).text();
+    record(login.includes('id="demotrash"') && login.includes(">Move the demo calls to the trash</button>") && login.includes("/demo/status"), "/login offers \"Move the demo calls to the trash\", shown from the member's demo status");
+    const dCookie = await sessionFor(D.email);
+    const bCookie = await sessionFor(B.email);
+    const statusBefore = await http("GET", "/demo/status", { cookie: dCookie });
+    const bTrash = await http("POST", "/demo/trash", { cookie: bCookie });
+    const dLiveAfterB = (await demoRows(D.memberId)).filter((r) => r.trashed_at === null).length;
+    const dTrash = await http("POST", "/demo/trash", { cookie: dCookie });
+    const statusAfter = await http("GET", "/demo/status", { cookie: dCookie });
+    const afterTrash = await call(D, "search_moments", { query: demoMoments[0]?.title ?? "Panfold", recordingId: dIds[0] ?? randomUUID(), scope: "all", limit: 50 });
+    let afterBody: any = {};
+    try { afterBody = JSON.parse(afterTrash.text); } catch {}
+    record(
+      statusBefore.status === 200 && statusBefore.json?.live === 2 && bTrash.status === 200 && dLiveAfterB === 2,
+      "demo trash: another member's trash leaves this member's demo calls live",
+      `status ${statusBefore.status} live ${statusBefore.json?.live}; other's trash ${bTrash.status} ${JSON.stringify(bTrash.json)}; still live ${dLiveAfterB}`,
+    );
+    record(
+      dTrash.status === 200 && dTrash.json?.trashed === 2 && statusAfter.json?.live === 0 && (afterBody.moments ?? []).length === 0,
+      "demo trash: the owner's trash moves both demo calls to the trash, and search returns none of them after",
+      `trash ${dTrash.status} ${JSON.stringify(dTrash.json)}; live after ${statusAfter.json?.live}; search after ${(afterBody.moments ?? []).length}`,
+    );
 
     // ---- 4. two kinds of token (SAA-244) -----------------------------------
     const FOUR = [...MCP_SCOPES] as string[];
