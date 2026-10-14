@@ -6,14 +6,17 @@ import type { Request } from "express";
 import { Router } from "express";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
+import { fromNodeHeaders } from "better-auth/node";
 import { db, schema } from "../db/index.js";
 import { accessOf, sessionMember } from "../access/authenticate.js";
+import { authConfigFromEnv, getAuth } from "../auth/auth.js";
 import {
   calendarOAuthConfig,
+  isSignInConsentState,
+  signInConsentReturnTo,
   startCalendarConsent,
   storeCalendarGrant,
   takeCalendarConsent,
-  takeSignInConsent,
   type PendingConsent,
 } from "../auth/google-calendar-grant.js";
 import { asyncHandler, HttpError, parseQuery } from "../lib/http.js";
@@ -79,14 +82,27 @@ const callbackQuerySchema = z.object({
 oauthRouter.get(
   "/oauth/google/callback",
   asyncHandler(async (req, res) => {
-    // A consent a sign-in started: whatever Google answered, the browser goes
-    // on to where that sign-in was going.
-    const signIn = typeof req.query.state === "string" ? takeSignInConsent(req.query.state) : undefined;
-    if (signIn) {
-      const outcome = await signInConsentOutcome(req, signIn);
-      console.log(`calendar consent after sign-in for member=${signIn.memberId}: ${outcome}`);
-      res.redirect(signIn.returnTo);
-      return;
+    // A consent a sign-in started: whatever Google answered, and whether or not
+    // this process still holds its entry, the browser that made the sign-in
+    // goes on to where that sign-in was going. The destination comes from the
+    // signed state, checked again here (MAC, expiry, this session, a path on
+    // this server). A state that fails any of those is treated as Reconnect's.
+    const rawState = typeof req.query.state === "string" ? req.query.state : "";
+    if (isSignInConsentState(rawState)) {
+      const auth = authConfigFromEnv();
+      const session = await getAuth().api.getSession({ headers: fromNodeHeaders(req.headers) });
+      const returnTo = signInConsentReturnTo(rawState, auth.secret, session?.session.id ?? null, new URL(auth.baseURL).origin);
+      if (returnTo) {
+        const pending = takeCalendarConsent(rawState);
+        if (pending) {
+          const outcome = await signInConsentOutcome(req, pending);
+          console.log(`calendar consent after sign-in for member=${pending.memberId}: ${outcome}`);
+        } else {
+          console.log("calendar consent after sign-in: state no longer held here; on to the sign-in's destination");
+        }
+        res.redirect(returnTo);
+        return;
+      }
     }
 
     const { code, state } = parseQuery(callbackQuerySchema, req);

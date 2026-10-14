@@ -18,7 +18,7 @@
 // same code runs the CLI, the server and the checks.
 
 import { betterAuth } from "better-auth";
-import { APIError, createAuthMiddleware, getOAuthState } from "better-auth/api";
+import { APIError, createAuthMiddleware, getOAuthState, getSessionFromCtx } from "better-auth/api";
 import { jwt } from "better-auth/plugins";
 import { mcp } from "@better-auth/mcp";
 import { pool } from "../db/index.js";
@@ -219,15 +219,21 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
     // request's grant came without a refresh token and the member has no
     // calendar connection, the browser goes on to Google's consent screen
     // instead, and from there to the sign-in's own destination
-    // (google-calendar-grant.ts consentAfterSignIn). Anything else, including
-    // an error redirect, keeps Better Auth's redirect.
+    // (google-calendar-grant.ts consentAfterSignIn), for the session this
+    // sign-in made (a sign-in) or already had (Link Google). Anything else,
+    // including an error redirect, keeps Better Auth's redirect.
     hooks: {
       after: createAuthMiddleware(async (ctx) => {
         if (ctx.path !== "/callback/:id") return;
         const destination = ctx.context.responseHeaders?.get("location");
         const state = await getOAuthState();
         if (!destination || destination !== state?.callbackURL) return;
-        const consent = await consentAfterSignIn(ctx, destination, new URL(ctx.context.baseURL).origin);
+        const session = ctx.context.newSession ?? (await getSessionFromCtx(ctx));
+        if (!session) return;
+        const consent = await consentAfterSignIn(ctx, destination, new URL(ctx.context.baseURL).origin, {
+          sessionId: session.session.id,
+          secret: cfg.secret,
+        });
         if (consent) throw ctx.redirect(consent);
       }),
     },

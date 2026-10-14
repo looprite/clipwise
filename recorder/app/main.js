@@ -185,6 +185,9 @@ const RESOURCES_DIR = path.resolve(__dirname, '..');
 const BUNDLED_PIPELINE_DIR = path.join(RESOURCES_DIR, 'pipeline');
 const PIPELINE_TOOLS_ENV = BUILD_INFO ? {
     CLIPWISE_PYTHON: path.join(RESOURCES_DIR, 'python', 'bin', 'python3'),
+    // The bundle's Python writes no compiled files: they would land inside the
+    // signed bundle and break its signature.
+    PYTHONDONTWRITEBYTECODE: '1',
     CLIPWISE_TRANSCRIBE_PY: path.join(BUNDLED_PIPELINE_DIR, 'transcribe.py'),
     FFMPEG_BIN: path.join(BUNDLED_BIN, 'ffmpeg'),
     PARAKEET_BIN: path.join(BUNDLED_BIN, 'parakeet'),
@@ -4802,9 +4805,23 @@ function sweepStrayChildren() {
 // their own "Acknowledgements…" item below, which opens the bundled
 // THIRD_PARTY_NOTICES file directly — full attribution text belongs in that
 // file, not crammed into the About panel's one-line description.
+// The bundle's build number: CFBundleVersion in its Info.plist (build-app.sh),
+// which is XML as Electron ships it and PlistBuddy keeps it. Null from a
+// checkout, or when it cannot be read; About then shows the version alone.
+const BUNDLE_VERSION = (() => {
+    if (!BUILD_INFO) return null;
+    try {
+        const plist = fs.readFileSync(path.join(RESOURCES_DIR, '..', 'Info.plist'), 'utf8');
+        const m = plist.match(/<key>CFBundleVersion<\/key>\s*<string>([^<]+)<\/string>/);
+        return m ? m[1] : null;
+    } catch {
+        return null;
+    }
+})();
 app.setAboutPanelOptions({
     applicationName: 'Clipwise',
     applicationVersion: app.getVersion(),
+    ...(BUNDLE_VERSION ? { version: BUNDLE_VERSION } : {}),
     credits: 'Meeting recordings captured on your Mac, intelligence surfaced through Claude.',
 });
 
