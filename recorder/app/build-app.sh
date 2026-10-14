@@ -30,7 +30,8 @@ APP_SRC="$(cd "$(dirname "$0")" && pwd)"
 RECORDER_DIR="$(cd "$APP_SRC/.." && pwd)"
 REPO_DIR="$(cd "$RECORDER_DIR/.." && pwd)"
 SERVER_DIR="$REPO_DIR/server"
-ELECTRON_APP="$APP_SRC/node_modules/electron/dist/Electron.app"
+ELECTRON_DIST="$APP_SRC/node_modules/electron/dist"
+ELECTRON_APP="$ELECTRON_DIST/Electron.app"
 
 # Fixed output path, and that is load-bearing rather than tidiness. A TCC grant
 # may key on the bundle path; Architecture Decision #9 leaves path and signing
@@ -206,9 +207,29 @@ install -m 755 "$FFMPEG_BIN"    "$C/Resources/bin/ffmpeg"
 mkdir -p "$C/Resources/models/diarize" "$C/Resources/models/parakeet"
 cp -R "$DIARIZE_MODELS_DIR" "$C/Resources/models/diarize/speaker-diarization"
 cp -R "$PARAKEET_MODELS_DIR" "$C/Resources/models/parakeet/parakeet-tdt-0.6b-v2"
-# The standalone Python, whole. ditto keeps its symlinks (bin/python3).
+# The standalone Python. ditto keeps its symlinks (bin/python3).
 ditto "$PYTHON_DIR" "$C/Resources/python"
+# Less the parts the pipeline never runs (SAA-198 step 7): pip and ensurepip, and
+# Tcl/Tk (its two dylibs, its five folders, and the _tkinter module that loads
+# them). An import trace of transcribe.py on a real capture (10-13) touched none
+# of them; what is left is what THIRD_PARTY_NOTICES covers for Python. Removed
+# here, before signing, so nothing signed is changed afterwards.
+PY="$C/Resources/python"
+rm -rf "$PY/lib/python3.14/site-packages/pip" "$PY/lib/python3.14/site-packages/pip-"*.dist-info \
+       "$PY/lib/python3.14/ensurepip" \
+       "$PY/bin/pip" "$PY/bin/pip3" "$PY/bin/pip3.14" \
+       "$PY/lib/libtcl9.0.dylib" "$PY/lib/libtcl9tk9.0.dylib" \
+       "$PY/lib/tcl9" "$PY/lib/tcl9.0" "$PY/lib/tk9.0" "$PY/lib/itcl4.3.8" "$PY/lib/thread3.0.6" \
+       "$PY/lib/python3.14/lib-dynload/_tkinter.cpython-314-darwin.so"
+for gone in "$PY/lib/python3.14/site-packages/pip" "$PY/lib/python3.14/ensurepip" "$PY/lib/libtcl9.0.dylib" "$PY/lib/tk9.0"; do
+  [ ! -e "$gone" ] || { echo "build-app: $gone is still in the bundle" >&2; exit 1; }
+done
 cp "$REPO_DIR/THIRD_PARTY_NOTICES" "$C/Resources/THIRD_PARTY_NOTICES"
+# Electron's own licence and the notices of everything Chromium bundles (Node.js,
+# V8, Squirrel.Mac and the rest), beside THIRD_PARTY_NOTICES, which names them:
+# LICENSES.chromium.html is about 20 MB, too large to fold into it.
+cp "$ELECTRON_DIST/LICENSE" "$C/Resources/LICENSE.electron"
+cp "$ELECTRON_DIST/LICENSES.chromium.html" "$C/Resources/LICENSES.chromium.html"
 
 # The pipeline, compiled (SAA-198, engineering call 3): the five files capture-cli
 # and capture-recover reach, as JavaScript that the app's own executable runs as

@@ -79,4 +79,13 @@ step "Gatekeeper"
 spctl --assess --type execute --verbose=2 "$APP"
 spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 
-printf '\nnotarized %s\n  and %s\n' "$APP" "$DMG"
+# The exact ffmpeg source the app's ffmpeg was built from, beside the .dmg, so it
+# is available from the same place as the app (Jon's call 11, SAA-198 step 7;
+# THIRD_PARTY_NOTICES says so). ffmpeg/build.sh --source fetches it if needed,
+# verifies it against its pinned SHA-256, and prints its path.
+step "ffmpeg source beside the disk image"
+FFMPEG_SOURCE="$("$APP_SRC/../ffmpeg/build.sh" --source)"
+cp "$FFMPEG_SOURCE" "$OUT_DIR/$(basename "$FFMPEG_SOURCE")"
+shasum -a 256 "$OUT_DIR/$(basename "$FFMPEG_SOURCE")"
+
+printf '\nnotarized %s\n  and %s\n  with %s beside it\n' "$APP" "$DMG" "$(basename "$FFMPEG_SOURCE")"

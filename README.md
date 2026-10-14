@@ -70,6 +70,12 @@ Tracked in Linear, not here. What is built, what is being built and why each
 call was made lives on the issues; a list in this file is a second copy that
 goes stale the moment the first one moves.
 
+## Installing the app
+
+Clipwise needs an Apple silicon Mac with macOS 14.2 or later. It doesn't open on an Intel Mac.
+
+Open the Clipwise .dmg from the link you were sent, drag Clipwise to Applications, and open it from there.
+
 ## Recorder setup
 
 Covers the Mac recorder only; the server, which serves MCP itself, has its own setup.
@@ -80,9 +86,11 @@ Covers the Mac recorder only; the server, which serves MCP itself, has its own s
 - Swift and Node toolchains
 - `meson` and `ninja` — `brew install meson ninja`. Build tools only, for `recorder/aec` (the echo
   canceller, below); nothing is installed on a user's machine.
-- `ffmpeg` on `PATH` — `brew install ffmpeg`. Not optional, but not for capture: `transcribe.py` uses it
-  to downsample both tracks to the 16 kHz the transcription engines read. The mic is captured by Clipwise's own
-  `miccap` binary, which replaced the ffmpeg mic path.
+- `ffmpeg` on `PATH` — `brew install ffmpeg`, for running from a checkout only. There it is not optional,
+  but not for capture: `transcribe.py` uses it to downsample both tracks to the 16 kHz the transcription
+  engines read. The built app carries its own LGPL-only ffmpeg (`recorder/ffmpeg/build.sh`) and never
+  reads one from `PATH`. The mic is captured by Clipwise's own `miccap` binary, which replaced the ffmpeg
+  mic path.
 
 **Build the binaries.** All of these are gitignored build outputs, so a fresh
 clone has none of them.
