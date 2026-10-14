@@ -408,6 +408,27 @@ sign "$APP" "$ENT/app.plist"
 step "codesign --verify --deep --strict --verbose=2 $APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
+# The bundle's Python and pipeline, copied to a plain temporary folder and run
+# there as capture-cli runs them (-I -B on transcribe.py). Copied out because
+# macOS's App Management can refuse this shell a write inside an .app (it did,
+# 10-14), which would hide a write the app's own run makes. With no arguments
+# transcribe.py loads its imports and stops at its usage line. The build fails
+# if it did not get there, or if any compiled file appeared.
+step "the bundle's Python, run as capture-cli runs it, writes no compiled files"
+PYCHECK="$(mktemp -d)"
+ditto "$C/Resources/python" "$PYCHECK/python"
+ditto "$PIPELINE_OUT" "$PYCHECK/pipeline"
+PYCHECK_OUT="$("$PYCHECK/python/bin/python3" -I -B "$PYCHECK/pipeline/transcribe.py" 2>&1 || true)"
+case "$PYCHECK_OUT" in
+    *"usage: transcribe.py"*) ;;
+    *) echo "build-app: transcribe.py did not reach its usage line: $PYCHECK_OUT" >&2; rm -rf "$PYCHECK"; exit 1 ;;
+esac
+if [ -n "$(find "$PYCHECK" \( -name '*.pyc' -o -name __pycache__ \) -print -quit)" ]; then
+    echo "build-app: the bundle's Python wrote compiled files when run as capture-cli runs it" >&2; rm -rf "$PYCHECK"; exit 1
+fi
+rm -rf "$PYCHECK"
+echo "no compiled files written"
+
 step "codesign -dvvv $APP"
 codesign -dvvv "$APP" 2>&1 | grep -E "^(Identifier|Format|CodeDirectory|CDHash|Signature|Authority|TeamIdentifier|Info\.plist|Sealed Resources|Timestamp)"
 
