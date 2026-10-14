@@ -140,7 +140,10 @@ export async function runCapturePipelineWithoutDatabase(dir: string, stem: strin
     } else {
       log(`transcribing → ${PYTHON} ${TRANSCRIBE_PY}`);
       // -I: the bundled Python reads no PYTHON* variables and no user site-packages.
-      execFileSync(PYTHON, ["-I", TRANSCRIBE_PY, join(dir, `system-${stem}.f32le.pcm`), join(dir, `mic-${stem}.wav`), transcriptPath], { stdio: "inherit", env: TOOL_ENV });
+      // -B: it writes no compiled files, which would land inside the signed bundle
+      // and break its signature (-I ignores PYTHONDONTWRITEBYTECODE, so the flag
+      // is what turns it off here).
+      execFileSync(PYTHON, ["-I", "-B", TRANSCRIBE_PY, join(dir, `system-${stem}.f32le.pcm`), join(dir, `mic-${stem}.wav`), transcriptPath], { stdio: "inherit", env: TOOL_ENV });
       finish("transcribe", "ok", { transcript: transcriptPath, ran: true });
     }
   } catch (err) {

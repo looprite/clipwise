@@ -186,7 +186,9 @@ const BUNDLED_PIPELINE_DIR = path.join(RESOURCES_DIR, 'pipeline');
 const PIPELINE_TOOLS_ENV = BUILD_INFO ? {
     CLIPWISE_PYTHON: path.join(RESOURCES_DIR, 'python', 'bin', 'python3'),
     // The bundle's Python writes no compiled files: they would land inside the
-    // signed bundle and break its signature.
+    // signed bundle and break its signature. capture-cli also passes -B, because
+    // it runs Python with -I, which ignores this variable; the variable covers a
+    // Python started without -I.
     PYTHONDONTWRITEBYTECODE: '1',
     CLIPWISE_TRANSCRIBE_PY: path.join(BUNDLED_PIPELINE_DIR, 'transcribe.py'),
     FFMPEG_BIN: path.join(BUNDLED_BIN, 'ffmpeg'),
