@@ -233,8 +233,8 @@ const CASES = [
         /notice: manifest\.notice\s*\?\s*\{ version: manifest\.notice\.version, acknowledgedAt: manifest\.notice\.acknowledged_at \}/.test(SRC)],
 
     // 6. first-run setup and the rest of SAA-198 step 4
-    ['setup: the four screens, in order: notice, address, sign-in, permissions', () =>
-        JSON.stringify(setup.SCREENS) === JSON.stringify(['notice', 'address', 'signin', 'permissions'])],
+    ['setup: the five screens, in order: notice, address, sign-in, permissions, Use Clipwise in Claude', () =>
+        JSON.stringify(setup.SCREENS) === JSON.stringify(['notice', 'address', 'signin', 'permissions', 'claude'])],
     ['setup: opens at the first screen not done', () => {
         const at = (s) => setup.firstIncompleteScreen({ ...ALL_DONE, ...s });
         return at({ acknowledged: false, server: null, signedIn: false }) === 'notice'
@@ -367,8 +367,48 @@ const CASES = [
         && HTML.includes("el.className = `state ${state === 'granted' ? 'granted' : state === 'denied' ? 'denied' : ''}`;")],
     ['window: the sign-in screen says Google asks once for read-only calendar access (SAA-198 step 5)', () =>
         HTML.includes('Google asks once for read-only access to your calendar, so your recordings get their meeting&rsquo;s title and invitees.')],
-    ['window: setup.html has the four screens and the notice\'s approved title', () =>
-        ['screen-notice', 'screen-address', 'screen-signin', 'screen-permissions', '<h1>Before you record</h1>'].every(t => HTML.includes(t))],
+    ['window: setup.html has the five screens and the notice\'s approved title', () =>
+        ['screen-notice', 'screen-address', 'screen-signin', 'screen-permissions', 'screen-claude', '<h1>Before you record</h1>'].every(t => HTML.includes(t))],
+
+    // 7. Use Clipwise in Claude, setup's fifth screen (SAA-198 step 6, Jon's call 9)
+    ['claude screen: the address is the team\'s origin plus /mcp, and none without a server', () =>
+        setup.claudeAddress('https://clipwise.example.com') === 'https://clipwise.example.com/mcp'
+        && setup.claudeAddress('http://localhost:3000') === 'http://localhost:3000/mcp'
+        && setup.claudeAddress(null) === null],
+    ['claude screen: it is what the window shows once the four before it are done, as step 5 of 5', () =>
+        setup.firstIncompleteScreen(ALL_DONE) === null && setup.SCREENS.indexOf('claude') === 4
+        && fnBody('setupView').includes("(w.override || setup.firstIncompleteScreen(status) || 'claude')")
+        && fnBody('setupView').includes('claudeAddress: setup.claudeAddress(status.server)')],
+    ['claude screen: an install with all four done is recorded as set up, so its window never opens as setup and never shows it', () => withDir(d =>
+        setup.SCREENS.includes('claude') && setup.settleSetup(d, ALL_DONE) === true && setup.isSetupCompleted(d)
+        && /if \(noticeOnly && consent\.isAcknowledged\(SUPPORT_DIR\)\) return;/.test(fnBody('showSetupWindow')))],
+    ['claude screen: its text is the approved text, each line once', () => {
+        const lines = [
+            '<h1>Use Clipwise in Claude</h1>',
+            'Ask Claude about your calls. Add this address to Claude as a custom connector:',
+            '<li>Go to Customize, then Connectors, and click Add.</li>',
+            '<li>Hover over Custom, then choose Web.</li>',
+            '<li>Name it Clipwise, paste the address above, and click Continue.</li>',
+            '<li>Under Authentication, choose Sign in now, then click Add. Sign in with Google when Clipwise asks.</li>',
+            '<li>In a chat, click + (or type /), hover over Connectors, and turn Clipwise on.</li>',
+            'To try it, ask: &ldquo;What changed in the Panfold project between the two calls, and is anyone behind on what they committed to?&rdquo;',
+            'The two demo calls are made-up samples in your recordings, visible only to you. You can remove them any time from your sign-in page.',
+        ];
+        return lines.every(l => HTML.split(l).length - 1 === 1); }],
+    ['claude screen: its five steps are one closed ordered list', () => {
+        const a = HTML.indexOf('id="screen-claude"');
+        const b = HTML.indexOf('</div>', HTML.indexOf('</ol>', a));
+        const part = a >= 0 && b > a ? HTML.slice(a, b) : '';
+        const count = (s) => part.split(s).length - 1;
+        return count('<ol>') === 1 && count('</ol>') === 1 && count('<li>') === 5 && count('</li>') === 5; }],
+    ['claude screen: Copy sends the address to main.js, which writes it to the clipboard', () =>
+        HTML.includes('id="copy-address"') && HTML.includes("send('setup:copy-claude-address')")
+        && /ipcMain\.on\('setup:copy-claude-address'[\s\S]{0,300}clipboard\.writeText\(address\)/.test(SRC)
+        && /const address = setup\.claudeAddress\(readCaptureServerUrl\(\)\)/.test(SRC)],
+    ['claude screen: Done is there and finishes setup; the permissions screen has no Done', () =>
+        HTML.includes("else if (view.screen === 'claude') send('setup:done');")
+        && !HTML.includes("else if (view.screen === 'permissions') send('setup:done');")
+        && HTML.includes("primary.style.display = v.screen === 'permissions' ? 'none' : '';")],
     ['Dock: no icon — LSUIElement true in build-app.sh and app.dock.hide() at boot', () =>
         /set_key LSUIElement\s+bool\s+true/.test(BUILD) && whenReadyBody.includes('if (app.dock) app.dock.hide();')],
     ['build number: CFBundleVersion is the build\'s UTC time, not the version string', () =>

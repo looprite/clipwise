@@ -1,0 +1,26 @@
+Maya: Thanks, both. One week from the planning call, and the beta opens in six days. Let's go through where we are.
+Daniel: Good news first. The duplicate-recipe fix went in on Thursday, a day early. We ran it on all twenty test devices over the weekend, no duplicates.
+Maya: That's great. And the crash reports to the shared channel?
+Daniel: That one slipped. I started it, but the setup needs an admin login I don't have yet. I'll have it done by Monday.
+Maya: Monday is two days before launch. Is that safe?
+Daniel: It's safe. If it isn't working by Monday afternoon, I'll forward the reports by hand during the first week.
+Maya: Okay. Rosa, the invite email?
+Rosa: Sent you the draft on Wednesday, like I said. It has the new date, the Android line, and nothing about export.
+Maya: I read it the same day. It's good. I made two small edits and sent it back, so it's ready to schedule.
+Rosa: Great. I'll schedule it for Monday morning. But I want to raise Android again. Since the email went to a few early testers, three people have replied asking why they can't join on their phones. All three are on Android.
+Daniel: I hear that, but nothing has changed on our side. The share sheet is still broken.
+Rosa: I'm not asking to change the decision. I'm asking for a date. "This summer" is vague, and these are exactly the people who'll tell their friends.
+Maya: That's fair. Daniel, can you give us a month by next week's call?
+Daniel: I can give you a month by next week, yes.
+Maya: Good. Then pricing. I said I'd come back with the cost estimate, and I have it. Running the app for two hundred people costs us very little; it's the meal-plan servers, and they're cheap at this size.
+Rosa: So three free months is fine?
+Maya: Three free months is fine. Decision: beta users get three months free after the beta ends, then the normal price. I'll write that into the plan doc today.
+Daniel: Works for me.
+Rosa: I'll add a line about it to the welcome email, not the invite.
+Maya: Good. Last thing, the second wave. If support is quiet after two weeks we add three hundred. Who decides whether it's quiet?
+Daniel: I'd say: fewer than ten support emails a day in the second week.
+Rosa: That's a clear line. Agreed.
+Maya: Decision: the second wave goes ahead if the second week averages fewer than ten support emails a day. Okay, read-back. Done since last week: the duplicate fix, the invite draft and my review. Slipped: crash reports, now Monday. New decisions: three free months after the beta, and the ten-email rule for the second wave. Commitments: Daniel gives us an Android month by next week; Rosa schedules the invite for Monday and adds the pricing line to the welcome email; I update the plan doc today.
+Rosa: That's it from me.
+Daniel: Same.
+Maya: Thanks, both.

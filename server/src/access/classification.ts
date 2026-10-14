@@ -54,6 +54,8 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
     note: "Google's redirect carries no token; gated by the single-use state /connect issued and the session of the member who started it",
   },
   "GET /oauth/google/connect": { access: "member", requires: "session", note: "starts a calendar connection for the signed-in member's own calendar" },
+  "GET /demo/status": { access: "member", requires: "session", note: "how many of the signed-in member's own demo calls are live, for /login's trash item" },
+  "POST /demo/trash": { access: "member", requires: "session", note: "moves the signed-in member's own demo calls to the trash, never another member's" },
   "GET /oauth/google/status": { access: "member", requires: "session", note: "whether the signed-in member has a calendar connection (connected, and its address), for /login's Reconnect calendar" },
 
   "POST /captures": {

@@ -143,6 +143,9 @@ ${googleEnabled ? `<p id="linked" class="muted" hidden>Google is linked to this 
 ${calendarEnabled ? `<p id="calconnected" class="muted" hidden>Your calendar is connected<span id="calwho"></span>.</p>
 <div id="calmissing" hidden><p class="muted">Your calendar isn't connected, so your recordings don't get their meeting's title and invitees.</p>
 <div class="row"><button id="calendar" type="button">Reconnect calendar</button></div></div>` : ""}
+<div id="demorow" hidden><p class="muted">Your two demo calls are made-up sample recordings, visible only to you.</p>
+<div class="row"><button id="demotrash" type="button">Move the demo calls to the trash</button></div></div>
+<p id="demodone" class="muted" hidden>The demo calls are in the trash.</p>
 </section>`;
   send(res, (nonce) =>
     shell(
@@ -198,7 +201,23 @@ ${calendarEnabled ? `  // Sign-in connects the calendar (one Google screen); thi
       el('calmissing').hidden = false;
     }
   } catch { el('calmissing').hidden = false; }` : ""}
+  // The member's own demo calls (SAA-198 step 6): offered for the trash only
+  // while any is still live.
+  try {
+    const d = await (await fetch('/demo/status', { credentials: 'same-origin' })).json();
+    el('demorow').hidden = !(d && d.live > 0);
+  } catch {}
 }
+el('demotrash').addEventListener('click', async () => {
+  el('demotrash').disabled = true;
+  msg.textContent = '';
+  try {
+    const res = await fetch('/demo/trash', { method: 'POST', credentials: 'same-origin' });
+    if (res.ok) { el('demorow').hidden = true; el('demodone').hidden = false; return; }
+    msg.textContent = 'That did not work. Try again.';
+  } catch { msg.textContent = 'Could not reach the server. Try again.'; }
+  el('demotrash').disabled = false;
+});
 async function afterSignIn() {
   // Back into the OAuth request this page was sent from.
   if (oauthRequest) { location.assign('/api/auth/oauth2/authorize' + location.search); return; }

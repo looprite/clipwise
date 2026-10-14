@@ -107,6 +107,9 @@ async function cleanup(): Promise<void> {
       await pool.query(`delete from auth_account where "userId" in (select id from auth_user where email like $1)`, [like]);
       await pool.query(`delete from auth_user where email like $1`, [like]);
       await pool.query(`delete from calendar_connections where member_id in (select id from account_members where email like $1)`, [like]);
+      // Every member added here gets the two demo calls (demo/seed.ts); they go
+      // first, since recordings.owner_member_id holds the member row (RESTRICT).
+      await pool.query(`delete from recordings where owner_member_id in (select id from account_members where email like $1)`, [like]);
       await pool.query(`delete from account_members where email like $1`, [like]);
     }
     await pool.query(`delete from "oauthClient" where name like $1`, [`check-${tag}%`]);

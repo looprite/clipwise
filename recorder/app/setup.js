@@ -24,7 +24,12 @@
 const fs = require('fs');
 const path = require('path');
 
-const SCREENS = ['notice', 'address', 'signin', 'permissions'];
+// The fifth, 'claude' (Jon's call 9, SAA-198 step 6), has no "done" of its own:
+// it is what the window shows once the four before it are done, and Done there
+// finishes setup. Nothing records whether it was seen, and nothing checks the
+// connection; an install that already had all four done never opens the window
+// as setup, so never shows it.
+const SCREENS = ['notice', 'address', 'signin', 'permissions', 'claude'];
 
 function setupPath(supportDir) {
     return path.join(supportDir, 'setup.json');
@@ -69,7 +74,8 @@ function permissionSettled(state) {
     return state !== 'notDetermined' && state !== 'denied';
 }
 
-// The first screen not yet done, or null when all four are.
+// The first of the four screens with a "done" that is not yet done, or null
+// when all four are (the window then shows 'claude').
 //   status: { acknowledged, server, signedIn, mic, tap }
 function firstIncompleteScreen(status) {
     if (!status.acknowledged) return 'notice';
@@ -122,6 +128,13 @@ function isClipwiseDiscovery(origin, status, body) {
         && body.resource_name === 'Clipwise'
         && Array.isArray(body.authorization_servers)
         && body.authorization_servers[0] === `${origin}/api/auth`;
+}
+
+// The address Claude connects to: the team's MCP endpoint, the server's own
+// origin plus /mcp (server/src/app.ts mounts the MCP endpoint there). Null with
+// no server set.
+function claudeAddress(origin) {
+    return origin ? `${origin}/mcp` : null;
 }
 
 // The account items the tray offers, in order:
@@ -181,7 +194,7 @@ module.exports = {
     SCREENS,
     setupPath, isSetupCompleted, recordSetupCompleted,
     permissionSettled, firstIncompleteScreen, settleSetup,
-    normalizeTeamAddress, isClipwiseDiscovery,
+    normalizeTeamAddress, isClipwiseDiscovery, claudeAddress,
     trayAccountItems, formatElapsed,
     loginItemPath, loginDefaultApplied, recordLoginDefaultApplied, shouldApplyLoginDefault,
     shouldOfferMove,
