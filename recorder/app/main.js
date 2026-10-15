@@ -2814,6 +2814,7 @@ async function exchangeCaptureCode(server, code, redirectUri, verifier) {
             expiresAt: Date.now() + Number(body.expires_in) * 1000,
         });
         console.error(`[clipwise-recorder] sign-in: signed in to ${server}`);
+        sendUploadsWaitingOnSignIn();
         setupSignInFinished(true);
     } catch (err) {
         console.error(`[clipwise-recorder] sign-in: failed: ${err.cause?.code || err.name}`);
@@ -2865,6 +2866,13 @@ function signOutOfCaptureServer(reason) {
     renderTray();
 }
 
+// Signed out by a refresh (the grant refused, or the new tokens not stored):
+// one notification, whose click starts the same sign-in as the tray's item.
+function signOutAfterRefresh(reason) {
+    signOutOfCaptureServer(reason);
+    notify('Clipwise is signed out', 'Recordings are kept and will upload after you sign in.', signInToCaptureServer);
+}
+
 let captureRefreshTimer = null;
 let captureRetryMs = CAPTURE_RETRY_FIRST_MS;
 // How long until the held capture token's refresh is due, from the clock.
@@ -2899,7 +2907,7 @@ async function refreshCaptureTokenOnce() {
     // With no server set, no server is called, this one included; the stored
     // tokens are kept.
     if (!readCaptureServerUrl()) return false;
-    const outcome = await refreshCaptureTokens(tokens, CAPTURE_CLIENT_ID, { signOut: signOutOfCaptureServer, store: setCaptureTokens });
+    const outcome = await refreshCaptureTokens(tokens, CAPTURE_CLIENT_ID, { signOut: signOutAfterRefresh, store: setCaptureTokens });
     if (outcome === 'refreshed') captureRetryMs = CAPTURE_RETRY_FIRST_MS;
     if (outcome === 'kept-network') {
         clearTimeout(captureRefreshTimer);
@@ -3320,6 +3328,22 @@ function scheduleUploadTimer() {
     const due = listUploadQueue().filter((e) => e.state === 'queued').map((e) => Date.parse(e.nextAttemptAt)).filter(Number.isFinite);
     if (due.length === 0) return;
     uploadTimer = setTimeout(() => drainUploadQueue('backoff'), Math.max(0, Math.min(...due) - Date.now()));
+}
+
+// After a sign-in: the queued captures that waited because no one was signed in
+// are made due now with their attempts reset, each logged, and the queue is
+// drained. The others keep their backoff.
+function sendUploadsWaitingOnSignIn() {
+    for (const entry of listUploadQueue()) {
+        if (entry.state !== 'queued' || entry.lastError !== 'not_signed_in') continue;
+        try {
+            writeUploadEntry({ ...entry, attempts: 0, nextAttemptAt: new Date().toISOString() });
+            console.error(`[clipwise-recorder] upload ${entry.stem}: due now (signed in)`);
+        } catch (err) {
+            console.error(`[clipwise-recorder] upload ${entry.stem}: could not make it due: ${err.code || err.name}`);
+        }
+    }
+    drainUploadQueue('sign-in');
 }
 
 // Queues the captures one recovery pass ran to the end (capture-recover.ts writes
