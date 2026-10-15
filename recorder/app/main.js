@@ -315,6 +315,10 @@ const CAPTURE_SCOPES = 'openid offline_access clipwise:capture';
 const CAPTURE_TOKEN_PATH = path.join(SUPPORT_DIR, 'capture-token.bin');
 // How long before the access token runs out (600 s on the server) it is refreshed.
 const CAPTURE_REFRESH_EARLY_MS = 60 * 1000;
+// After a refresh whose every request failed on the network, the next is tried
+// after this delay, doubled after each such failure up to the cap.
+const CAPTURE_RETRY_FIRST_MS = 60 * 1000;
+const CAPTURE_RETRY_MAX_MS = 60 * 60 * 1000;
 
 // From a checkout, a GUI-launched Electron inherits a minimal PATH with no
 // Homebrew on it, and the pipeline shells out to python3 and ffmpeg by name, so
@@ -2855,12 +2859,14 @@ async function signOutFromTray() {
 function signOutOfCaptureServer(reason) {
     captureTokens = null;
     clearTimeout(captureRefreshTimer);
+    captureRetryMs = CAPTURE_RETRY_FIRST_MS;
     try { fs.unlinkSync(CAPTURE_TOKEN_PATH); } catch {}
     console.error(`[clipwise-recorder] capture token: signed out (${reason})`);
     renderTray();
 }
 
 let captureRefreshTimer = null;
+let captureRetryMs = CAPTURE_RETRY_FIRST_MS;
 function scheduleCaptureRefresh() {
     clearTimeout(captureRefreshTimer);
     if (!captureTokens) return;
@@ -2880,14 +2886,24 @@ function refreshCaptureToken() {
     return captureRefreshing;
 }
 
-// One refresh with the tokens held now (capture-refresh.js).
+// One refresh with the tokens held now (capture-refresh.js). After one that
+// ends kept on a network failure, the next is scheduled after captureRetryMs,
+// which then doubles up to its cap; one that stores new tokens resets it, and
+// setCaptureTokens schedules the next refresh as before.
 async function refreshCaptureTokenOnce() {
     const tokens = captureTokens;
     if (!tokens) return false;
     // With no server set, no server is called, this one included; the stored
     // tokens are kept.
     if (!readCaptureServerUrl()) return false;
-    return refreshCaptureTokens(tokens, CAPTURE_CLIENT_ID, { signOut: signOutOfCaptureServer, store: setCaptureTokens });
+    const outcome = await refreshCaptureTokens(tokens, CAPTURE_CLIENT_ID, { signOut: signOutOfCaptureServer, store: setCaptureTokens });
+    if (outcome === 'refreshed') captureRetryMs = CAPTURE_RETRY_FIRST_MS;
+    if (outcome === 'kept-network') {
+        clearTimeout(captureRefreshTimer);
+        captureRefreshTimer = setTimeout(refreshCaptureToken, captureRetryMs);
+        captureRetryMs = Math.min(captureRetryMs * 2, CAPTURE_RETRY_MAX_MS);
+    }
+    return outcome === 'refreshed';
 }
 
 // The body of POST /captures (server/src/routes/captures.ts captureSchema), from

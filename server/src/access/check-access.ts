@@ -1689,7 +1689,7 @@ async function main(): Promise<void> {
             tokens: RecorderTokens,
             clientId: string,
             on: { signOut: (reason: string) => void; store: (tokens: RecorderTokens) => void },
-          ) => Promise<boolean>;
+          ) => Promise<"refreshed" | "signed-out" | "kept-network" | "kept-reply">;
         };
       } catch {
         return null;
@@ -1701,17 +1701,45 @@ async function main(): Promise<void> {
       tokens: flow.access && flow.refresh ? { server: cfg.baseURL, access: flow.access, refresh: flow.refresh } : null,
       signedOut: null,
     });
-    // null when the module is missing or nothing is held.
-    const recorderRefresh = async (held: Held, dropFirstReply: boolean): Promise<boolean | null> => {
+    // null when the module is missing or nothing is held. The stand-in's first
+    // request is delivered; dropped after the server's whole reply is read;
+    // garbled: the server's whole reply is read and the recorder gets its status
+    // with an empty body, the status recorded in `garbled`; or hung: never sent
+    // to the server, and ended only when the request's own signal or `limit`
+    // aborts, with `hung` recording which ended it and after how long.
+    const hung: { by: string | null; ms: number | null } = { by: null, ms: null };
+    const garbled: { status: number | null } = { status: null };
+    const recorderRefresh = async (held: Held, first: "deliver" | "drop" | "garble" | "hang", limit?: AbortSignal) => {
       if (!refreshModule || !held.tokens) return null;
       const realFetch = globalThis.fetch;
-      let drop = dropFirstReply;
+      let mode = first;
       globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         if (!url.startsWith(cfg.baseURL)) throw new Error(`stand-in: a request outside ${cfg.baseURL}: ${url}`);
+        if (mode === "hang") {
+          mode = "deliver";
+          const started = Date.now();
+          const signal = init?.signal;
+          return new Promise<Response>((_, reject) => {
+            const end = (by: string, reason: unknown) => {
+              if (hung.by !== null) return;
+              hung.by = by;
+              hung.ms = Date.now() - started;
+              reject(reason);
+            };
+            signal?.addEventListener("abort", () => end("the request's signal", signal.reason));
+            limit?.addEventListener("abort", () => end("the check's limit", limit.reason));
+          });
+        }
         const res = await realFetch(base + url.slice(cfg.baseURL.length), init);
-        if (!drop) return res;
-        drop = false;
+        if (mode === "garble") {
+          mode = "deliver";
+          await res.arrayBuffer();
+          garbled.status = res.status;
+          return new Response("", { status: res.status, headers: res.headers });
+        }
+        if (mode !== "drop") return res;
+        mode = "deliver";
         await res.arrayBuffer();
         throw new TypeError("fetch failed", { cause: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }) });
       }) as typeof fetch;
@@ -1733,16 +1761,16 @@ async function main(): Promise<void> {
 
     const deliveredFlow = await recFlow(F);
     const delivered = heldFrom(deliveredFlow);
-    const deliveredRefreshed = await recorderRefresh(delivered, false);
+    const deliveredRefreshed = await recorderRefresh(delivered, "deliver");
     record(
-      deliveredRefreshed === true && !!delivered.tokens && delivered.signedOut === null,
+      deliveredRefreshed === "refreshed" && !!delivered.tokens && delivered.signedOut === null,
       "recorder refresh, the control: with every reply delivered, the recorder's refresh stores new tokens and it stays signed in",
       `flow error ${deliveredFlow.error} at ${deliveredFlow.step}; module ${refreshModule ? "loaded" : "missing"}; refreshed ${deliveredRefreshed}; signed out ${delivered.signedOut}`,
     );
 
     const lostFlow = await recFlow(F);
     const lost = heldFrom(lostFlow);
-    const firstRefresh = await recorderRefresh(lost, true);
+    const firstRefresh = await recorderRefresh(lost, "drop");
     const { rows: windowRows } = await pool.query<{ until: Date | null }>(
       `select max("rotationReplayExpiresAt") as until from "oauthRefreshToken"
         where "clientId" = $1 and "userId" = (select id from auth_user where email = $2)`,
@@ -1752,11 +1780,34 @@ async function main(): Promise<void> {
     if (windowEnd) {
       while (Date.now() <= windowEnd.getTime()) await new Promise((resolve) => setTimeout(resolve, windowEnd.getTime() - Date.now() + 1));
     }
-    const nextRefresh = windowEnd ? await recorderRefresh(lost, false) : null;
+    const nextRefresh = windowEnd ? await recorderRefresh(lost, "deliver") : null;
     record(
-      !!windowEnd && nextRefresh === true && !!lost.tokens && lost.signedOut === null,
+      !!windowEnd && nextRefresh === "refreshed" && !!lost.tokens && lost.signedOut === null,
       "recorder refresh, a reply lost on the network: the server answers and the reply is dropped; at the recorder's next refresh, after the server's reuse window, it is still signed in (no invalid_grant)",
       `flow error ${lostFlow.error} at ${lostFlow.step}; first refresh ${firstRefresh}; reuse window until ${windowEnd?.toISOString() ?? "(none recorded)"}; next refresh ${nextRefresh}; signed out ${lost.signedOut}`,
+    );
+
+    // A refresh whose first request is never answered. The check's own limit,
+    // 12 seconds, longer than the recorder's 8-second refresh timeout, ends the
+    // hung request if nothing else does, so the case reports instead of hanging.
+    const hungFlow = await recFlow(F);
+    const hungHeld = heldFrom(hungFlow);
+    const hungRefresh = await recorderRefresh(hungHeld, "hang", AbortSignal.timeout(12_000));
+    record(
+      hung.by === "the request's signal" && hungRefresh === "refreshed" && !!hungHeld.tokens && hungHeld.signedOut === null,
+      "recorder refresh, a request never answered: the recorder ends it at its own timeout, retries, and is refreshed and still signed in",
+      `flow error ${hungFlow.error} at ${hungFlow.step}; hung request ended by ${hung.by} after ${hung.ms} ms; refresh ${hungRefresh}; signed out ${hungHeld.signedOut}`,
+    );
+
+    // A refresh whose first reply reaches the recorder as a 2xx with a body that
+    // can't be read, after the server has answered it in full.
+    const garbledFlow = await recFlow(F);
+    const garbledHeld = heldFrom(garbledFlow);
+    const garbledRefresh = await recorderRefresh(garbledHeld, "garble");
+    record(
+      garbled.status !== null && garbled.status >= 200 && garbled.status < 300 && garbledRefresh === "refreshed" && !!garbledHeld.tokens && garbledHeld.signedOut === null,
+      "recorder refresh, a 2xx reply whose body can't be read: the recorder retries at once, and is refreshed and still signed in",
+      `flow error ${garbledFlow.error} at ${garbledFlow.step}; server answered ${garbled.status}; refresh ${garbledRefresh}; signed out ${garbledHeld.signedOut}`,
     );
   } finally {
     server.close();
