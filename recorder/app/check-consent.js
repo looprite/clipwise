@@ -301,6 +301,10 @@ const CASES = [
     ['build-app.sh copies capture-refresh.js into the bundle (main.js requires it)', () =>
         /cp "\$APP_SRC\/capture-refresh\.js" "\$C\/Resources\/app\/capture-refresh\.js"/.test(BUILD)
         && SRC.includes("require('./capture-refresh.js')")],
+    ['wake from sleep: powerMonitor\'s resume logs and reschedules the capture-token refresh from the clock', () =>
+        /const \{[^}]*\bpowerMonitor\b[^}]*\} = require\('electron'\);/.test(SRC)
+        && /powerMonitor\.on\('resume', \(\) => \{\s*if \(!captureTokens\) return;\s*console\.error\(`\[clipwise-recorder\] capture token: resumed from sleep, refresh in \$\{captureRefreshDelay\(\)\} ms`\);\s*scheduleCaptureRefresh\(\);\s*\}\);/.test(SRC)
+        && /function captureRefreshDelay\(\) \{\s*return Math\.max\(0, captureTokens\.expiresAt - CAPTURE_REFRESH_EARLY_MS - Date\.now\(\)\);\s*\}\s*function scheduleCaptureRefresh\(\) \{[\s\S]{0,120}setTimeout\(refreshCaptureToken, captureRefreshDelay\(\)\)/.test(SRC)],
     ['address: no scheme means https, and only the origin is kept', () => {
         const a = setup.normalizeTeamAddress('  clipwise.example.com  ');
         const b = setup.normalizeTeamAddress('https://clipwise.example.com/login?x=1');
