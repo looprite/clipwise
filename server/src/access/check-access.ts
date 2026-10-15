@@ -1666,6 +1666,98 @@ async function main(): Promise<void> {
       record(false, "revocation: a refresh token was issued to test with", "none issued");
     }
     record((await http("GET", `/accounts/${acc}/moments?q=${WORD}&scope=all`, { token: A.token })).status === 200, "revocation: other members are unaffected");
+
+    // Waits 61 seconds, past the token endpoint's rate-limit window: 60 seconds
+    // (oauth-provider authorize-K1WHCNih.mjs:5238), and the count resets after a
+    // full window with no request (rate-limiter index.mjs:37).
+    await new Promise((resolve) => setTimeout(resolve, 61_000));
+
+    // A refresh whose reply is lost on the network. The recorder's refresh,
+    // recorder/app/capture-refresh.js, runs with the recorder's server address
+    // (cfg.baseURL), and a stand-in for fetch sends each of its requests to this
+    // in-process server. Told to drop, the stand-in reads the server's whole reply
+    // to the first request and then throws what a timed-out request throws
+    // (cause code ETIMEDOUT), so the server has rotated the refresh token and the
+    // recorder keeps the old one. The recorder's next refresh is made once the
+    // server's reuse window for the rotated token (rotationReplayExpiresAt) has
+    // passed.
+    type RecorderTokens = { server: string; access: string; refresh: string; expiresAt?: number };
+    const refreshModule = (() => {
+      try {
+        return createRequire(import.meta.url)("../../../recorder/app/capture-refresh.js") as {
+          refreshCaptureTokens: (
+            tokens: RecorderTokens,
+            clientId: string,
+            on: { signOut: (reason: string) => void; store: (tokens: RecorderTokens) => void },
+          ) => Promise<boolean>;
+        };
+      } catch {
+        return null;
+      }
+    })();
+    // What the recorder holds: its tokens, or the reason it signed out.
+    type Held = { tokens: RecorderTokens | null; signedOut: string | null };
+    const heldFrom = (flow: FlowResult): Held => ({
+      tokens: flow.access && flow.refresh ? { server: cfg.baseURL, access: flow.access, refresh: flow.refresh } : null,
+      signedOut: null,
+    });
+    // null when the module is missing or nothing is held.
+    const recorderRefresh = async (held: Held, dropFirstReply: boolean): Promise<boolean | null> => {
+      if (!refreshModule || !held.tokens) return null;
+      const realFetch = globalThis.fetch;
+      let drop = dropFirstReply;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (!url.startsWith(cfg.baseURL)) throw new Error(`stand-in: a request outside ${cfg.baseURL}: ${url}`);
+        const res = await realFetch(base + url.slice(cfg.baseURL.length), init);
+        if (!drop) return res;
+        drop = false;
+        await res.arrayBuffer();
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }) });
+      }) as typeof fetch;
+      try {
+        return await refreshModule.refreshCaptureTokens(held.tokens, recorder.clientId, {
+          signOut: (reason) => {
+            held.tokens = null;
+            held.signedOut = reason;
+          },
+          store: (tokens) => {
+            held.tokens = tokens;
+          },
+        });
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    };
+    const F = await makeUser("frank", "member");
+
+    const deliveredFlow = await recFlow(F);
+    const delivered = heldFrom(deliveredFlow);
+    const deliveredRefreshed = await recorderRefresh(delivered, false);
+    record(
+      deliveredRefreshed === true && !!delivered.tokens && delivered.signedOut === null,
+      "recorder refresh, the control: with every reply delivered, the recorder's refresh stores new tokens and it stays signed in",
+      `flow error ${deliveredFlow.error} at ${deliveredFlow.step}; module ${refreshModule ? "loaded" : "missing"}; refreshed ${deliveredRefreshed}; signed out ${delivered.signedOut}`,
+    );
+
+    const lostFlow = await recFlow(F);
+    const lost = heldFrom(lostFlow);
+    const firstRefresh = await recorderRefresh(lost, true);
+    const { rows: windowRows } = await pool.query<{ until: Date | null }>(
+      `select max("rotationReplayExpiresAt") as until from "oauthRefreshToken"
+        where "clientId" = $1 and "userId" = (select id from auth_user where email = $2)`,
+      [recorder.clientId, F.email],
+    );
+    const windowEnd = windowRows[0]?.until ?? null;
+    if (windowEnd) {
+      while (Date.now() <= windowEnd.getTime()) await new Promise((resolve) => setTimeout(resolve, windowEnd.getTime() - Date.now() + 1));
+    }
+    const nextRefresh = windowEnd ? await recorderRefresh(lost, false) : null;
+    record(
+      !!windowEnd && nextRefresh === true && !!lost.tokens && lost.signedOut === null,
+      "recorder refresh, a reply lost on the network: the server answers and the reply is dropped; at the recorder's next refresh, after the server's reuse window, it is still signed in (no invalid_grant)",
+      `flow error ${lostFlow.error} at ${lostFlow.step}; first refresh ${firstRefresh}; reuse window until ${windowEnd?.toISOString() ?? "(none recorded)"}; next refresh ${nextRefresh}; signed out ${lost.signedOut}`,
+    );
   } finally {
     server.close();
     await cleanup(acc);

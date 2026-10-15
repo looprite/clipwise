@@ -298,6 +298,9 @@ const CASES = [
     ['build-app.sh copies capture-sign-out.js into the bundle (main.js requires it)', () =>
         /cp "\$APP_SRC\/capture-sign-out\.js" "\$C\/Resources\/app\/capture-sign-out\.js"/.test(BUILD)
         && SRC.includes("require('./capture-sign-out.js')")],
+    ['build-app.sh copies capture-refresh.js into the bundle (main.js requires it)', () =>
+        /cp "\$APP_SRC\/capture-refresh\.js" "\$C\/Resources\/app\/capture-refresh\.js"/.test(BUILD)
+        && SRC.includes("require('./capture-refresh.js')")],
     ['address: no scheme means https, and only the origin is kept', () => {
         const a = setup.normalizeTeamAddress('  clipwise.example.com  ');
         const b = setup.normalizeTeamAddress('https://clipwise.example.com/login?x=1');
