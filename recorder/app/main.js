@@ -9,7 +9,7 @@
 // is a human. The recorder is the trigger; the manifest it wrote at capture
 // start is the record the pipeline keys on.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage, systemPreferences } = require('electron');
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage, systemPreferences, powerMonitor } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID, randomBytes, createHash } = require('crypto');
 const zlib = require('zlib');
@@ -2867,11 +2867,14 @@ function signOutOfCaptureServer(reason) {
 
 let captureRefreshTimer = null;
 let captureRetryMs = CAPTURE_RETRY_FIRST_MS;
+// How long until the held capture token's refresh is due, from the clock.
+function captureRefreshDelay() {
+    return Math.max(0, captureTokens.expiresAt - CAPTURE_REFRESH_EARLY_MS - Date.now());
+}
 function scheduleCaptureRefresh() {
     clearTimeout(captureRefreshTimer);
     if (!captureTokens) return;
-    const delay = Math.max(0, captureTokens.expiresAt - CAPTURE_REFRESH_EARLY_MS - Date.now());
-    captureRefreshTimer = setTimeout(refreshCaptureToken, delay);
+    captureRefreshTimer = setTimeout(refreshCaptureToken, captureRefreshDelay());
 }
 
 // One refresh at a time: the server rotates refresh tokens, and a second request
@@ -4816,6 +4819,13 @@ app.whenReady().then(async () => {
     // Before the first render, so the tray knows whether to offer sign-in, and
     // whether setup is done (setupCompleted needs the token and the grants).
     loadCaptureTokens();
+    // On wake from sleep, with capture tokens held, the refresh is logged and
+    // rescheduled from the clock: one that came due during sleep runs at once.
+    powerMonitor.on('resume', () => {
+        if (!captureTokens) return;
+        console.error(`[clipwise-recorder] capture token: resumed from sleep, refresh in ${captureRefreshDelay()} ms`);
+        scheduleCaptureRefresh();
+    });
     readPermissions();
     setState('stopped');
     // Whatever was queued before this launch, including a capture whose app quit
