@@ -305,6 +305,18 @@ const CASES = [
         /const \{[^}]*\bpowerMonitor\b[^}]*\} = require\('electron'\);/.test(SRC)
         && /powerMonitor\.on\('resume', \(\) => \{\s*if \(!captureTokens\) return;\s*console\.error\(`\[clipwise-recorder\] capture token: resumed from sleep, refresh in \$\{captureRefreshDelay\(\)\} ms`\);\s*scheduleCaptureRefresh\(\);\s*\}\);/.test(SRC)
         && /function captureRefreshDelay\(\) \{\s*return Math\.max\(0, captureTokens\.expiresAt - CAPTURE_REFRESH_EARLY_MS - Date\.now\(\)\);\s*\}\s*function scheduleCaptureRefresh\(\) \{[\s\S]{0,120}setTimeout\(refreshCaptureToken, captureRefreshDelay\(\)\)/.test(SRC)],
+    ['signed out by a refresh: one notification, whose click starts the tray\'s sign-in; the tray\'s Sign out shows none', () =>
+        /function signOutAfterRefresh\(reason\) \{\s*signOutOfCaptureServer\(reason\);\s*notify\('Clipwise is signed out', 'Recordings are kept and will upload after you sign in\.', signInToCaptureServer\);\s*\}/.test(SRC)
+        && SRC.includes('{ signOut: signOutAfterRefresh, store: setCaptureTokens }')
+        && (SRC.match(/signOutAfterRefresh/g) || []).length === 2
+        && (SRC.match(/'Clipwise is signed out'/g) || []).length === 1
+        && SRC.includes("signOutOfCaptureServer('tray');")
+        && SRC.includes("items.push({ label: 'Sign in to Clipwise…', click: signInToCaptureServer });")],
+    ['sign-in: queued captures waiting because no one was signed in are made due with attempts reset, logged, and the queue is drained', () =>
+        /function sendUploadsWaitingOnSignIn\(\) \{\s*for \(const entry of listUploadQueue\(\)\) \{\s*if \(entry\.state !== 'queued' \|\| entry\.lastError !== 'not_signed_in'\) continue;\s*try \{\s*writeUploadEntry\(\{ \.\.\.entry, attempts: 0, nextAttemptAt: new Date\(\)\.toISOString\(\) \}\);\s*console\.error\(`\[clipwise-recorder\] upload \$\{entry\.stem\}: due now \(signed in\)`\);/.test(SRC)
+        && /function sendUploadsWaitingOnSignIn\(\) \{[\s\S]{0,700}?\n    \}\n    drainUploadQueue\('sign-in'\);\n\}/.test(SRC)
+        && /console\.error\(`\[clipwise-recorder\] sign-in: signed in to \$\{server\}`\);\s*sendUploadsWaitingOnSignIn\(\);\s*setupSignInFinished\(true\);/.test(SRC)
+        && SRC.includes("retryLater(null, 'not_signed_in')")],
     ['address: no scheme means https, and only the origin is kept', () => {
         const a = setup.normalizeTeamAddress('  clipwise.example.com  ');
         const b = setup.normalizeTeamAddress('https://clipwise.example.com/login?x=1');
