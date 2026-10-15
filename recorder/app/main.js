@@ -45,6 +45,8 @@ const consent = require('./consent.js');
 const setup = require('./setup.js');
 // The tray's Sign out revokes the refresh token on the server (SAA-198 step 5).
 const { revokeRefreshToken } = require('./capture-sign-out.js');
+// The capture token's form post to the token endpoint, and one refresh.
+const { postCaptureTokenForm, refreshCaptureTokens } = require('./capture-refresh.js');
 
 // --- constants ------------------------------------------------------------
 // All measurements come from 5-second captures on 2026-08-09. A long
@@ -2786,18 +2788,6 @@ function signInToCaptureServer() {
     captureSignIn = listener;
 }
 
-// The token endpoint's reply, read for its status, its error code and the
-// tokens; nothing from it is logged but the first two.
-async function postCaptureTokenForm(server, form) {
-    const res = await fetch(`${server}/api/auth/oauth2/token`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams(form),
-    });
-    const body = await res.json().catch(() => ({}));
-    return { status: res.status, body };
-}
-
 async function exchangeCaptureCode(server, code, redirectUri, verifier) {
     try {
         const { status, body } = await postCaptureTokenForm(server, {
@@ -2890,49 +2880,14 @@ function refreshCaptureToken() {
     return captureRefreshing;
 }
 
-// Signed out only when the token endpoint refuses the grant (400 or 401). A
-// network error or any other status keeps the stored tokens; the next use (an
-// upload's 401) tries again.
+// One refresh with the tokens held now (capture-refresh.js).
 async function refreshCaptureTokenOnce() {
     const tokens = captureTokens;
     if (!tokens) return false;
     // With no server set, no server is called, this one included; the stored
     // tokens are kept.
     if (!readCaptureServerUrl()) return false;
-    let reply;
-    try {
-        reply = await postCaptureTokenForm(tokens.server, {
-            grant_type: 'refresh_token',
-            refresh_token: tokens.refresh,
-            client_id: CAPTURE_CLIENT_ID,
-            resource: `${tokens.server}/capture`,
-        });
-    } catch (err) {
-        console.error(`[clipwise-recorder] capture token: refresh failed, kept: ${err.cause?.code || err.name}`);
-        return false;
-    }
-    const { status, body } = reply;
-    if (!body.access_token) {
-        if (status === 400 || status === 401) {
-            signOutOfCaptureServer(`refresh ${status} ${body.error || 'no_token'}`);
-        } else {
-            console.error(`[clipwise-recorder] capture token: refresh ${status} ${body.error || 'no_token'}, kept`);
-        }
-        return false;
-    }
-    try {
-        setCaptureTokens({
-            server: tokens.server,
-            access: body.access_token,
-            refresh: body.refresh_token || tokens.refresh,
-            expiresAt: Date.now() + Number(body.expires_in) * 1000,
-        });
-    } catch (err) {
-        signOutOfCaptureServer(`could not store the refreshed token: ${err.name}`);
-        return false;
-    }
-    console.error(`[clipwise-recorder] capture token: refreshed (${status})`);
-    return true;
+    return refreshCaptureTokens(tokens, CAPTURE_CLIENT_ID, { signOut: signOutOfCaptureServer, store: setCaptureTokens });
 }
 
 // The body of POST /captures (server/src/routes/captures.ts captureSchema), from
