@@ -9,7 +9,7 @@
 // is a human. The recorder is the trigger; the manifest it wrote at capture
 // start is the record the pipeline keys on.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage, systemPreferences } = require('electron');
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage, systemPreferences, powerMonitor } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID, randomBytes, createHash } = require('crypto');
 const zlib = require('zlib');
@@ -45,6 +45,8 @@ const consent = require('./consent.js');
 const setup = require('./setup.js');
 // The tray's Sign out revokes the refresh token on the server (SAA-198 step 5).
 const { revokeRefreshToken } = require('./capture-sign-out.js');
+// The capture token's form post to the token endpoint, and one refresh.
+const { postCaptureTokenForm, refreshCaptureTokens } = require('./capture-refresh.js');
 
 // --- constants ------------------------------------------------------------
 // All measurements come from 5-second captures on 2026-08-09. A long
@@ -313,6 +315,10 @@ const CAPTURE_SCOPES = 'openid offline_access clipwise:capture';
 const CAPTURE_TOKEN_PATH = path.join(SUPPORT_DIR, 'capture-token.bin');
 // How long before the access token runs out (600 s on the server) it is refreshed.
 const CAPTURE_REFRESH_EARLY_MS = 60 * 1000;
+// After a refresh whose every request failed on the network, the next is tried
+// after this delay, doubled after each such failure up to the cap.
+const CAPTURE_RETRY_FIRST_MS = 60 * 1000;
+const CAPTURE_RETRY_MAX_MS = 60 * 60 * 1000;
 
 // From a checkout, a GUI-launched Electron inherits a minimal PATH with no
 // Homebrew on it, and the pipeline shells out to python3 and ffmpeg by name, so
@@ -2786,18 +2792,6 @@ function signInToCaptureServer() {
     captureSignIn = listener;
 }
 
-// The token endpoint's reply, read for its status, its error code and the
-// tokens; nothing from it is logged but the first two.
-async function postCaptureTokenForm(server, form) {
-    const res = await fetch(`${server}/api/auth/oauth2/token`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams(form),
-    });
-    const body = await res.json().catch(() => ({}));
-    return { status: res.status, body };
-}
-
 async function exchangeCaptureCode(server, code, redirectUri, verifier) {
     try {
         const { status, body } = await postCaptureTokenForm(server, {
@@ -2820,6 +2814,7 @@ async function exchangeCaptureCode(server, code, redirectUri, verifier) {
             expiresAt: Date.now() + Number(body.expires_in) * 1000,
         });
         console.error(`[clipwise-recorder] sign-in: signed in to ${server}`);
+        sendUploadsWaitingOnSignIn();
         setupSignInFinished(true);
     } catch (err) {
         console.error(`[clipwise-recorder] sign-in: failed: ${err.cause?.code || err.name}`);
@@ -2865,17 +2860,29 @@ async function signOutFromTray() {
 function signOutOfCaptureServer(reason) {
     captureTokens = null;
     clearTimeout(captureRefreshTimer);
+    captureRetryMs = CAPTURE_RETRY_FIRST_MS;
     try { fs.unlinkSync(CAPTURE_TOKEN_PATH); } catch {}
     console.error(`[clipwise-recorder] capture token: signed out (${reason})`);
     renderTray();
 }
 
+// Signed out by a refresh (the grant refused, or the new tokens not stored):
+// one notification, whose click starts the same sign-in as the tray's item.
+function signOutAfterRefresh(reason) {
+    signOutOfCaptureServer(reason);
+    notify('Clipwise is signed out', 'Recordings are kept and will upload after you sign in.', signInToCaptureServer);
+}
+
 let captureRefreshTimer = null;
+let captureRetryMs = CAPTURE_RETRY_FIRST_MS;
+// How long until the held capture token's refresh is due, from the clock.
+function captureRefreshDelay() {
+    return Math.max(0, captureTokens.expiresAt - CAPTURE_REFRESH_EARLY_MS - Date.now());
+}
 function scheduleCaptureRefresh() {
     clearTimeout(captureRefreshTimer);
     if (!captureTokens) return;
-    const delay = Math.max(0, captureTokens.expiresAt - CAPTURE_REFRESH_EARLY_MS - Date.now());
-    captureRefreshTimer = setTimeout(refreshCaptureToken, delay);
+    captureRefreshTimer = setTimeout(refreshCaptureToken, captureRefreshDelay());
 }
 
 // One refresh at a time: the server rotates refresh tokens, and a second request
@@ -2890,49 +2897,24 @@ function refreshCaptureToken() {
     return captureRefreshing;
 }
 
-// Signed out only when the token endpoint refuses the grant (400 or 401). A
-// network error or any other status keeps the stored tokens; the next use (an
-// upload's 401) tries again.
+// One refresh with the tokens held now (capture-refresh.js). After one that
+// ends kept on a network failure, the next is scheduled after captureRetryMs,
+// which then doubles up to its cap; one that stores new tokens resets it, and
+// setCaptureTokens schedules the next refresh as before.
 async function refreshCaptureTokenOnce() {
     const tokens = captureTokens;
     if (!tokens) return false;
     // With no server set, no server is called, this one included; the stored
     // tokens are kept.
     if (!readCaptureServerUrl()) return false;
-    let reply;
-    try {
-        reply = await postCaptureTokenForm(tokens.server, {
-            grant_type: 'refresh_token',
-            refresh_token: tokens.refresh,
-            client_id: CAPTURE_CLIENT_ID,
-            resource: `${tokens.server}/capture`,
-        });
-    } catch (err) {
-        console.error(`[clipwise-recorder] capture token: refresh failed, kept: ${err.cause?.code || err.name}`);
-        return false;
+    const outcome = await refreshCaptureTokens(tokens, CAPTURE_CLIENT_ID, { signOut: signOutAfterRefresh, store: setCaptureTokens });
+    if (outcome === 'refreshed') captureRetryMs = CAPTURE_RETRY_FIRST_MS;
+    if (outcome === 'kept-network') {
+        clearTimeout(captureRefreshTimer);
+        captureRefreshTimer = setTimeout(refreshCaptureToken, captureRetryMs);
+        captureRetryMs = Math.min(captureRetryMs * 2, CAPTURE_RETRY_MAX_MS);
     }
-    const { status, body } = reply;
-    if (!body.access_token) {
-        if (status === 400 || status === 401) {
-            signOutOfCaptureServer(`refresh ${status} ${body.error || 'no_token'}`);
-        } else {
-            console.error(`[clipwise-recorder] capture token: refresh ${status} ${body.error || 'no_token'}, kept`);
-        }
-        return false;
-    }
-    try {
-        setCaptureTokens({
-            server: tokens.server,
-            access: body.access_token,
-            refresh: body.refresh_token || tokens.refresh,
-            expiresAt: Date.now() + Number(body.expires_in) * 1000,
-        });
-    } catch (err) {
-        signOutOfCaptureServer(`could not store the refreshed token: ${err.name}`);
-        return false;
-    }
-    console.error(`[clipwise-recorder] capture token: refreshed (${status})`);
-    return true;
+    return outcome === 'refreshed';
 }
 
 // The body of POST /captures (server/src/routes/captures.ts captureSchema), from
@@ -3346,6 +3328,22 @@ function scheduleUploadTimer() {
     const due = listUploadQueue().filter((e) => e.state === 'queued').map((e) => Date.parse(e.nextAttemptAt)).filter(Number.isFinite);
     if (due.length === 0) return;
     uploadTimer = setTimeout(() => drainUploadQueue('backoff'), Math.max(0, Math.min(...due) - Date.now()));
+}
+
+// After a sign-in: the queued captures that waited because no one was signed in
+// are made due now with their attempts reset, each logged, and the queue is
+// drained. The others keep their backoff.
+function sendUploadsWaitingOnSignIn() {
+    for (const entry of listUploadQueue()) {
+        if (entry.state !== 'queued' || entry.lastError !== 'not_signed_in') continue;
+        try {
+            writeUploadEntry({ ...entry, attempts: 0, nextAttemptAt: new Date().toISOString() });
+            console.error(`[clipwise-recorder] upload ${entry.stem}: due now (signed in)`);
+        } catch (err) {
+            console.error(`[clipwise-recorder] upload ${entry.stem}: could not make it due: ${err.code || err.name}`);
+        }
+    }
+    drainUploadQueue('sign-in');
 }
 
 // Queues the captures one recovery pass ran to the end (capture-recover.ts writes
@@ -4845,6 +4843,13 @@ app.whenReady().then(async () => {
     // Before the first render, so the tray knows whether to offer sign-in, and
     // whether setup is done (setupCompleted needs the token and the grants).
     loadCaptureTokens();
+    // On wake from sleep, with capture tokens held, the refresh is logged and
+    // rescheduled from the clock: one that came due during sleep runs at once.
+    powerMonitor.on('resume', () => {
+        if (!captureTokens) return;
+        console.error(`[clipwise-recorder] capture token: resumed from sleep, refresh in ${captureRefreshDelay()} ms`);
+        scheduleCaptureRefresh();
+    });
     readPermissions();
     setState('stopped');
     // Whatever was queued before this launch, including a capture whose app quit
