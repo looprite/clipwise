@@ -16,6 +16,7 @@
     "db:checks": "tsx src/db/checks.ts",
     "db:sync": "drizzle-kit push && tsx src/db/checks.ts && tsx src/auth/migrate.ts",
     "db:provision": "tsx src/db/provision.ts",
+    "db:grant-server-login": "tsx src/db/grant-server-login.ts",
     "db:studio": "drizzle-kit studio",
     "auth": "tsx src/auth/cli.ts",
     "auth:migrate": "tsx src/auth/migrate.ts",

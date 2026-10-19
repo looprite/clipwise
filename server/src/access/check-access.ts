@@ -40,6 +40,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
+import { Pool } from "pg";
 import { buildApp } from "../app.js";
 import { authConfigFromEnv, createAuth } from "../auth/auth.js";
 import { addMember, createPasswordLogin, removeMember, requireAccount } from "../auth/members.js";
@@ -1406,10 +1407,15 @@ async function main(): Promise<void> {
 
     // A seeding failure never stops a member being added: forced here by a
     // trigger that refuses a demo recording, on this scratch branch only, and
-    // dropped straight after.
+    // dropped straight after. The trigger needs the tables' owner: when this
+    // check runs as a limited login (SAA-243), the owner's URL is given in
+    // CLIPWISE_CHECK_OWNER_DATABASE_URL and used for these four statements only;
+    // unset, they go through the check's own pool, as before.
+    const ownerUrl = process.env.CLIPWISE_CHECK_OWNER_DATABASE_URL;
+    const ddl = ownerUrl ? new Pool({ connectionString: ownerUrl, connectionTimeoutMillis: 5000 }) : pool;
     const refuseFn = `check_access_refuse_demo_${tag}`;
-    await pool.query(`create function ${refuseFn}() returns trigger language plpgsql as $f$ begin if new.source = 'clipwise-demo' then raise exception 'check-access refuses a demo here'; end if; return new; end $f$`);
-    await pool.query(`create trigger ${refuseFn} before insert on recordings for each row execute function ${refuseFn}()`);
+    await ddl.query(`create function ${refuseFn}() returns trigger language plpgsql as $f$ begin if new.source = 'clipwise-demo' then raise exception 'check-access refuses a demo here'; end if; return new; end $f$`);
+    await ddl.query(`create trigger ${refuseFn} before insert on recordings for each row execute function ${refuseFn}()`);
     const logged: string[] = [];
     const realLog = console.log;
     console.log = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
@@ -1421,8 +1427,9 @@ async function main(): Promise<void> {
       addError = err instanceof Error ? err.message : String(err);
     } finally {
       console.log = realLog;
-      await pool.query(`drop trigger if exists ${refuseFn} on recordings`);
-      await pool.query(`drop function if exists ${refuseFn}()`);
+      await ddl.query(`drop trigger if exists ${refuseFn} on recordings`);
+      await ddl.query(`drop function if exists ${refuseFn}()`);
+      if (ddl !== pool) await ddl.end();
     }
     const failedDemos = failedMember ? await demoRows(failedMember.id) : [];
     const failLine = failedMember ? logged.find((l) => l.includes(`demo: seeding failed for member=${failedMember!.id}`)) : undefined;
