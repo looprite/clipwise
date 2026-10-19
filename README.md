@@ -192,6 +192,29 @@ step is transcription.
   audio is kept and re-transcribes once the engine is present. Each transcript records which engine
   wrote it in its `engine` key, and ingest stores that as the transcript's `provider`.
 
+## Server database login
+
+The server connects as its own login, which can read and write rows in every table in schema
+`public` and do nothing else: no creating, altering, dropping or truncating tables, and no creating
+logins or databases. Everything that changes the schema keeps using the owner.
+
+1. As the owner, create the login with SQL (on Neon, in the SQL editor, not the console's role
+   page, which makes roles administrators):
+
+   ```sql
+   CREATE ROLE clipwise_server LOGIN PASSWORD '<a long generated password>';
+   ```
+
+2. With `DATABASE_URL` set to the owner, run `npm run db:grant-server-login -- clipwise_server` in
+   `server/` (`-- clipwise_server --dry` prints the statements without running them). It grants
+   `SELECT, INSERT, UPDATE, DELETE` on every table in `public`, `USAGE` on `public`, and the same
+   row rights on tables the owner creates later. It refuses a login that doesn't exist or holds
+   more than a login should, never creates one, never touches a password, and can be run again.
+3. Point the server's `DATABASE_URL` (on Fly, `fly secrets set`) at the new login.
+
+`db:push`, `db:sync`, `db:provision`, `db:checks`, `auth:migrate` and the `auth` CLI keep using
+the owner.
+
 ## License
 
 [Apache License 2.0](./LICENSE)
