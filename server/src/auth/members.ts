@@ -58,6 +58,14 @@ export async function addMember(input: { email: string; role: Role; name?: strin
     .from(schema.accountMembers)
     .where(and(eq(schema.accountMembers.accountId, account.id), eq(schema.accountMembers.email, input.email)));
   if (existing) {
+    // Any future re-add path must, in one transaction, delete the member's
+    // oauthRefreshToken, oauthAccessToken and oauthConsent rows and their auth
+    // sessions before clearing removed_at. A refresh grant racing removeMember
+    // can leave a refresh token behind: the grant revokes the old row and inserts
+    // the new one in separate statements, and a DELETE that commits between them
+    // misses the new row. The refresh grant does not check membership, so that
+    // token would work again once removed_at is cleared. Clearing removed_at by
+    // hand SQL is unsafe for the same reason.
     throw new Refusal(
       existing.removedAt ? `${input.email} was removed; re-adding is not supported yet` : `${input.email} is already a member`,
     );

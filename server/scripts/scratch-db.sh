@@ -235,7 +235,10 @@ clean_exec() {
         AUTH_PASSWORD_ENABLED) export AUTH_PASSWORD_ENABLED=true ;;
         # As on hosted (fly.toml): only looprite.ai emails become users, and Google is asked for that domain (hd).
         AUTH_ALLOWED_EMAIL_DOMAIN) export AUTH_ALLOWED_EMAIL_DOMAIN=looprite.ai ;;
-        BETTER_AUTH_URL) export BETTER_AUTH_URL="$AUTH_ORIGIN" ;;
+        # http://localhost:3000 against a Neon scratch branch: auth.ts refuses an
+        # http:// origin on a remote database unless told it is a scratch one.
+        # Set here, with the pin, and nowhere else.
+        BETTER_AUTH_URL) export BETTER_AUTH_URL="$AUTH_ORIGIN" AUTH_ALLOW_HTTP_ORIGIN=true ;;
         VOYAGE_API_KEY) export VOYAGE_API_KEY="$VOYAGE_VALUE" ;;
         ANTHROPIC_API_KEY) export ANTHROPIC_API_KEY="$ANTHROPIC_VALUE" ;;
         # Optional: left unset when dev.env does not have it (see cmd_serve).
