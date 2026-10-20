@@ -56,6 +56,41 @@ export type AuthConfig = {
   accessTokenSeconds: number;
 };
 
+// Starting Better Auth seeds the OAuth resources from BETTER_AUTH_URL into the
+// database, insert-only and silently (oauth-provider seedResources). A local
+// run with an http:// origin against a shared database therefore leaves rows
+// for an origin that database does not serve: http://localhost:3000/mcp was
+// found on main and removed by hand (SAA-243). So an http:// origin is refused
+// unless the database is on this machine, or the caller says it is a scratch
+// database with AUTH_ALLOW_HTTP_ORIGIN=true (scratch-db.sh sets it, and
+// nothing else should). The message names the origin and the database host,
+// never the connection string.
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+
+function databaseHost(url: string | undefined): string {
+  try {
+    return new URL(url ?? "").hostname;
+  } catch {
+    return "";
+  }
+}
+
+function refuseHttpOriginOnRemoteDatabase(baseURL: string, env: NodeJS.ProcessEnv): void {
+  if (!/^http:\/\//i.test(baseURL)) return;
+  const host = databaseHost(env.DATABASE_URL);
+  if (LOOPBACK_HOSTS.has(host.toLowerCase())) return;
+  if (env.AUTH_ALLOW_HTTP_ORIGIN === "true") return;
+  let origin = "http://(unparseable)";
+  try {
+    origin = new URL(baseURL).origin;
+  } catch {}
+  throw new Error(
+    `BETTER_AUTH_URL ${origin} is http://, but the database host ${host || "(none)"} is not this machine: ` +
+      "starting sign-in would seed OAuth resources for that origin into a shared database. " +
+      "Use the instance's https:// origin, or set AUTH_ALLOW_HTTP_ORIGIN=true for a scratch database.",
+  );
+}
+
 export function authConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AuthConfig {
   const secret = env.BETTER_AUTH_SECRET ?? "";
   if (secret.length < 32) {
@@ -63,6 +98,7 @@ export function authConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AuthCon
   }
   const baseURL = (env.BETTER_AUTH_URL ?? "").replace(/\/$/, "");
   if (!baseURL) throw new Error("BETTER_AUTH_URL is required (the public origin of this instance)");
+  refuseHttpOriginOnRemoteDatabase(baseURL, env);
   const googleClientId = env.GOOGLE_CLIENT_ID?.trim() ?? "";
   const googleClientSecret = env.GOOGLE_CLIENT_SECRET?.trim() ?? "";
   return {
