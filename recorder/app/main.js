@@ -29,6 +29,7 @@ const { stopMessageFor } = require('./voice-naming-wait.js');
 // Which meeting the tray's "Save transcript" item acts on (SAA-199).
 const {
     lastMeeting, classifyCapture, stemTimeMs, isTrashed, writeCalendarMatchFile, jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
+    failureResolved,
 } = require('./last-meeting.js');
 // The recent-meetings window's rows (SAA-217).
 const { listMeetings, listTrashed } = require('./meetings.js');
@@ -2620,10 +2621,6 @@ function startPipeline(stem) {
 // pipeline run failing.
 let recoveryProc = null;
 
-// Only these mean the stem is finished right now — see capture-recover.ts's
-// Attempts.last_action, which is what this is read against.
-const RECOVERY_COMPLETE_ACTIONS = new Set(['complete', 'recovered']);
-
 function startRecovery(reason, opts = {}) {
     // One at a time. The pass is sequential and can take minutes on a backlog;
     // a second one would race it for the same captures.
@@ -2684,26 +2681,15 @@ function startRecovery(reason, opts = {}) {
         queueRecoveredCaptures(triggeredAtMs);
         drainUploadQueue('recovery exit');
         // Read after the process is gone, not during — recovery.ts writes
-        // recovery-<stem>.json before this exits, so there is no race. Only
-        // withdraw a failure that is still this exact stem: Retry, a new
-        // capture, or a later recovery pass could have replaced `pipeline`
-        // with something else in the meantime.
+        // recovery-<stem>.json and the capture's record before this exits, so
+        // there is no race. Only withdraw a failure that is still this exact
+        // stem: Retry, a new capture, or a later recovery pass could have
+        // replaced `pipeline` with something else in the meantime. Withdrawn
+        // when the record shows every step finished, or this pass reports the
+        // capture complete (last-meeting.js failureResolved, SAA-238).
         if (opts.watchStem && pipeline && pipeline.stem === opts.watchStem && pipeline.state === 'failed') {
-            const recoveryFile = path.join(OUTDIR, `recovery-${opts.watchStem}.json`);
-            let record = null;
-            try {
-                record = JSON.parse(fs.readFileSync(recoveryFile, 'utf8'));
-            } catch {}
-            const actionAtMs = record && record.last_action_at ? Date.parse(record.last_action_at) : NaN;
-            // Stale-read guard: last_action must have been written by THIS
-            // pass, not left over from an earlier one this pass never got to
-            // (e.g. it aborted in loadDbState before reaching this stem).
-            if (
-                record &&
-                RECOVERY_COMPLETE_ACTIONS.has(record.last_action) &&
-                Number.isFinite(actionAtMs) &&
-                actionAtMs > triggeredAtMs
-            ) {
+            if (failureResolved(OUTDIR, opts.watchStem, triggeredAtMs)) {
+                console.error(`[clipwise-recorder] recovery: pipeline failure withdrawn (${opts.watchStem})`);
                 pipeline = null;
                 renderTray();
             }

@@ -378,6 +378,42 @@ check('without the processing capture, the tray item is the newest ready meeting
     fs.rmSync(c5, { recursive: true, force: true });
 }
 
+// ---- the tray's pipeline failure after a recovery pass (SAA-238) --------------
+// main.js startRecovery, when the pass it started for a failed capture exits,
+// withdraws the tray's failure if failureResolved says so. T is when the pass
+// was triggered.
+//   OK  the capture's record shows every step ok, and there is no recovery file
+//       (the pass found nothing to re-run)
+//   RR  recovery re-ran it: its recovery file says "recovered" after T, and its
+//       record shows every step ok
+//   BAD its record still shows a failed step, and there is no recovery file
+//   NO  its record has no steps, and there is no recovery file
+{
+    const lm = require('./last-meeting.js');
+    const c6 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-meetings-recovery-check-'));
+    const cw = (name, doc) => fs.writeFileSync(path.join(c6, name), JSON.stringify(doc));
+    const T = NOW - 60e3;
+    const record = (stem, steps) => cw(`pipeline-${stem}.json`, { pipeline: 'capture', updated_at: new Date(T + 30e3).toISOString(), steps });
+    const allOk = { transcribe: { state: 'ok' }, classify: { state: 'ok' }, diarize: { state: 'ok' } };
+    const OK = '2026-03-06T10-00-00Z', RR = '2026-03-06T11-00-00Z', BAD = '2026-03-06T12-00-00Z', NO = '2026-03-06T09-00-00Z';
+    record(NO, {});
+    record(OK, allOk);
+    record(RR, allOk);
+    cw(`recovery-${RR}.json`, { last_action: 'recovered', last_action_at: new Date(T + 30e3).toISOString() });
+    record(BAD, { transcribe: { state: 'ok' }, classify: { state: 'ok' }, diarize: { state: 'failed' } });
+    const has = typeof lm.failureResolved === 'function';
+    const resolved = (stem) => (has ? lm.failureResolved(c6, stem, T) : '(no failureResolved in last-meeting.js)');
+    check('SAA-238: a failed stem whose record shows every step ok, with no recovery file, clears on the next pass',
+        resolved(OK) === true, String(resolved(OK)));
+    check('control: a stem recovery actually re-ran ("recovered" after the pass began) still clears',
+        resolved(RR) === true, String(resolved(RR)));
+    check('control: a stem whose record still shows a failed step, with no recovery file, does not clear',
+        resolved(BAD) === false, String(resolved(BAD)));
+    check('control: a stem whose record has no steps, with no recovery file, does not clear',
+        resolved(NO) === false, String(resolved(NO)));
+    fs.rmSync(c6, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);
