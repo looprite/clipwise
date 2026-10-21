@@ -10,6 +10,9 @@
 //   tsx src/auth/cli.ts register-recorder
 //   tsx src/auth/cli.ts clear-google-tokens [--apply]
 //
+// list-members prints each member's email, role and state, and under it every
+// recording-notice version they acknowledged, or "none".
+//
 // register-recorder creates (or repairs) the recorder's OAuth client, the only
 // client that can obtain a capture token (SAA-244). It is a step for every
 // instance, after the server has started once (so the capture resource exists).
@@ -28,7 +31,7 @@
 // Exit code 0 on success, 1 on a refusal or failure; messages say which.
 
 import { parseArgs } from "node:util";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { slugify } from "../lib/slug.js";
 import {
@@ -110,6 +113,9 @@ async function bootstrapAdmin(values: {
   }
 }
 
+// Each member, and under each the recording-notice versions they acknowledged
+// (SAA-227 part I): when the Mac recorded it and when the server learned of it,
+// read from notice_acknowledgements. "none" when there is no row.
 async function listMembers(): Promise<void> {
   const account = await requireAccount();
   const rows = await db
@@ -117,11 +123,29 @@ async function listMembers(): Promise<void> {
     .from(schema.accountMembers)
     .where(eq(schema.accountMembers.accountId, account.id))
     .orderBy(asc(schema.accountMembers.createdAt));
+  const acks =
+    rows.length === 0
+      ? []
+      : await db
+          .select()
+          .from(schema.noticeAcknowledgements)
+          .where(inArray(schema.noticeAcknowledgements.memberId, rows.map((m) => m.id)))
+          .orderBy(asc(schema.noticeAcknowledgements.noticeVersion));
   say(`${account.name} (${account.slug}) — ${rows.length} member(s)`);
   for (const m of rows) {
     const state = m.removedAt ? "removed" : m.joinedAt ? "active" : "invited (not signed in yet)";
     process.stdout.write(`  ${m.email.padEnd(36)} ${m.role.padEnd(7)} ${state}\n`);
+    const own = acks.filter((a) => a.memberId === m.id);
+    if (own.length === 0) process.stdout.write("      notice: none\n");
+    for (const a of own) {
+      process.stdout.write(
+        `      notice v${a.noticeVersion}: acknowledged ${a.acknowledgedAt.toISOString()} on the Mac, recorded ${a.recordedAt.toISOString()} by the server\n`,
+      );
+    }
   }
+  // The server records an acknowledgement from the capture that carries it
+  // (routes/captures.ts), and from nothing else.
+  say(`notice: the server learns of an acknowledgement only from a capture that carries it, so "none" can mean the member agreed on their Mac but no capture of theirs has reached the server since`);
 }
 
 async function main(): Promise<void> {
