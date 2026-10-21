@@ -84,14 +84,18 @@ function calendarTitle(dir, stem) {
 // while its pipeline was recently active, like a pre-cutover capture.
 const SERVER_CAPTURE_FAILED_JOBS = new Set(['failed', 'gone', 'none']);
 
+// Whether a pipeline record shows every step finished: ok, or skipped.
+function stepsFinished(pipeline) {
+    return Object.values(pipeline.steps || {}).every((s) => s && (s.state === 'ok' || s.state === 'skipped'));
+}
+
 function classifyServerCapture(dir, stem, pipeline, title, now, uploadQueueDir) {
     const steps = pipeline.steps || {};
     const updatedMs = Date.parse(pipeline.updated_at || '');
     const recentlyActive = Number.isFinite(updatedMs) && now - updatedMs < PENDING_WITH_PIPELINE_MS;
     // The classifier refused the capture: a second run refuses it again.
     if (steps.classify && steps.classify.state === 'failed') return { state: 'failed', stem, title };
-    const settled = Object.values(steps).every((s) => s && (s.state === 'ok' || s.state === 'skipped'));
-    if (!settled) return { state: recentlyActive ? 'pending' : 'failed', stem, title };
+    if (!stepsFinished(pipeline)) return { state: recentlyActive ? 'pending' : 'failed', stem, title };
     const lines = transcriptLineCount(path.join(dir, `transcript-${stem}.json`));
     if (!(lines && lines > 0)) return { state: 'nospeech', stem, title };
     const entry = uploadQueueDir ? readJson(path.join(uploadQueueDir, `${stem}.json`)) : null;
@@ -156,6 +160,27 @@ function classifyCapture(dir, stem, now = Date.now(), opts = {}) {
         return { state: 'pending', stem, title };
     }
     return { state: 'failed', stem, title };
+}
+
+// --- the tray's pipeline failure, after a recovery pass (main.js startRecovery) --
+//
+// Whether a capture whose pipeline failed is no longer failed, read once the
+// recovery pass started for it has exited. Either its record now shows every
+// step finished (ok or skipped): whatever failed was finished since, by that
+// pass or before it, whether or not the pass left a recovery record (SAA-238);
+// a record with no steps has finished nothing.
+// Or the pass reports it complete: its recovery-<stem>.json says "complete" or
+// "recovered" (capture-recover.ts's Attempts.last_action), written after
+// `triggeredAtMs`, when the pass began, so a record an earlier pass left behind
+// is not read as this one clearing it (SAA-183).
+const RECOVERY_COMPLETE_ACTIONS = new Set(['complete', 'recovered']);
+
+function failureResolved(dir, stem, triggeredAtMs) {
+    const pipeline = readJson(path.join(dir, `pipeline-${stem}.json`));
+    if (pipeline && Object.keys(pipeline.steps || {}).length > 0 && stepsFinished(pipeline)) return true;
+    const record = readJson(path.join(dir, `recovery-${stem}.json`));
+    const actionAtMs = record && record.last_action_at ? Date.parse(record.last_action_at) : NaN;
+    return !!record && RECOVERY_COMPLETE_ACTIONS.has(record.last_action) && Number.isFinite(actionAtMs) && actionAtMs > triggeredAtMs;
 }
 
 // A capture in the trash (SAA-154) has a trashed-<stem>.json marker beside its
@@ -317,4 +342,5 @@ function writeCalendarMatchFile(dir, stem, calendar) {
 module.exports = {
     lastMeeting, classifyCapture, captureStems, isTrashed, trashedStems, calendarTitle, stemTimeMs, readJson,
     jobStateOf, matchPendingOf, writeCalendarMatchFile, jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
+    failureResolved,
 };
