@@ -4860,11 +4860,13 @@ app.whenReady().then(async () => {
     // On wake from sleep, with capture tokens held, the refresh is logged and
     // rescheduled from the clock: one that came due during sleep runs at once.
     powerMonitor.on('resume', () => {
-        askJobsAgain('resume');
         if (!captureTokens) return;
         console.error(`[clipwise-recorder] capture token: resumed from sleep, refresh in ${captureRefreshDelay()} ms`);
         scheduleCaptureRefresh();
     });
+    // And every sent capture not known to be finished, stale ones included, is
+    // asked about again (SAA-183).
+    powerMonitor.on('resume', () => askJobsAgain('resume'));
     readPermissions();
     setState('stopped');
     // Whatever was queued before this launch, including a capture whose app quit
