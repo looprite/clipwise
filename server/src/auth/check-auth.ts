@@ -2,8 +2,9 @@
 // against a real database. Covers password sign-in, closed sign-up, the
 // member gate, removal revoking sessions, rate limiting (including a client
 // that picks its own forwarding header), anonymous client registration, the
-// OAuth discovery document, and connecting a member's own calendar from their
-// signed-in session (SAA-227 part F, against the real app).
+// OAuth discovery document, connecting a member's own calendar from their
+// signed-in session (SAA-227 part F, against the real app), and the CLI's
+// list-members showing who acknowledged the recording notice.
 //
 // WRITES to the database it is pointed at (throwaway members, users and OAuth
 // clients, all tagged and removed at the end), so it refuses to run unless the
@@ -22,6 +23,7 @@
 // with DATABASE_URL, BETTER_AUTH_SECRET, BETTER_AUTH_URL and
 // AUTH_PASSWORD_ENABLED=true set (see .env.example).
 
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import express from "express";
@@ -54,6 +56,20 @@ function record(ok: boolean, name: string, detail = ""): void {
   total++;
   if (!ok) failed++;
   process.stdout.write(`${ok ? "ok  " : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}\n`);
+}
+
+// src/auth/cli.ts as its own process, with this process's environment (the
+// scratch settings scratch-db.sh gave it), as check-boot.ts runs src/index.ts.
+function runCli(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "src/auth/cli.ts", ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
 }
 
 async function listen(app: express.Express): Promise<{ base: string; close: () => Promise<void> }> {
@@ -503,6 +519,70 @@ async function main(): Promise<void> {
       record(lastAdminRefused, "the last admin cannot be removed");
     } else {
       process.stdout.write(`skip the last-admin case (${admins.length} active admins in this database)\n`);
+    }
+
+    // --- list-members: who acknowledged the recording notice ----------------
+    // The real CLI, run as the admin runs it. Three members with fixture rows in
+    // notice_acknowledgements: versions 1 and 2, version 1 only (then removed, so
+    // a removed member's line is still there), and none.
+    {
+      const both = emailFor("ack-both");
+      const one = emailFor("ack-one");
+      const none = emailFor("ack-none");
+      const ids: Record<string, string> = {};
+      for (const email of [both, one, none]) ids[email] = (await addMember({ email, role: "member", name: null })).id;
+      const at = (s: string) => new Date(s);
+      const fixtures = [
+        { memberId: ids[both], noticeVersion: 1, acknowledgedAt: at("2026-10-01T09:00:00.000Z"), recordedAt: at("2026-10-01T09:05:30.000Z") },
+        { memberId: ids[both], noticeVersion: 2, acknowledgedAt: at("2026-10-15T14:20:00.000Z"), recordedAt: at("2026-10-16T08:00:01.000Z") },
+        { memberId: ids[one], noticeVersion: 1, acknowledgedAt: at("2026-10-03T11:11:11.000Z"), recordedAt: at("2026-10-04T12:12:12.000Z") },
+      ];
+      await db.insert(schema.noticeAcknowledgements).values(fixtures);
+      await removeMember(one);
+
+      const out = await runCli(["list-members"]);
+      const lines = out.stdout.split("\n");
+      process.stdout.write(`list-members exit ${out.code}, ${lines.length} lines\n`);
+      // The lines under a member's own line, up to the next member line.
+      const under = (email: string): string[] | null => {
+        const i = lines.findIndex((l) => l.startsWith(`  ${email} `));
+        if (i < 0) return null;
+        const block: string[] = [];
+        for (let j = i + 1; j < lines.length && lines[j].startsWith("      "); j++) block.push(lines[j]);
+        return block;
+      };
+      const ackLine = (f: (typeof fixtures)[number]) =>
+        `      notice v${f.noticeVersion}: acknowledged ${f.acknowledgedAt.toISOString()} on the Mac, recorded ${f.recordedAt.toISOString()} by the server`;
+      const expect: Array<[string, string, string[]]> = [
+        [both, "versions 1 and 2", [ackLine(fixtures[0]), ackLine(fixtures[1])]],
+        [one, "version 1", [ackLine(fixtures[2])]],
+        [none, "none", ["      notice: none"]],
+      ];
+      record(out.code === 0, "list-members runs and exits 0", `exit ${out.code}; stderr ${out.stderr.trim().slice(0, 200)}`);
+      for (const [email, what, want] of expect) {
+        const got = under(email);
+        record(
+          JSON.stringify(got) === JSON.stringify(want),
+          `list-members: the member with ${what} acknowledged shows exactly that, with acknowledged_at and recorded_at`,
+          `got ${JSON.stringify(got)}`,
+        );
+      }
+      const oneLine = lines.find((l) => l.startsWith(`  ${one} `)) ?? "";
+      record(oneLine.trimEnd().endsWith(" removed"), "list-members: the removed member is still listed, with its state", JSON.stringify(oneLine));
+      const limit =
+        'auth: notice: the server learns of an acknowledgement only from a capture that carries it, so "none" can mean the member agreed on their Mac but no capture of theirs has reached the server since';
+      record(lines.filter((l) => l === limit).length === 1, "list-members: one line under the list states that the server learns of an acknowledgement only from a capture");
+      // No email beyond the member lines: one line with an @ per member.
+      const [{ n }] = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.accountMembers)
+        .where(sql`${schema.accountMembers.accountId} = ${account.id}`);
+      const withAt = lines.filter((l) => l.includes("@"));
+      record(
+        withAt.length === n && withAt.every((l) => /^ {2}\S+@\S+ /.test(l)),
+        "list-members: the only lines with an email are the member lines, one per member",
+        `${withAt.length} lines with @, ${n} members`,
+      );
     }
 
     // --- rate limiting ------------------------------------------------------
