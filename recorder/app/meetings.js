@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const { classifyCapture, captureStems, trashedStems, calendarTitle, stemTimeMs, readJson } = require('./last-meeting.js');
+const { namingSettled } = require('./identity-answer.js');
 
 const DAYS = 7;
 
@@ -84,6 +85,7 @@ function listMeetings(dir, now = Date.now(), days = DAYS, opts = {}) {
         const participants = participantsFor(dir, stem);
         const hasVoices = fs.existsSync(path.join(dir, `voices-${stem}.json`));
         const named = fs.existsSync(path.join(dir, `voice-names-${stem}.json`));
+        const settled = namingSettled(dir, stem);
         const row = {
             stem,
             startedAtMs,
@@ -98,10 +100,12 @@ function listMeetings(dir, now = Date.now(), days = DAYS, opts = {}) {
             // Anything finished or given up on can go to the trash; a capture
             // still recording or processing cannot (SAA-154).
             canTrash: c.state !== 'pending',
-            // Naming data exists only for a call diarize split into voices.
-            canFix: hasVoices,
+            // Naming data exists only for a call diarize split into voices. A
+            // one-guest call has nothing to name unless its voices were named
+            // anyway (namingSettled, SAA-255).
+            canFix: hasVoices && (named || !settled),
             hasNames: named,
-            namingPending: hasVoices && !named,
+            namingPending: hasVoices && !settled,
         };
         row.line = identifyingLine(row);
         rows.push(row);
