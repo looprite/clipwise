@@ -6,8 +6,10 @@
 // own: anyone else's, a malformed id and one that is not there all get the same
 // 404 capture_not_found.
 //
-// Trash state on the server is recordings.trashed_at, as pipeline/trash.ts
-// writes it. The files on the Mac are the recorder's business.
+// Trash state is recordings.trashed_at, and these routes own it (SAA-227 part L
+// decision 8): the Mac's trashed-<stem>.json marker and its files follow what
+// they answer (recorder/app/main.js runTrashOnServer). The files on the Mac are
+// the recorder's business.
 
 import { Router, type Request } from "express";
 import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
@@ -87,9 +89,9 @@ captureScopeRouter.post(
   }),
 );
 
-// Only from the trash, as pipeline/trash.ts: the row goes only while it is still
-// trashed, so a restore that lands first wins. Its moments, segments, speakers
-// and jobs go with it.
+// Only from the trash: the row goes only while it is still trashed, so a restore
+// that lands first wins. Every row that references it goes with it, by the
+// foreign keys' ON DELETE CASCADE (check-access 18f finds them all).
 captureScopeRouter.delete(
   "/captures/:captureId",
   asyncHandler(async (req, res) => {

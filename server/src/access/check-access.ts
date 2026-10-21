@@ -36,6 +36,10 @@
 //       the dynamic-registration assertion about the capture scope is run
 //       against a provider built without clientRegistrationDefaultScopes
 //       (createAuth's second argument): it fails.
+//   CLIPWISE_CHECK_CONTROL=jobs-edge-dropped
+//       18f's column check is given the foreign keys found less jobs.recording_id,
+//       as if that foreign key had not been found: the column check fails naming
+//       jobs.recording_id.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -48,13 +52,16 @@ import { ensureRecorderClient, RECORDER_CLIENT_ID, RECORDER_REDIRECT_URI } from 
 import { CAPTURE_SCOPE, MCP_SCOPES } from "../auth/scopes.js";
 import { verifyAccessToken } from "../auth/tokens.js";
 import { db, pool, schema } from "../db/index.js";
+import { runExtraction } from "../extract/extract.js";
+import { makeStubEmbedder, makeStubModel } from "../extract/stub-model.js";
+import { applyCalendarMatch } from "../ingest/calendar-match.js";
 import { encrypt } from "../lib/crypto.js";
 import { resolveCalendarConnection } from "../pipeline/match-calendar.js";
 import { MCP_TOOLS, ROUTES } from "./classification.js";
 import { listRoutes } from "./route-list.js";
 
 const CONTROL = process.env.CLIPWISE_CHECK_CONTROL ?? "";
-if (CONTROL !== "" && CONTROL !== "requires-dropped" && CONTROL !== "no-registration-defaults") {
+if (CONTROL !== "" && CONTROL !== "requires-dropped" && CONTROL !== "no-registration-defaults" && CONTROL !== "jobs-edge-dropped") {
   process.stderr.write(`check-access: unknown CLIPWISE_CHECK_CONTROL ${JSON.stringify(CONTROL)}\n`);
   process.exit(2);
 }
@@ -973,6 +980,182 @@ async function main(): Promise<void> {
         "captures 18e: from the trash, delete removes the recording and its jobs; a second delete is 404",
         `${del.status} rows=${left} jobs=${jobsLeft} again=${again.status}`,
       );
+    }
+
+    // ---- deletion reaches every table (SAA-243 item 4) ----------------------
+    // 18f. "A deletes a recording, and a query across every table finds nothing
+    // for it. Before the delete, the same query finds it." The tables are found,
+    // not listed: every foreign key in pg_constraint that points at recordings, or
+    // at a table found that way, so a table added later is covered without editing
+    // this. Two captures of A's get rows in each through the code that writes them:
+    // POST /captures with an identity answer (transcript, speakers, segments,
+    // attendees, the extract job), extraction with the stub model and embedder
+    // (moments with an embedding), the calendar match's apply step (invitees).
+    // Nothing writes clips or shares yet, so they are inserted here. One capture is
+    // deleted as the recorder deletes it; the other is the control.
+    {
+      type Edge = { table: string; column: string; parent: string; parentColumn: string; onDelete: string; width: number };
+      const ON_DELETE: Record<string, string> = { a: "no action", r: "restrict", c: "cascade", n: "set null", d: "set default" };
+      const fks = (
+        await pool.query(
+          `select c.conrelid::regclass::text as table, a.attname as column, c.confrelid::regclass::text as parent,
+                  pa.attname as parent_column, c.confdeltype as on_delete, array_length(c.conkey, 1) as width
+           from pg_constraint c
+           join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+           join pg_attribute pa on pa.attrelid = c.confrelid and pa.attnum = c.confkey[1]
+           where c.contype = 'f' and c.connamespace = 'public'::regnamespace`,
+        )
+      ).rows.map((r): Edge => ({ table: r.table, column: r.column, parent: r.parent, parentColumn: r.parent_column, onDelete: ON_DELETE[r.on_delete] ?? r.on_delete, width: r.width }));
+      const tables = ["recordings"];
+      const edges: Edge[] = [];
+      for (let grew = true; grew; ) {
+        grew = false;
+        for (const e of fks) {
+          if (!tables.includes(e.parent) || edges.some((x) => x.table === e.table && x.column === e.column)) continue;
+          edges.push(e);
+          if (!tables.includes(e.table)) tables.push(e.table);
+          grew = true;
+        }
+      }
+      const edgeName = (e: Edge) => `${e.table}.${e.column} → ${e.parent} (${e.onDelete})`;
+      process.stdout.write(`captures 18f: tables found: ${tables.join(", ")}\n`);
+      for (const e of edges) process.stdout.write(`captures 18f:   ${edgeName(e)}\n`);
+      const pkOf: Record<string, string> = {};
+      for (const t of tables) {
+        const pk = (await pool.query(`select a.attname from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any(c.conkey) where c.contype = 'p' and c.conrelid = $1::regclass`, [t])).rows;
+        pkOf[t] = pk.length === 1 ? pk[0].attname : "";
+      }
+      record(
+        edges.length > 0 && edges.every((e) => e.width === 1) && tables.every((t) => pkOf[t] !== ""),
+        `captures 18f: ${edges.length} foreign keys into recordings (directly or through a table that has one) are found in pg_constraint, across ${tables.length - 1} tables, each a single column, each table with a one-column primary key`,
+        `${edges.filter((e) => e.width !== 1).map(edgeName).join("; ")} ${tables.filter((t) => pkOf[t] === "").join(", ")}`,
+      );
+      // A column named for a recording or a capture that no foreign key found
+      // here covers: rows a delete would leave behind without anything noticing.
+      const named = (
+        await pool.query(
+          `select table_name as table, column_name as column from information_schema.columns
+           where table_schema = 'public' and (column_name ilike '%recording_id%' or column_name ilike '%capture_id%')
+           order by 1, 2`,
+        )
+      ).rows as Array<{ table: string; column: string }>;
+      let covering = edges;
+      if (CONTROL === "jobs-edge-dropped") {
+        covering = edges.filter((e) => !(e.table === "jobs" && e.column === "recording_id"));
+        process.stdout.write(`control: jobs-edge-dropped — the column check is given ${covering.length} of the ${edges.length} foreign keys found, without jobs.recording_id\n`);
+      }
+      const uncovered = named.filter((c) => !covering.some((e) => e.table.replace(/"/g, "") === c.table && e.column === c.column));
+      process.stdout.write(`captures 18f: columns named recording_id or capture_id: ${named.map((c) => `${c.table}.${c.column}`).join(", ")}\n`);
+      record(
+        named.length > 0 && uncovered.length === 0,
+        `captures 18f: every column in the public schema whose name contains recording_id or capture_id (${named.length}) is the source of a foreign key found above`,
+        `not covered: ${uncovered.map((c) => `${c.table}.${c.column}`).join(", ")}`,
+      );
+
+      // The rows of `table` that belong to the recording $1: through any of its
+      // foreign keys into a table that belongs to it, back to recordings.
+      const where = (table: string, seen: string[]): string =>
+        table === "recordings"
+          ? `"id" = $1`
+          : edges
+              .filter((e) => e.table === table && e.parent !== table && !seen.includes(e.parent))
+              .map((e) => `"${e.column}" in (select "${e.parentColumn}" from ${e.parent} where ${where(e.parent, [...seen, table])})`)
+              .join(" or ");
+      type Found = { byEdge: Record<string, number>; ids: Record<string, string[]>; embedded: number };
+      const find = async (rid: string): Promise<Found> => {
+        const byEdge: Record<string, number> = {};
+        for (const e of edges) {
+          const q = `select count(*)::int as n from ${e.table} where "${e.column}" in (select "${e.parentColumn}" from ${e.parent} where ${where(e.parent, [e.table])})`;
+          byEdge[edgeName(e)] = (await pool.query(q, [rid])).rows[0].n;
+        }
+        const ids: Record<string, string[]> = {};
+        for (const t of tables) {
+          ids[t] = (await pool.query(`select "${pkOf[t]}"::text as id from ${t} where ${where(t, [])} order by 1`, [rid])).rows.map((r) => r.id);
+        }
+        const embedded = (await pool.query(`select count(*)::int as n from moments where recording_id = $1 and embedding is not null`, [rid])).rows[0].n;
+        return { byEdge, ids, embedded };
+      };
+      const stillThere = async (ids: Record<string, string[]>): Promise<Record<string, number>> => {
+        const left: Record<string, number> = {};
+        for (const t of tables) left[t] = (await pool.query(`select count(*)::int as n from ${t} where "${pkOf[t]}"::text = any($1)`, [ids[t]])).rows[0].n;
+        return left;
+      };
+
+      const embedder = makeStubEmbedder();
+      const fillCapture = async (label: string) => {
+        const p = capPayload({ identity: { identity_version: 2, answered_at: "2026-10-10T10:05:00.000Z", self: { name: `Alice ${tag}` }, guests: [{ name: `Guest ${label} ${tag}` }], scope: "work" } });
+        const posted = await capPost(A, p);
+        const rid = posted.json?.recordingId as string;
+        const stub = makeStubModel({ segmentCount: CAP_SEGS.length, phrase: `deletion${tag} ${label}` });
+        await runExtraction(rid, { client: stub.client, embedder });
+        await applyCalendarMatch(db, acc, rid, p.stem, {
+          event_id: `check-access-${tag}-${label}`,
+          title: null,
+          recurring_event_id: null,
+          invitees: [{ email: `invitee-${label}-${tag}@clipwise.test`, name: `Invitee ${label}`, response_status: "accepted" }],
+          offset_ms: 0,
+        });
+        const [moment] = (await pool.query(`select id from moments where recording_id = $1 order by created_at limit 1`, [rid])).rows;
+        const [clip] = await db.insert(schema.clips).values({ accountId: acc, recordingId: rid, momentId: moment?.id ?? null, title: `deletion${tag} clip ${label}`, startSec: 0, endSec: 1 }).returning({ id: schema.clips.id });
+        await db.insert(schema.shares).values([
+          { accountId: acc, recordingId: rid, token: `check-access-${tag}-${label}-recording` },
+          { accountId: acc, clipId: clip.id, token: `check-access-${tag}-${label}-clip` },
+        ]);
+        return { p, rid, status: posted.status };
+      };
+      const target = await fillCapture("target");
+      const control = await fillCapture("control");
+      const empty = (f: Found) => Object.entries(f.byEdge).filter(([, n]) => n === 0).map(([k]) => k);
+      const counts = (f: Found) => Object.entries(f.byEdge).map(([k, n]) => `${k.split(" ")[0]}=${n}`).join(" ");
+
+      const peopleCount = async () => (await pool.query(`select count(*)::int as n from people where account_id = $1`, [acc])).rows[0].n as number;
+      const before = await find(target.rid);
+      const controlBefore = await find(control.rid);
+      const peopleBefore = await peopleCount();
+      process.stdout.write(`captures 18f: before, the capture: ${counts(before)}; moments with an embedding ${before.embedded}\n`);
+      process.stdout.write(`captures 18f: before, the control: ${counts(controlBefore)}; moments with an embedding ${controlBefore.embedded}\n`);
+      record(
+        target.status === 201 && empty(before).length === 0 && before.embedded > 0 && before.ids.recordings.length === 1,
+        "captures 18f: before the delete, every foreign key found has at least one row for the capture, and its moments carry an embedding",
+        `${target.status}; none through: ${empty(before).join("; ")}; embedded ${before.embedded}`,
+      );
+      record(
+        control.status === 201 && empty(controlBefore).length === 0 && controlBefore.embedded > 0,
+        "captures 18f: the control capture has the same: at least one row through every foreign key found, and moments with an embedding",
+        `${control.status}; none through: ${empty(controlBefore).join("; ")}; embedded ${controlBefore.embedded}`,
+      );
+
+      const own = (method: string, suffix: string, json?: unknown) => http(method, `/captures/${target.p.captureId}${suffix}`, { token: capToken(A), json });
+      const trash = await own("POST", "/trash", {});
+      const del = await own("DELETE", "");
+      record(trash.status === 200 && del.status === 200 && del.json?.deleted === true, "captures 18f: the owner trashes the capture and deletes it from the trash through the routes, as the recorder does", `trash ${trash.status}, delete ${del.status}`);
+
+      const after = await find(target.rid);
+      const left = await stillThere(before.ids);
+      const leftover = Object.entries(left).filter(([, n]) => n > 0).map(([t, n]) => `${t}=${n}`);
+      process.stdout.write(`captures 18f: after, rows found before that are still there: ${Object.entries(left).map(([t, n]) => `${t}=${n}`).join(" ")}\n`);
+      record(
+        leftover.length === 0 && Object.values(after.byEdge).every((n) => n === 0) && after.ids.recordings.length === 0,
+        "captures 18f: after the delete, none of the rows found before is left in any table, every foreign key finds nothing for the capture, and the recordings row is gone",
+        `left: ${leftover.join(" ")}; through: ${counts(after)}`,
+      );
+      const controlAfter = await find(control.rid);
+      record(
+        JSON.stringify(controlAfter) === JSON.stringify(controlBefore),
+        "captures 18f: the control capture's rows are unchanged, table by table and row by row",
+        `before ${counts(controlBefore)}; after ${counts(controlAfter)}`,
+      );
+      const peopleAfter = await peopleCount();
+      record(
+        peopleAfter === peopleBefore,
+        "captures 18f: people, the account's contact list and outside item 4, has the same number of rows after the delete as before",
+        `${peopleBefore} → ${peopleAfter}`,
+      );
+
+      // The control goes the same way, so nothing it holds reaches the checks below.
+      const ctl = (method: string, suffix: string) => http(method, `/captures/${control.p.captureId}${suffix}`, { token: capToken(A), json: method === "POST" ? {} : undefined });
+      await ctl("POST", "/trash");
+      await ctl("DELETE", "");
     }
 
     // ---- the recording-notice acknowledgement (SAA-227 part I) ---------------

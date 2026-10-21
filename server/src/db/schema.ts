@@ -208,9 +208,10 @@ export const recordings = pgTable(
     scope: varchar("scope", { length: 16 }),
     // Trash (SAA-154): when the recording was moved to the trash, null while
     // it is live. Every read path Claude's tools use excludes a non-null
-    // value. The Mac keeps a matching trashed-<stem>.json marker beside the
-    // capture's files; the marker is the intent and recovery reconciles this
-    // column to it (see pipeline/trash.ts).
+    // value. The server owns it (SAA-227 part L decision 8): routes/
+    // capture-scope.ts sets and clears it and deletes from the trash, and the
+    // Mac's trashed-<stem>.json marker beside the capture's files follows what
+    // the server answered (recorder/app/main.js runTrashOnServer).
     trashedAt: timestamp("trashed_at", { withTimezone: true }),
     // Who recorded it, and who may see it. A third axis, deliberately separate
     // from both scope above (personal vs work) and meeting_kind: a work call can
