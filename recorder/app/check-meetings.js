@@ -307,6 +307,77 @@ check('without the processing capture, the tray item is the newest ready meeting
     fs.rmSync(c4, { recursive: true, force: true });
 }
 
+// ---- a sent capture whose jobs went unconfirmed (SAA-183) ---------------------
+// "stale" is a status unknown, not a failure: the server was not heard from in
+// time, and is asked again. A capture whose jobs failed, or that the server
+// refused (409), still says it couldn't be processed.
+//   S   every step ok, transcript lines, sent, jobs stale
+//   JF  the same, jobs failed on the server
+//   R   the same, refused by the server (409)
+{
+    const lm = require('./last-meeting.js');
+    const c5 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-meetings-stale-check-'));
+    const Q = path.join(c5, 'upload-queue');
+    fs.mkdirSync(Q);
+    const cw = (name, doc) => fs.writeFileSync(path.join(c5, name), JSON.stringify(doc));
+    const sentCapture = (stem, entry) => {
+        cw(`manifest-${stem}.json`, { started_at: stem, tracks: [{ duration_s: 1800 }] });
+        cw(`pipeline-${stem}.json`, { pipeline: 'capture', updated_at: new Date(NOW - 3600e3).toISOString(), steps: { transcribe: { state: 'ok' }, classify: { state: 'ok' }, diarize: { state: 'ok' } } });
+        cw(`transcript-${stem}.json`, { segments: [{}, {}, {}] });
+        fs.writeFileSync(path.join(Q, `${stem}.json`), JSON.stringify({ stem, sentAt: new Date(NOW - 3000e3).toISOString(), ...entry }));
+    };
+    const S = '2026-03-06T13-00-00Z', JF = '2026-03-06T14-00-00Z', R = '2026-03-06T15-00-00Z';
+    sentCapture(S, { state: 'sent', lastStatus: 201, recordingId: 'rid-s', jobState: 'stale', matchPending: false });
+    sentCapture(JF, { state: 'sent', lastStatus: 201, recordingId: 'rid-jf', jobState: 'failed', matchPending: false });
+    sentCapture(R, { state: 'failed', lastStatus: 409, recordingId: null, jobState: null });
+    const rows = Object.fromEntries(listMeetings(c5, NOW, undefined, { uploadQueueDir: Q }).map((r) => [r.stem, r]));
+    const shown = (r) => JSON.stringify(r && { state: r.state, line: r.line });
+    check('SAA-183: every step ok, transcript lines, sent with jobs stale -> not failed, the row says "Status unknown"',
+        !!rows[S] && rows[S].state !== 'failed' && rows[S].line === 'Status unknown', shown(rows[S]));
+    check('control: jobs failed on the server -> "Couldn\'t be processed"',
+        !!rows[JF] && rows[JF].state === 'failed' && rows[JF].line.startsWith("Couldn't be processed"), shown(rows[JF]));
+    check('control: refused by the server (409) -> "Couldn\'t be processed"',
+        !!rows[R] && rows[R].state === 'failed' && rows[R].line.startsWith("Couldn't be processed"), shown(rows[R]));
+
+    // The poll decision, driven as pollJobStates drives it: each ask at the time
+    // the entry says it is next due (every 20 s when it says nothing), no reply
+    // for 16 minutes, then a reply that the jobs are done.
+    const has = typeof lm.jobPollStep === 'function';
+    let e = { stem: S, state: 'sent', sentAt: new Date(NOW).toISOString(), recordingId: 'rid-s', jobState: null, matchPending: false };
+    const end = NOW + 16 * 60e3;
+    let t = NOW;
+    let unanswered = 0;
+    if (has) {
+        for (;;) {
+            const due = Date.parse(e.nextJobPollAt);
+            t = Number.isFinite(due) ? due : t + 20e3;
+            if (t >= end) break;
+            e = lm.jobPollStep(e, { status: null, json: { error: 'ECONNREFUSED' } }, t);
+            unanswered++;
+        }
+        e = lm.jobPollStep(e, { status: 200, json: { jobs: [{ kind: 'extract', state: 'done', attempts: 1 }] } }, end);
+    }
+    check('SAA-183: 16 minutes of no replies, then 200 done -> done',
+        has && e.jobState === 'done', has ? `${unanswered} asks with no reply, then jobState=${e.jobState}` : '(no jobPollStep in last-meeting.js)');
+
+    // The other half of the limit, unchanged: a server that answers on every ask
+    // that the extraction is still running is given up on as stale.
+    let a = { stem: S, state: 'sent', sentAt: new Date(NOW).toISOString(), recordingId: 'rid-s', jobState: null, matchPending: false };
+    let gaveUp = null;
+    let answered = 0;
+    if (has) {
+        const running = { status: 200, json: { jobs: [{ kind: 'extract', state: 'running', attempts: 1 }] } };
+        for (let at = NOW + 20e3; at <= end; at += 20e3) {
+            if (a.jobState === 'stale') break;
+            ({ gaveUp, ...a } = lm.jobPollStep(a, running, at));
+            answered++;
+        }
+    }
+    check('SAA-183 control: 16 minutes of 200 with the extract job running on every ask -> stale, gave up on the jobs',
+        has && a.jobState === 'stale' && gaveUp === 'jobs', has ? `${answered} answered asks, jobState=${a.jobState} gaveUp=${gaveUp}` : '(no jobPollStep in last-meeting.js)');
+    fs.rmSync(c5, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);

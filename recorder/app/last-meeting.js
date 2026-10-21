@@ -16,6 +16,8 @@
 //             transcribed at all
 //   failed    the pipeline failed (or was abandoned) before it finished
 //   pending   still recording or still being processed
+//   unknown   sent, and the server never confirmed how its jobs ended (a
+//             capture-pipeline capture only; see classifyServerCapture)
 //
 // Every capture since the cut-over is handled by the capture pipeline
 // (capture-cli.ts) and is ready by its server jobs instead; see
@@ -75,11 +77,12 @@ function calendarTitle(dir, stem) {
 // what this Mac does ends at the upload, and the rest is the server's. Ready once
 // the capture was sent and its server jobs are done, as its upload-queue entry
 // records them (main.js pollJobStates); the recording id is the server's.
-// Failed when the server refused it, or its jobs failed, are gone, or went
-// unconfirmed past the polling limit ("stale"), or there were none. Pending while
-// it waits to be sent or its jobs run. With no entry, it is pending only while
-// its pipeline was recently active, like a pre-cutover capture.
-const SERVER_CAPTURE_FAILED_JOBS = new Set(['failed', 'gone', 'stale', 'none']);
+// Failed when the server refused it, or its jobs failed, are gone, or there were
+// none. Unknown when its jobs went unconfirmed past the polling limit ("stale"):
+// nothing says they failed, and the server is asked again (SAA-183). Pending
+// while it waits to be sent or its jobs run. With no entry, it is pending only
+// while its pipeline was recently active, like a pre-cutover capture.
+const SERVER_CAPTURE_FAILED_JOBS = new Set(['failed', 'gone', 'none']);
 
 function classifyServerCapture(dir, stem, pipeline, title, now, uploadQueueDir) {
     const steps = pipeline.steps || {};
@@ -98,6 +101,7 @@ function classifyServerCapture(dir, stem, pipeline, title, now, uploadQueueDir) 
     }
     if (entry.state === 'failed') return { state: 'failed', stem, title };
     if (entry.state === 'sent' && SERVER_CAPTURE_FAILED_JOBS.has(entry.jobState)) return { state: 'failed', stem, title };
+    if (entry.state === 'sent' && entry.jobState === 'stale') return { state: 'unknown', stem, title };
     return { state: 'pending', stem, title };
 }
 
@@ -226,6 +230,72 @@ function matchPendingOf(jobs) {
     return jobs.some((j) => j.kind === 'match' && (j.state === 'queued' || j.state === 'running'));
 }
 
+// --- what one ask about a sent capture's jobs leaves on its queue entry ------
+//
+// main.js pollJobStates asks GET /captures/:captureId/jobs and writes back what
+// this returns. Answered, the next ask is JOB_POLL_MS later. Not answered (no
+// HTTP reply at all: the server or the network was down), nothing about the
+// jobs is learned, the next ask backs off from JOB_NO_REPLY_FIRST_MS doubling
+// to JOB_NO_REPLY_MAX_MS, like the upload queue, and the asking never gives up:
+// an unreachable server is not a reason to stop (SAA-183).
+//
+// JOB_POLL_LIMIT_MS counts only time the server was answering: the time from
+// the send, or from an answered ask, to the next answered ask. Once past it, a
+// state still unsettled is "stale" (status unknown, shown as such, never as
+// failed) and a pending calendar match is given up on, so a stalled job cannot
+// keep this Mac querying a server that answers. A stale capture is asked once
+// more at launch, on wake and when Recent meetings opens; a reply then settles
+// it, and anything else leaves it stale. A new send of a capture starts all of
+// this again (main.js sendQueuedCapture clears these fields).
+//
+// `reply` is captureServerRequest's: { status, json }, status null when no
+// reply came. `now` is in ms. -> the entry as it now stands, with `gaveUp`
+// ('jobs', 'match' or null) saying what this ask stopped asking about.
+const JOB_POLL_MS = 20 * 1000;
+const JOB_POLL_LIMIT_MS = 15 * 60 * 1000;
+const JOB_NO_REPLY_FIRST_MS = 60 * 1000;
+const JOB_NO_REPLY_MAX_MS = 60 * 60 * 1000;
+const JOB_SETTLED = new Set(['done', 'failed', 'none', 'gone', 'stale']);
+
+function jobNoReplyBackoffMs(unanswered) {
+    return Math.min(JOB_NO_REPLY_MAX_MS, JOB_NO_REPLY_FIRST_MS * 2 ** Math.max(0, unanswered - 1));
+}
+
+function jobPollStep(entry, reply, now) {
+    const at = new Date(now).toISOString();
+    if (!reply || reply.status == null) {
+        const unanswered = (entry.jobUnanswered || 0) + 1;
+        return { ...entry, jobPolledAt: at, jobUnanswered: unanswered, nextJobPollAt: new Date(now + jobNoReplyBackoffMs(unanswered)).toISOString(), gaveUp: null };
+    }
+    // The time since the last answer counts only when that answer was the last ask.
+    const lastAnsweredMs = Date.parse(entry.jobPolledAt || entry.sentAt);
+    const answeredMs = (entry.jobAnsweredMs || 0) + (!entry.jobUnanswered && Number.isFinite(lastAnsweredMs) ? Math.max(0, now - lastAnsweredMs) : 0);
+    let jobState = entry.jobState;
+    let matchPending = entry.matchPending === true;
+    if (reply.status === 200 && reply.json && Array.isArray(reply.json.jobs)) {
+        jobState = jobStateOf(reply.json.jobs);
+        matchPending = matchPendingOf(reply.json.jobs);
+    } else if (reply.status === 404) {
+        jobState = 'gone';
+        matchPending = false;
+    }
+    let gaveUp = null;
+    if (answeredMs > JOB_POLL_LIMIT_MS) {
+        if (matchPending) {
+            matchPending = false;
+            gaveUp = 'match';
+        }
+        if (!JOB_SETTLED.has(jobState)) {
+            jobState = 'stale';
+            gaveUp = 'jobs';
+        }
+    }
+    return {
+        ...entry, jobState, matchPending, jobAnsweredMs: answeredMs, jobPolledAt: at, jobUnanswered: 0,
+        nextJobPollAt: new Date(now + JOB_POLL_MS).toISOString(), gaveUp,
+    };
+}
+
 // The server's calendar match for a capture (the jobs reply's `calendar`: the
 // title, and each invitee's name or address), written where calendarTitle and
 // Recent Meetings' participants read it, in the shape they read (SAA-227
@@ -246,5 +316,5 @@ function writeCalendarMatchFile(dir, stem, calendar) {
 
 module.exports = {
     lastMeeting, classifyCapture, captureStems, isTrashed, trashedStems, calendarTitle, stemTimeMs, readJson,
-    jobStateOf, matchPendingOf, writeCalendarMatchFile,
+    jobStateOf, matchPendingOf, writeCalendarMatchFile, jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
 };

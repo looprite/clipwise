@@ -7,7 +7,7 @@
 // summary (Decision 18). Everything is read from the files the recorder and
 // pipeline leave beside the recordings.
 //
-// The state of each row (ready / nospeech / failed / pending) is
+// The state of each row (ready / nospeech / failed / pending / unknown) is
 // classifyCapture's, the same classification the tray's "Save transcript"
 // item uses.
 
@@ -64,6 +64,7 @@ function identifyingLine(row) {
     if (row.state === 'nospeech') parts.push('No speech captured');
     else if (row.state === 'failed') parts.push("Couldn't be processed");
     else if (row.state === 'pending') parts.push('Still processing');
+    else if (row.state === 'unknown') parts.push('Status unknown');
     if (row.state === 'ready' && row.namingPending) parts.push('voices not named yet');
     return parts.join(' · ');
 }
