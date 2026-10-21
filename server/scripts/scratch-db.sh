@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # A throwaway Neon database for the checks that write (check-access, check-auth,
 # check-trash). One branch at a time, made schema-only from main, deleted when
-# you are done.
+# you are done. Every branch `up` makes also expires on its own after
+# SCRATCH_TTL_HOURS, so a forgotten one (and, with --with-data, its copy of
+# main's rows) deletes itself; `down` still deletes it at once.
 #
 #   scratch-db.sh up              create scratch-<date>, record its endpoint,
 #                                 write its settings to ~/clipwise-eval/scratch/,
@@ -80,6 +82,10 @@ MAIN_BRANCH="main"
 ADMIN_EMAIL="scratch-admin@clipwise.test"
 # Any origin will do: the checks mount Better Auth in-process on a loopback port.
 AUTH_ORIGIN="http://localhost:3000"
+# Neon deletes the branch, its data and its compute at expires_at (branch
+# expiration, neon.com/docs/guides/branch-expiration: at most 30 days ahead; not
+# allowed on the default branch, a protected one, or one with children).
+SCRATCH_TTL_HOURS=24
 
 SERVER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SCRATCH_DIR="$HOME/clipwise-eval/scratch"
@@ -347,7 +353,7 @@ cmd_up() {
   fi
   main_endpoints >/dev/null || refuse "main's endpoint cannot be read from Neon"
 
-  local branch f e out bid ep suspend mainbid ops op i st
+  local branch f e out bid ep suspend mainbid ops op i st expires expires_read
   if [ "$with_data" = 1 ]; then
     branch="scratch-data-$(date +%Y-%m-%d)"
   else
@@ -361,13 +367,20 @@ cmd_up() {
 
   local only=(--schema-only) kind="schema-only"
   if [ "$with_data" = 1 ]; then only=(); kind="with main's data"; fi
-  say "up: creating $branch ($kind from $MAIN_BRANCH, suspend after 3600 s)"
+  # UTC, RFC 3339 to the second, as Neon requires (BSD date: -v adjusts).
+  expires="$(date -u -v+"${SCRATCH_TTL_HOURS}"H +%Y-%m-%dT%H:%M:%SZ)" || fail "could not compute the expiry time"
+  say "up: creating $branch ($kind from $MAIN_BRANCH, suspend after 3600 s, expires $expires, ${SCRATCH_TTL_HOURS} h from now)"
   out="$(neonctl branches create --project-id "$PROJECT_ID" --name "$branch" --parent "$MAIN_BRANCH" \
-    ${only[@]+"${only[@]}"} --suspend-timeout=3600 --output json 2>&1)" \
+    ${only[@]+"${only[@]}"} --suspend-timeout=3600 --expires-at "$expires" --output json 2>&1)" \
     || { say "$out" | scrub >&2; fail "branch create failed"; }
   bid="$(printf '%s' "$out" | jq -r '.branch.id')"
   out=""
   [ -n "$bid" ] && [ "$bid" != null ] || fail "branch created but its id could not be read; check Neon for $branch"
+  # Read back, not trusted from the create call: a branch with no expiry would
+  # outlive a forgotten `down`.
+  expires_read="$(neonctl api "/projects/$PROJECT_ID/branches/$bid" 2>/dev/null | jq -r '.branch.expires_at // empty')"
+  say "up: read back from Neon: branch $bid expires_at=${expires_read:-none}"
+  [ -n "$expires_read" ] || fail "Neon shows no expiry on $branch; the branch is left up, run: scratch-db.sh down"
 
   ep="$(neonctl api "/projects/$PROJECT_ID/endpoints" 2>/dev/null \
     | jq -r --arg b "$bid" '.endpoints[] | select(.branch_id == $b and .type == "read_write") | .id')"
