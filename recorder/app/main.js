@@ -3858,9 +3858,11 @@ function registerIdentityIpc() {
         renderTray();
 
         if (names.length === 1) {
-            // One-guest rule (SAA-194 §5, SAA-195): diarize never splits a
-            // call whose `them` row this answer is about to name, so there
-            // is no step 2 — no naming data will ever arrive to wait for.
+            // One-guest rule (SAA-194 §5, SAA-195): the one guest is the other
+            // side of the call, so there is no step 2. Diarize can still leave
+            // naming data for the call; identity-answer.js namingSettled counts
+            // this answer as settling the naming, so neither the tray nor
+            // Recent meetings asks for it (SAA-255).
             finishIdentityWindow();
             return;
         }

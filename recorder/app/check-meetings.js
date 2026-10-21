@@ -414,6 +414,44 @@ check('without the processing capture, the tray item is the newest ready meeting
     fs.rmSync(c6, { recursive: true, force: true });
 }
 
+// ---- naming settled by a one-guest answer (SAA-255 part 1) --------------------
+// A call whose identity answer names exactly one guest has nothing left to name:
+// that guest is the other side. Diarize can still leave naming data for it.
+//   ONE  voices, an identity answer naming one guest, no voice-names
+//   TWO  voices, an identity answer naming two guests, no voice-names
+//   NAM  voices, an identity answer naming two guests, and a voice-names answer
+//   ON1  voices, an identity answer naming one guest, and a voice-names answer
+{
+    const ia = require('./identity-answer.js');
+    const c7 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-meetings-naming-check-'));
+    const cw = (name, doc) => fs.writeFileSync(path.join(c7, name), JSON.stringify(doc));
+    const call = (stem, guests, named) => {
+        cw(`manifest-${stem}.json`, { started_at: stem, tracks: [{ duration_s: 1800 }] });
+        cw(`pipeline-${stem}.json`, { db_recording_id: `rid-${stem}`, updated_at: new Date(NOW - 3600e3).toISOString(), steps: { transcribe: { state: 'ok' }, ingest: { state: 'ok' }, diarize: { state: 'ok' } } });
+        cw(`transcript-${stem}.json`, { segments: [{}, {}, {}] });
+        cw(`voices-${stem}.json`, { voices: [{ voiceIndex: 1 }, { voiceIndex: 2 }] });
+        cw(`identity-${stem}.json`, { self: { name: 'Jon Example' }, guests: guests.map((name) => ({ name })), scope: 'work' });
+        if (named) cw(`voice-names-${stem}.json`, { voices: [] });
+    };
+    const ONE = '2026-03-05T10-00-00Z', TWO = '2026-03-05T11-00-00Z', NAM = '2026-03-05T12-00-00Z', ON1 = '2026-03-05T13-00-00Z';
+    call(ONE, ['Ann Example'], false);
+    call(ON1, ['Ann Example'], true);
+    call(TWO, ['Ann Example', 'Bob Example'], false);
+    call(NAM, ['Ann Example', 'Bob Example'], true);
+    const rows = Object.fromEntries(listMeetings(c7, NOW).map((r) => [r.stem, r]));
+    const tray = ia.pendingVoiceNamingStems(c7);
+    const shown = (stem) => JSON.stringify({ state: rows[stem] && rows[stem].state, namingPending: rows[stem] && rows[stem].namingPending, canFix: rows[stem] && rows[stem].canFix, line: rows[stem] && rows[stem].line, inTray: tray.includes(stem) });
+    check('SAA-255: voices, a one-guest identity and no voice-names -> not pending, not fixable, no tray item',
+        !!rows[ONE] && rows[ONE].namingPending === false && rows[ONE].canFix === false && !/not named/.test(rows[ONE].line) && !tray.includes(ONE), shown(ONE));
+    check('control: with two guests it stays pending (row and tray item)',
+        !!rows[TWO] && rows[TWO].namingPending === true && rows[TWO].canFix === true && tray.includes(TWO), shown(TWO));
+    check('control: with a voice-names answer it is not pending',
+        !!rows[NAM] && rows[NAM].namingPending === false && !tray.includes(NAM), shown(NAM));
+    check('control: a one-guest call with a voice-names answer keeps Fix names and is not pending',
+        !!rows[ON1] && rows[ON1].canFix === true && rows[ON1].namingPending === false && !tray.includes(ON1), shown(ON1));
+    fs.rmSync(c7, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);

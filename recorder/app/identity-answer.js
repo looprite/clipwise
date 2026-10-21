@@ -353,9 +353,31 @@ function readVoiceNamesAnswer(dir, stem) {
     }
 }
 
+// Whether naming a call's voices is settled, so nothing asks for it again
+// (SAA-255): a voice-names answer exists, or the identity answer names exactly
+// one guest. That guest is the other side of the call, so there is no voice
+// left to put a name to, whether or not diarize left naming data for it.
+// Guests are counted as the server counts them for the same rule
+// (server/src/ingest/identity.ts attendeeRowsFrom and applySpeakerNames:
+// trimmed, non-empty, exactly one), so the naming is settled here exactly when
+// the server names `them` from this answer. Duplicates are not merged: the
+// server does not merge them either.
+function namingSettled(dir, stem) {
+    if (fs.existsSync(path.join(dir, `voice-names-${stem}.json`))) return true;
+    let identity;
+    try {
+        identity = JSON.parse(fs.readFileSync(path.join(dir, `identity-${stem}.json`), 'utf8'));
+    } catch {
+        return false;
+    }
+    const guests = (identity && Array.isArray(identity.guests) ? identity.guests : [])
+        .filter((guest) => typeof guest?.name === 'string' && guest.name.trim());
+    return guests.length === 1;
+}
+
 // A capture has voices waiting to be named when the server produced naming
-// data for it and nobody has answered yet. Both facts are files on disk —
-// main.js has no other way to know either one.
+// data for it and its naming is not settled (namingSettled). All of it is
+// files on disk — main.js has no other way to know any of it.
 function pendingVoiceNamingStems(dir) {
     let files;
     try {
@@ -368,7 +390,7 @@ function pendingVoiceNamingStems(dir) {
         const m = /^voices-(.+)\.json$/.exec(file);
         if (!m) continue;
         const stem = m[1];
-        if (files.includes(`voice-names-${stem}.json`)) continue; // already answered
+        if (namingSettled(dir, stem)) continue; // answered, or a one-guest call (SAA-255)
         if (files.includes(`trashed-${stem}.json`)) continue; // in the trash (SAA-154)
         stems.push(stem);
     }
@@ -438,6 +460,7 @@ module.exports = {
     buildVoiceNamesDoc,
     writeVoiceNamesAnswer,
     readNamingData,
+    namingSettled,
     pendingVoiceNamingStems,
     readVoiceNamesAnswer,
     assignVoice,
