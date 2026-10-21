@@ -355,6 +355,25 @@ $PB -c "Delete :ElectronAsarIntegrity" "$PLIST" >/dev/null 2>&1 || true
 set_key CFBundleIconFile        string "$APP_NAME"
 $PB -c "Delete :LSApplicationCategoryType" "$PLIST" >/dev/null 2>&1 || true
 
+# --- 3b. fuses ------------------------------------------------------------
+#
+# Two off (SAA-243, 10-16): another process launching the app with NODE_OPTIONS
+# or --inspect would otherwise run its own code with the app's microphone and
+# system-audio grants. RunAsNode stays on: the pipeline is the app's own
+# executable run as Node (ELECTRON_RUN_AS_NODE, SAA-198). Flipping rewrites the
+# Electron Framework binary, so it comes before signing, which seals it. Read
+# back rather than trusted: the build fails unless all three read as intended.
+
+step "fuses"
+FUSES="$APP_SRC/node_modules/.bin/electron-fuses"
+[ -x "$FUSES" ] || { echo "build-app: no $FUSES — run: (cd $APP_SRC && npm install)" >&2; exit 1; }
+NO_COLOR=1 "$FUSES" write --app "$APP" EnableNodeOptionsEnvironmentVariable=off EnableNodeCliInspectArguments=off
+FUSE_STATE="$(NO_COLOR=1 "$FUSES" read --app "$APP")"
+echo "$FUSE_STATE"
+for want in "EnableNodeOptionsEnvironmentVariable is Disabled" "EnableNodeCliInspectArguments is Disabled" "RunAsNode is Enabled"; do
+    grep -qF "$want" <<<"$FUSE_STATE" || { echo "build-app: fuse read-back is missing: $want" >&2; exit 1; }
+done
+
 # --- 4. sign --------------------------------------------------------------
 #
 # Inside-out, one piece at a time, every piece with the identity, the hardened

@@ -1678,12 +1678,12 @@ pythonbuild/downloads.json names this version and file, LICENSE.zstd.txt):
 Electron and Chromium
 -----------------------------
 
-Clipwise's app runs on Electron 43.3.0 (https://www.electronjs.org/), which
+Clipwise's app runs on Electron 43.8.0 (https://www.electronjs.org/), which
 bundles Chromium, Node.js, V8 and their own third-party code. Their notices ship
 as two files beside this one: LICENSE.electron (Electron's MIT licence) and
 LICENSES.chromium.html (Chromium's notices, which include Node.js and
 Squirrel.Mac). Electron also bundles these two frameworks, which that file does
-not cover; their licences, from the commits Electron 43.3.0 pins in its DEPS:
+not cover; their licences, from the commits Electron 43.8.0 pins in its DEPS:
 
 Mantle (https://github.com/Mantle/Mantle, commit 2a8e2123a3931038179ee06105c9e6ec336b12ea):
 
