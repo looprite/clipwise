@@ -33,6 +33,7 @@ const {
 } = require('./last-meeting.js');
 // The recent-meetings window's rows (SAA-217).
 const { listMeetings, listTrashed } = require('./meetings.js');
+const { removeCaptureFiles } = require('./capture-files.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // The auto-stop decision (SAA-184). Pure: it returns what should happen, and
 // autostopFeed carries out the one effect that stops a capture.
@@ -3195,7 +3196,9 @@ function drainUploadQueue(reason) {
                 } else {
                     next = await sendQueuedCapture(server, entry);
                 }
-                // A newer answer may have queued it again while this was sending.
+                // A newer answer may have queued it again while this was sending,
+                // or a delete from the trash removed it: gone stays gone.
+                if (!fs.existsSync(uploadQueuePathFor(entry.stem))) continue;
                 const current = readUploadEntry(entry.stem);
                 if (current && current.nextAttemptAt !== entry.nextAttemptAt && current.state === 'queued') {
                     uploadDrainAgain = true;
@@ -3454,7 +3457,7 @@ async function runTrashOnServer(action, stems) {
                 fs.rmSync(trashMarkerPath(stem), { force: true });
                 results.push({ action, stem, ok: true });
             } else {
-                const files = removeCaptureFiles(stem);
+                const files = removeCaptureFiles(OUTDIR, UPLOAD_QUEUE_DIR, stem);
                 results.push({ action, stem, ok: true, files });
             }
         } catch (err) {
@@ -3473,33 +3476,6 @@ function writeTrashMarker(stem, marker) {
     const finalPath = trashMarkerPath(stem);
     fs.writeFileSync(`${finalPath}.tmp`, JSON.stringify(marker, null, 2) + '\n');
     fs.renameSync(`${finalPath}.tmp`, finalPath);
-}
-
-// Every file of the capture (trash-marker.ts captureFiles: "-<stem>" followed by
-// ".", "-" or the end of the name), the manifest after the rest and the marker
-// last. Returns how many went, the marker not counted.
-function removeCaptureFiles(stem) {
-    const needle = `-${stem}`;
-    const manifest = `manifest-${stem}.json`;
-    const marker = `trashed-${stem}.json`;
-    const files = fs.readdirSync(OUTDIR).filter((name) => {
-        const i = name.indexOf(needle);
-        if (i < 0) return false;
-        const next = name[i + needle.length];
-        return next === '.' || next === '-' || next === undefined;
-    });
-    let removed = 0;
-    for (const name of files) {
-        if (name === manifest || name === marker) continue;
-        fs.rmSync(path.join(OUTDIR, name), { force: true });
-        removed++;
-    }
-    if (files.includes(manifest)) {
-        fs.rmSync(path.join(OUTDIR, manifest), { force: true });
-        removed++;
-    }
-    fs.rmSync(trashMarkerPath(stem), { force: true });
-    return removed;
 }
 
 // An identity answer or voice names just written. The capture is queued again
