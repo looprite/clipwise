@@ -39,9 +39,9 @@
 // Depends on the provider's internals, not its API: the oauthRefreshToken
 // columns, the stored-token hash (utils-D6Hp4Qd_.mjs:425-428) and the replay
 // reply's shape. @better-auth/oauth-provider comes in through @better-auth/mcp's
-// "^1.7.7", so only package-lock.json holds it at 1.7.7 (the Docker build runs
-// npm ci); a lock regenerated onto a later version must pass check-access's
-// recovery cases first, which fail if any of this changes.
+// "^1.7.7"; package.json's overrides hold it at exactly 1.7.7, so a reinstall
+// or a regenerated lock cannot move it. Changing that override needs
+// check-access's recovery cases to pass first, which fail if any of this changes.
 
 import { createHash } from "node:crypto";
 import { symmetricDecrypt } from "better-auth/crypto";
