@@ -29,6 +29,7 @@ import {
   findMemberByEmail,
   linkMemberToUser,
 } from "./membership.js";
+import { recordRefreshRecovery, recoverLostRefreshReply } from "./refresh-recovery.js";
 import { CAPTURE_RESOURCE_SCOPES, CAPTURE_SCOPE, MCP_SCOPES } from "./scopes.js";
 import { CALENDAR_READONLY_SCOPE, consentAfterSignIn, parkGoogleTokens, storeParkedGrant } from "./google-calendar-grant.js";
 
@@ -125,11 +126,18 @@ function signInDenied(): APIError {
   return new APIError("FORBIDDEN", { code: SIGN_IN_DENIED, message: "This account can't sign in to this Clipwise instance." });
 }
 
-// `control` is for check-access's SAA-244 control only: it builds its own
-// instance without clientRegistrationDefaultScopes, to show that the assertion
-// about dynamic clients and the capture scope fails without it. getAuth() never
-// passes it.
-export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultScopes?: boolean } = {}) {
+// `control` is for check-access only, and getAuth() never passes it:
+//  - omitRegistrationDefaultScopes (the SAA-244 control): an instance without
+//    clientRegistrationDefaultScopes, to show that the assertion about dynamic
+//    clients and the capture scope fails without it;
+//  - refreshTokenReuseInterval (SAA-251): the reuse window in seconds for the
+//    rotations this instance makes, shorter than the mcp plugin's default of 30
+//    (@better-auth/mcp index.mjs:170), so the lost-reply recovery cases can get
+//    past a window without waiting half a minute each.
+export function createAuth(
+  cfg: AuthConfig,
+  control: { omitRegistrationDefaultScopes?: boolean; refreshTokenReuseInterval?: number } = {},
+) {
   return betterAuth({
     appName: "Clipwise",
     baseURL: cfg.baseURL,
@@ -259,7 +267,11 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
     // sign-in made (a sign-in) or already had (Link Google). Anything else,
     // including an error redirect, keeps Better Auth's redirect.
     hooks: {
+      // /oauth2/token, before and at the top of after: a refresh token presented
+      // after its reuse window whose reply was lost (SAA-251, refresh-recovery.ts).
+      before: createAuthMiddleware(async (ctx) => recoverLostRefreshReply(ctx)),
       after: createAuthMiddleware(async (ctx) => {
+        await recordRefreshRecovery(ctx);
         if (ctx.path !== "/callback/:id") return;
         const destination = ctx.context.responseHeaders?.get("location");
         const state = await getOAuthState();
@@ -280,6 +292,7 @@ export function createAuth(cfg: AuthConfig, control: { omitRegistrationDefaultSc
         loginPage: "/login",
         consentPage: "/consent",
         resource: cfg.mcpResource,
+        ...(control.refreshTokenReuseInterval !== undefined ? { refreshTokenReuseInterval: control.refreshTokenReuseInterval } : {}),
         // SAA-244. The capture scope exists, but only the recorder's client can
         // have it:
         //  - `scopes` must name it for a token to carry it;
