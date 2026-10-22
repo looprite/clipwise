@@ -197,6 +197,9 @@ cp "$APP_SRC/capture-files.js" "$C/Resources/app/capture-files.js"
 # The day log's lines where call content is at hand (SAA-243 item 7). main.js
 # requires it by relative path; a bundle without it fails to launch.
 cp "$APP_SRC/log-lines.js" "$C/Resources/app/log-lines.js"
+# Day logs kept for 30 days (SAA-243 item 7). main.js requires it by relative
+# path; a bundle without it fails to launch.
+cp "$APP_SRC/day-logs.js" "$C/Resources/app/day-logs.js"
 install -m 755 "$SYSTEMTAP_BIN" "$C/Resources/bin/systemtap"
 install -m 755 "$MICCAP_BIN"    "$C/Resources/bin/miccap"
 install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"

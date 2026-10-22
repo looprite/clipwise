@@ -36,6 +36,8 @@ const { listMeetings, listTrashed } = require('./meetings.js');
 const { removeCaptureFiles } = require('./capture-files.js');
 // The day log's lines where call content is at hand: counts and kinds only.
 const logLines = require('./log-lines.js');
+// Day logs kept for 30 days (SAA-243 item 7).
+const { pruneDayLogs } = require('./day-logs.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // The auto-stop decision (SAA-184). Pure: it returns what should happen, and
 // autostopFeed carries out the one effect that stops a capture.
@@ -4818,6 +4820,22 @@ app.setAboutPanelOptions({
     credits: 'Meeting recordings captured on your Mac, intelligence surfaced through Claude.',
 });
 
+const DAY_LOG_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+// day-logs.js does the pruning. Nothing it does may stop the app or the timer,
+// so any failure is logged by its code and the next run tries again. No
+// recordings folder yet means no day logs.
+function pruneDayLogsNow() {
+    try {
+        if (!fs.existsSync(OUTDIR)) return;
+        const { removed, failed } = pruneDayLogs(OUTDIR);
+        if (removed > 0) console.error(`[clipwise-recorder] day logs: pruned ${removed}`);
+        for (const code of failed) console.error(`[clipwise-recorder] day logs: prune failed — ${code}`);
+    } catch (err) {
+        console.error(`[clipwise-recorder] day logs: prune failed — ${err.code || err.name}`);
+    }
+}
+
 app.whenReady().then(async () => {
     // A second launch has already quit (the single-instance lock, above).
     if (!GOT_SINGLE_INSTANCE_LOCK) return;
@@ -4852,6 +4870,9 @@ app.whenReady().then(async () => {
     // right after Stop.
     drainUploadQueue('launch');
     askJobsAgain('launch');
+    // At launch and then once a day: an app left running for weeks prunes too.
+    pruneDayLogsNow();
+    setInterval(pruneDayLogsNow, DAY_LOG_PRUNE_INTERVAL_MS);
     registerIdentityIpc();
     registerMeetingsIpc();
     registerSetupIpc();
