@@ -191,6 +191,9 @@ cp "$APP_SRC/capture-sign-out.js" "$C/Resources/app/capture-sign-out.js"
 # The capture token's refresh. main.js requires it by relative path; a bundle
 # without it fails to launch.
 cp "$APP_SRC/capture-refresh.js" "$C/Resources/app/capture-refresh.js"
+# Delete from the trash (SAA-243 item 7). main.js requires it by relative path;
+# a bundle without it fails to launch.
+cp "$APP_SRC/capture-files.js" "$C/Resources/app/capture-files.js"
 install -m 755 "$SYSTEMTAP_BIN" "$C/Resources/bin/systemtap"
 install -m 755 "$MICCAP_BIN"    "$C/Resources/bin/miccap"
 install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"
