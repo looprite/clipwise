@@ -101,6 +101,8 @@
 </head>
 <body>
   <p id="step"></p>
+  <!-- A warning only (SAA-243 item 7): setup goes on whatever it says. -->
+  <p id="filevault" class="error" style="display:none"><span id="filevault-text"></span> <a id="filevault-settings">Open System Settings</a></p>
 
   <div class="screen" id="screen-notice">
     <h1>Before you record</h1>
@@ -190,6 +192,8 @@
     for (const s of document.querySelectorAll('.screen')) s.classList.toggle('shown', s.id === `screen-${v.screen}`);
     $('step').textContent = v.stepText || '';
     $('step').style.display = v.stepText ? 'block' : 'none';
+    $('filevault-text').textContent = v.fileVaultWarning || '';
+    $('filevault').style.display = v.fileVaultWarning ? 'block' : 'none';
     const primary = $('primary');
     const later = $('later');
     primary.disabled = !!v.busy;
@@ -238,6 +242,7 @@
   $('address').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('primary').click(); });
   $('later').addEventListener('click', () => send('setup:later'));
   $('change-address').addEventListener('click', () => send('setup:change-address'));
+  $('filevault-settings').addEventListener('click', () => send('setup:filevault-settings'));
   for (const which of ['mic', 'tap']) {
     $(`${which}-button`).addEventListener('click', () => {
       if (!view) return;

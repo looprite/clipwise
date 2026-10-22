@@ -38,6 +38,8 @@ const { removeCaptureFiles } = require('./capture-files.js');
 const logLines = require('./log-lines.js');
 // Day logs kept for 30 days (SAA-243 item 7).
 const { pruneDayLogs } = require('./day-logs.js');
+// Setup's FileVault warning (SAA-243 item 7).
+const filevault = require('./filevault.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // The auto-stop decision (SAA-184). Pure: it returns what should happen, and
 // autostopFeed carries out the one effect that stops a capture.
@@ -4029,7 +4031,18 @@ function showSetupWindow(mode = 'launch') {
             'Recording stays off until the recording notice is agreed to. Try the Clipwise menu bar item.');
         return;
     }
-    setupWindow = { win, token, mode, noticeOnly, override: null, busy: false, waiting: false, error: '', asking: null, address: undefined };
+    setupWindow = { win, token, mode, noticeOnly, override: null, busy: false, waiting: false, error: '', asking: null, address: undefined, fileVault: null };
+    // Setup only, not the notice alone. A warning, never a step: read in the
+    // background and drawn when it answers.
+    if (!noticeOnly) {
+        const w = setupWindow;
+        filevault.readFileVault().then((state) => {
+            console.error(`[clipwise-recorder] setup: filevault ${state}`);
+            if (setupWindow !== w) return;
+            w.fileVault = state;
+            sendSetupState();
+        });
+    }
     console.error(`[clipwise-recorder] setup: window opened (${noticeOnly ? 'notice only' : `setup, at "${setupView().screen}"`}, as "${mode}")`);
     win.once('ready-to-show', () => {
         win.show();
@@ -4077,6 +4090,8 @@ function setupView() {
         tap: status.tap,
         permissionsSettled: setup.permissionSettled(status.mic) && setup.permissionSettled(status.tap),
         claudeAddress: setup.claudeAddress(status.server),
+        // Null until fdesetup has answered, and for the notice alone.
+        fileVaultWarning: w.noticeOnly || !w.fileVault ? null : filevault.fileVaultWarning(w.fileVault),
     };
 }
 
@@ -4322,6 +4337,11 @@ function registerSetupIpc() {
         if (!pane) return;
         console.error(`[clipwise-recorder] setup: opening System Settings for ${payload.which}`);
         shell.openExternal(pane);
+    });
+    ipcMain.on('setup:filevault-settings', (_event, payload) => {
+        if (!fromWindow(payload)) return;
+        console.error('[clipwise-recorder] setup: opening System Settings for FileVault');
+        shell.openExternal(filevault.SETTINGS_PANE);
     });
     ipcMain.on('setup:done', (_event, payload) => {
         if (fromWindow(payload)) finishSetup();
