@@ -189,7 +189,7 @@ const CASES = [
     ['start notification: the body is consent.NOTICE_LINE, the same line the tray copies', () =>
         /notify\([^;]*,\s*consent\.NOTICE_LINE\)/.test(startNotice)],
     ['start notification: the title tells the host to let everyone know', () =>
-        /notify\('Recording \\u2014 let everyone know',/.test(startNotice)],
+        /notify\('recording-started-notice', 'Recording \\u2014 let everyone know',/.test(startNotice)],
     ['start notification: the old "recording started" text is gone', () =>
         !SRC.includes("'Clipwise: recording started'") && !startNotice.includes('Capturing your mic')],
     ['start notification: it is not behind the stalled/resumed flap throttle', () =>
@@ -306,7 +306,7 @@ const CASES = [
         && /powerMonitor\.on\('resume', \(\) => \{\s*if \(!captureTokens\) return;\s*console\.error\(`\[clipwise-recorder\] capture token: resumed from sleep, refresh in \$\{captureRefreshDelay\(\)\} ms`\);\s*scheduleCaptureRefresh\(\);\s*\}\);/.test(SRC)
         && /function captureRefreshDelay\(\) \{\s*return Math\.max\(0, captureTokens\.expiresAt - CAPTURE_REFRESH_EARLY_MS - Date\.now\(\)\);\s*\}\s*function scheduleCaptureRefresh\(\) \{[\s\S]{0,120}setTimeout\(refreshCaptureToken, captureRefreshDelay\(\)\)/.test(SRC)],
     ['signed out by a refresh: one notification, whose click starts the tray\'s sign-in; the tray\'s Sign out shows none', () =>
-        /function signOutAfterRefresh\(reason\) \{\s*signOutOfCaptureServer\(reason\);\s*notify\('Clipwise is signed out', 'Recordings are kept and will upload after you sign in\.', signInToCaptureServer\);\s*\}/.test(SRC)
+        /function signOutAfterRefresh\(reason\) \{\s*signOutOfCaptureServer\(reason\);\s*notify\('signed-out', 'Clipwise is signed out', 'Recordings are kept and will upload after you sign in\.', signInToCaptureServer\);\s*\}/.test(SRC)
         && SRC.includes('{ signOut: signOutAfterRefresh, store: setCaptureTokens }')
         && (SRC.match(/signOutAfterRefresh/g) || []).length === 2
         && (SRC.match(/'Clipwise is signed out'/g) || []).length === 1

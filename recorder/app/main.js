@@ -34,6 +34,8 @@ const {
 // The recent-meetings window's rows (SAA-217).
 const { listMeetings, listTrashed } = require('./meetings.js');
 const { removeCaptureFiles } = require('./capture-files.js');
+// The day log's lines where call content is at hand: counts and kinds only.
+const logLines = require('./log-lines.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // The auto-stop decision (SAA-184). Pure: it returns what should happen, and
 // autostopFeed carries out the one effect that stops a capture.
@@ -1004,15 +1006,17 @@ function saveTranscript(meeting) {
         renderTray();
         sendMeetingsData();
     };
-    const failed = (why) => {
-        console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: failed — ${why}`);
-        notify('Clipwise: transcript not saved', `Couldn't build the transcript for ${meeting.stem}: ${why}`);
+    // The day log gets the error's code only: an fs error's message names the
+    // file, and the file is named after the meeting. The notification keeps it.
+    const failed = (err) => {
+        console.error(logLines.saveTranscriptFailedLine(meeting.stem, err));
+        notify('transcript-not-built', 'Clipwise: transcript not saved', `Couldn't build the transcript for ${meeting.stem}: ${(err && err.message) || String(err)}`);
     };
     buildTranscriptFromServer(meeting.stem, tmp)
-        .then((meta) => offerTranscriptSave(meeting, tmp, meta), (err) => failed(err.message))
+        .then((meta) => offerTranscriptSave(meeting, tmp, meta), (err) => failed(err))
         .catch((e) => {
-            console.error(`[clipwise-recorder] save-transcript ${meeting.stem}: ${String(e)}`);
-            notify('Clipwise: transcript not saved', String(e.message || e));
+            console.error(logLines.saveTranscriptFailedLine(meeting.stem, e));
+            notify('transcript-not-saved', 'Clipwise: transcript not saved', String(e.message || e));
         })
         .finally(done);
 }
@@ -1023,13 +1027,16 @@ function saveTranscript(meeting) {
 // unattributedTurns); only the text's SHA-256 is logged.
 async function buildTranscriptFromServer(stem, tmp) {
     const server = signedInServer();
-    if (!server) throw new Error('not signed in to the capture server');
+    // Each with a code, since the code is all the day log keeps of it.
+    const fail = (code, message) => Object.assign(new Error(message), { code });
+    if (!server) throw fail('not_signed_in', 'not signed in to the capture server');
     const captureId = captureIdFor(stem);
-    if (!captureId) throw new Error(`manifest-${stem}.json has no recording_id`);
+    if (!captureId) throw fail('no_recording_id', `manifest-${stem}.json has no recording_id`);
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const reply = await captureServerRequest(server, 'GET', `/captures/${captureId}/transcript?tz=${encodeURIComponent(tz)}`);
     if (reply.status !== 200 || typeof reply.json.text !== 'string') {
-        throw new Error(`server ${reply.status ?? 'no reply'} ${reply.json.error || ''}`.trim());
+        throw fail(`server_${reply.status ?? 'no_reply'}${reply.json.error ? `_${reply.json.error}` : ''}`,
+            `server ${reply.status ?? 'no reply'} ${reply.json.error || ''}`.trim());
     }
     const hash = createHash('sha256').update(Buffer.from(reply.json.text, 'utf8')).digest('hex');
     console.error(`[clipwise-recorder] save-transcript ${stem}: server 200 sha256=${hash}`);
@@ -1048,10 +1055,8 @@ async function offerTranscriptSave(meeting, tmp, meta) {
     });
     if (canceled || !filePath) return;
     fs.copyFileSync(tmp, filePath);
-    console.error(
-        `[clipwise-recorder] save-transcript ${meeting.stem}: saved ${meta.turns} turns ` +
-        `(${meta.unattributedTurns} unattributed) -> ${filePath}`);
-    notify('Clipwise: transcript saved', path.basename(filePath));
+    console.error(logLines.saveTranscriptSavedLine(meeting.stem, meta.turns, meta.unattributedTurns));
+    notify('transcript-saved', 'Clipwise: transcript saved', path.basename(filePath));
 }
 
 // --- recent meetings window (SAA-217) -------------------------------------
@@ -1142,9 +1147,9 @@ async function changeTrash(action, rawStems) {
     if (failed.length > 0) {
         const verb = { trash: 'moved to trash', restore: 'restored', delete: 'deleted' }[action];
         if (failed.every((r) => r.code === 'server_unreachable')) {
-            notify(`Clipwise: not ${verb}`, `Couldn't reach the Clipwise server. Nothing was ${verb}.`);
+            notify('trash-unreachable', `Clipwise: not ${verb}`, `Couldn't reach the Clipwise server. Nothing was ${verb}.`);
         } else {
-            notify(`Clipwise: ${failed.length} not ${verb}`, `${failed[0].message || failed[0].code}`);
+            notify('trash-refused', `Clipwise: ${failed.length} not ${verb}`, `${failed[0].message || failed[0].code}`);
         }
     }
     renderTray();
@@ -1193,7 +1198,7 @@ function registerMeetingsIpc() {
         // Re-classified at click time: what the row showed may be stale.
         const c = classifyCapture(OUTDIR, stem, undefined, captureStateOpts());
         if (c.state !== 'ready' || isTrashed(OUTDIR, stem)) {
-            notify('Clipwise: nothing to save', `The capture ${stem} has no transcript to save yet.`);
+            notify('transcript-not-ready', 'Clipwise: nothing to save', `The capture ${stem} has no transcript to save yet.`);
             sendMeetingsData();
             return;
         }
@@ -1248,7 +1253,7 @@ function reopenIdentityPrompt(stem) {
     const marker = readLaterMarker(OUTDIR, stem);
     if (!marker) {
         console.error(`identity: no later-marker for ${stem} — nothing to reopen`);
-        notify('Clipwise: could not reopen prompt',
+        notify('identity-reopen-answer-missing', 'Clipwise: could not reopen prompt',
             `Who was on ${stem} could not be reopened — the deferred answer is missing.`);
         return;
     }
@@ -1271,7 +1276,7 @@ function reopenIdentityPrompt(stem) {
         });
     } catch (err) {
         console.error(`identity: could not reopen the prompt: ${String(err)}`);
-        notify('Clipwise: could not reopen prompt', `Who was on ${stem} could not be reopened.`);
+        notify('identity-reopen-failed', 'Clipwise: could not reopen prompt', `Who was on ${stem} could not be reopened.`);
         return;
     }
     identityWindow = { win, capture, shown: false, step: 1, resolved: false, fromQueue: false, pollTimer: null };
@@ -1310,7 +1315,7 @@ function reopenIdentityPrompt(stem) {
         },
     }).catch((err) => {
         console.error(`identity: prompt failed to reopen: ${String(err)}`);
-        notify('Clipwise: could not reopen prompt', `Who was on ${stem} could not be reopened.`);
+        notify('identity-reopen-load-failed', 'Clipwise: could not reopen prompt', `Who was on ${stem} could not be reopened.`);
         identityWindow = null;
         try { win.close(); } catch {}
     });
@@ -1334,7 +1339,7 @@ function reopenVoiceNaming(stem, opts = {}) {
             guestNames = (doc.guests || []).map((g) => g.name).filter(Boolean);
         } catch (err) {
             console.error(`voice-names: identity-${stem}.json exists but could not be read: ${String(err)}`);
-            notify('Clipwise: could not reopen naming',
+            notify('naming-reopen-answer-unreadable', 'Clipwise: could not reopen naming',
                 `Naming the voices on ${stem} could not be reopened — the identity answer is unreadable.`);
             return;
         }
@@ -1346,7 +1351,7 @@ function reopenVoiceNaming(stem, opts = {}) {
     const namingData = readNamingData(OUTDIR, stem);
     if (!namingData) {
         console.error(`voice-names: no naming data for ${stem} — nothing to reopen`);
-        notify('Clipwise: could not reopen naming',
+        notify('naming-reopen-data-missing', 'Clipwise: could not reopen naming',
             `Naming the voices on ${stem} could not be reopened — the naming data is missing.`);
         return;
     }
@@ -1376,7 +1381,7 @@ function reopenVoiceNaming(stem, opts = {}) {
         });
     } catch (err) {
         console.error(`voice-names: could not reopen the naming window: ${String(err)}`);
-        notify('Clipwise: could not reopen naming', `Naming the voices on ${stem} could not be reopened.`);
+        notify('naming-reopen-failed', 'Clipwise: could not reopen naming', `Naming the voices on ${stem} could not be reopened.`);
         return;
     }
     identityWindow = {
@@ -1413,7 +1418,7 @@ function reopenVoiceNaming(stem, opts = {}) {
         },
     }).catch((err) => {
         console.error(`voice-names: naming window failed to load: ${String(err)}`);
-        notify('Clipwise: could not reopen naming', `Naming the voices on ${stem} could not be reopened.`);
+        notify('naming-reopen-load-failed', 'Clipwise: could not reopen naming', `Naming the voices on ${stem} could not be reopened.`);
         identityWindow = null;
         try { win.close(); } catch {}
     });
@@ -1430,7 +1435,7 @@ function openAcknowledgements() {
     const noticesPath = path.join(process.resourcesPath, 'THIRD_PARTY_NOTICES');
     shell.openPath(noticesPath).then((err) => {
         if (err) {
-            notify('Clipwise: could not open acknowledgements', `${noticesPath}: ${err}`);
+            notify('acknowledgements-open-failed', 'Clipwise: could not open acknowledgements', `${noticesPath}: ${err}`);
         }
     });
 }
@@ -1693,8 +1698,10 @@ const clickableNotifications = new Set();
 
 // onClick is optional and only reachable through a real Electron notification;
 // the osascript fallback cannot report a click.
-function notify(title, body, onClick) {
-    console.error(`notify: ${title} — ${body}`);
+// kind is a fixed identifier for the call site, and the only part logged: a
+// title or body can carry a meeting title or an app's name (SAA-243 item 7).
+function notify(kind, title, body, onClick) {
+    console.error(logLines.notifyLine(kind));
     if (!Notification.isSupported()) {
         notifyFallback(title, body, 'Notification.isSupported() is false');
         return;
@@ -1719,7 +1726,7 @@ function notify(title, body, onClick) {
         // never reached. 'show' is the event that says delivered, and once
         // this runs from a bundle the log is the only place anyone can see
         // either of them.
-        n.once('show', () => console.error(`notify: delivered — ${title}`));
+        n.once('show', () => console.error(logLines.notifyDeliveredLine(kind)));
         n.show();
     } catch (err) {
         notifyFallback(title, body, String(err));
@@ -1774,7 +1781,7 @@ function notifyStateChange(prev, next) {
         // app triggered the capture and that both tracks are going — is no longer
         // in this notification; the triggering app is recorded in the capture's
         // autostop-<stem>.log (capture_start).
-        notify('Recording \u2014 let everyone know', consent.NOTICE_LINE);
+        notify('recording-started-notice', 'Recording \u2014 let everyone know', consent.NOTICE_LINE);
         return;
     }
     // The flapping pair.
@@ -1783,10 +1790,10 @@ function notifyStateChange(prev, next) {
         if (now - lastFlapNotifyMs < FLAP_NOTIFY_MIN_MS) return;
         lastFlapNotifyMs = now;
         if (next === 'stalled') {
-            notify('Clipwise: recording stalled',
+            notify('recording-stalled', 'Clipwise: recording stalled',
                 'A track stopped growing. The capture is still running.');
         } else {
-            notify('Clipwise: recording resumed', 'Both tracks are writing again.');
+            notify('recording-resumed', 'Clipwise: recording resumed', 'Both tracks are writing again.');
         }
         return;
     }
@@ -1806,7 +1813,7 @@ function notifyStateChange(prev, next) {
             // else after an auto-stop (showInactive, and this is an accessory
             // app), so the notification is how a person finds it.
             const stem = session.stem;
-            notify('Auto-stopped — who was on this call?',
+            notify('auto-stopped', 'Auto-stopped — who was on this call?',
                 `Recorded ${formatDurationWords(Date.now() - session.startedAtMs)}. Processing now.`,
                 () => {
                     if (identityWindow && identityWindow.capture && identityWindow.capture.stem === stem) {
@@ -1816,7 +1823,7 @@ function notifyStateChange(prev, next) {
                     }
                 });
         } else {
-            notify('Clipwise: recording stopped', kept
+            notify('recording-stopped', 'Clipwise: recording stopped', kept
                 ? `Recorded ${formatDurationWords(Date.now() - session.startedAtMs)}. Processing now.`
                 : 'The capture never started — nothing was saved.');
         }
@@ -2009,7 +2016,7 @@ function promptForApp(ev, key) {
         });
         n.once('failed', (_e, err) => notifyFallback(title,
             `${body} Choose from the Clipwise menu bar icon.`, String(err)));
-        n.once('show', () => console.error(`notify: delivered — ${title}`));
+        n.once('show', () => console.error(logLines.notifyDeliveredLine('detect-prompt')));
         n.on('action', (_e, index) => {
             if (index === 0) answerDetectPrompt(key, 'record');
             else if (index === 1) answerDetectPrompt(key, 'never');
@@ -2070,7 +2077,7 @@ function answerDetectPrompt(key, choice) {
         // The one line of explanation the design allows, and it belongs here
         // rather than in the prompt: the prompt fires as a call is starting,
         // which is the worst moment to ask anyone to read anything.
-        notify('Clipwise: will not ask about this app',
+        notify('detect-never', 'Clipwise: will not ask about this app',
             `${displayName} will no longer offer to record. Turn it back on from the Clipwise menu bar.`);
         return;
     }
@@ -2083,7 +2090,7 @@ function answerDetectPrompt(key, choice) {
         // Late. If the application is still holding the microphone the call is
         // still going, so the click means what it said and the capture starts.
         if (detectActive.has(key)) {
-            notify('Clipwise: starting now',
+            notify('detect-lapsed-started', 'Clipwise: starting now',
                 `That prompt had lapsed, but ${displayName} is still using the microphone — recording now.`);
             startRecording();
             return;
@@ -2091,7 +2098,7 @@ function answerDetectPrompt(key, choice) {
         // The call is genuinely over, which is the case the expiry exists for.
         // Nothing is recorded — there is nothing left to record — and the one
         // thing that must not happen is silence about it.
-        notify('Clipwise: that prompt had lapsed',
+        notify('detect-lapsed-nothing', 'Clipwise: that prompt had lapsed',
             `${displayName} is no longer using the microphone, so nothing was recorded. `
             + 'Clipwise will record it automatically from now on.');
     }
@@ -2399,7 +2406,7 @@ function silenceShow(s) {
     const z = s.silence;
     const title = 'Still recording?';
     const body = 'No call audio for a minute. Recording continues unless you press Stop.';
-    console.error(`silence: ${title} — ${body}`);
+    console.error(logLines.notifyLine('silence-reminder'));
     z.ttl = setTimeout(() => silenceFeed(s, { type: 'expire', t: Date.now() }), SILENCE_REMINDER_TTL_MS);
     if (!Notification.isSupported()) {
         console.error('silence: Notification.isSupported() is false — reminder cannot be shown');
@@ -2425,7 +2432,7 @@ function silenceShow(s) {
             silenceFeed(s, { type: 'response', t: Date.now(), response: index === 0 ? 'keep' : 'stop' });
         });
         n.once('failed', (_e, err) => console.error(`silence: notification failed: ${String(err)}`));
-        n.once('show', () => console.error(`notify: delivered — ${title}`));
+        n.once('show', () => console.error(logLines.notifyDeliveredLine('silence-reminder')));
         z.notification = n;
         n.show();
     } catch (err) {
@@ -2861,7 +2868,7 @@ function signOutOfCaptureServer(reason) {
 // one notification, whose click starts the same sign-in as the tray's item.
 function signOutAfterRefresh(reason) {
     signOutOfCaptureServer(reason);
-    notify('Clipwise is signed out', 'Recordings are kept and will upload after you sign in.', signInToCaptureServer);
+    notify('signed-out', 'Clipwise is signed out', 'Recordings are kept and will upload after you sign in.', signInToCaptureServer);
 }
 
 let captureRefreshTimer = null;
@@ -3518,10 +3525,7 @@ function writeIdentityAnswer(capture, answer) {
         scope: answer.scope,
     });
     const finalPath = writeAnswer(OUTDIR, doc);
-    console.error(
-        `[clipwise-recorder] identity ${capture.stem}: ` +
-        `self=${JSON.stringify(answer.selfName)} guests=${JSON.stringify(answer.names)} ` +
-        `scope=${JSON.stringify(doc.scope)} -> ${finalPath}`);
+    console.error(logLines.identityLine(capture.stem, !!doc.self.name, doc.guests.length, doc.scope, finalPath));
     return finalPath;
 }
 
@@ -3820,7 +3824,7 @@ function registerIdentityIpc() {
             // The answer is lost; the capture is not. Say so where it can be
             // read rather than pretending it was written.
             console.error(`identity: could not write the answer for ${capture.stem}: ${String(err)}`);
-            notify('Clipwise: identity not saved',
+            notify('identity-not-saved', 'Clipwise: identity not saved',
                 `Who was on ${capture.stem} could not be written — the recording is unidentified.`);
             finishIdentityWindow();
             return;
@@ -3877,12 +3881,11 @@ function registerIdentityIpc() {
         });
         try {
             const finalPath = writeVoiceNamesAnswer(OUTDIR, doc);
-            console.error(
-                `[clipwise-recorder] voice-names ${capture.stem}: ` +
-                `${JSON.stringify(doc.voices)} -> ${finalPath}`);
+            console.error(logLines.voiceNamesLine(capture.stem, doc.voices.length,
+                doc.voices.filter((v) => v.name).length, finalPath));
         } catch (err) {
             console.error(`voice-names: could not write the answer for ${capture.stem}: ${String(err)}`);
-            notify('Clipwise: voice names not saved',
+            notify('voice-names-not-saved', 'Clipwise: voice names not saved',
                 `Naming the voices on ${capture.stem} could not be written.`);
             finishIdentityWindow();
             return;
@@ -4020,7 +4023,7 @@ function showSetupWindow(mode = 'launch') {
         // Nothing records while the gate is shut, so a window that cannot be
         // drawn has to be said out loud rather than leave a button that does nothing.
         console.error(`setup: could not open the window: ${String(err)}`);
-        notify('Clipwise: could not show the setup window',
+        notify('setup-window-failed', 'Clipwise: could not show the setup window',
             'Recording stays off until the recording notice is agreed to. Try the Clipwise menu bar item.');
         return;
     }
@@ -4225,7 +4228,7 @@ function finishSetup() {
     closeSetupWindow();
     applyLoginDefault();
     renderTray();
-    notify('Clipwise is ready', 'Start a recording from the menu bar.');
+    notify('setup-finished', 'Clipwise is ready', 'Start a recording from the menu bar.');
 }
 
 // After "I understand" has been saved. Whether a capture starts is
@@ -4238,7 +4241,7 @@ function resumeBlockedStart(mode) {
         // The call that asked for a capture is over: the one thing that must
         // not happen is silence about it.
         if (mode === 'blocked' && blocked && blocked.trigger) {
-            notify('Clipwise: nothing to record',
+            notify('blocked-start-call-ended', 'Clipwise: nothing to record',
                 'The call that tried to start recording has ended.');
         }
         return;
@@ -4262,7 +4265,7 @@ function registerSetupIpc() {
             // Not saved means not agreed to, as far as the gate is concerned. Say
             // so, and give the person their button back.
             console.error(`consent: could not save the acknowledgement: ${String(err)}`);
-            notify('Clipwise: could not save your answer',
+            notify('notice-not-saved', 'Clipwise: could not save your answer',
                 'Nothing was recorded. Try again.');
             sendSetupState();
             return;
@@ -4397,7 +4400,7 @@ async function offerMoveToApplications() {
         console.error('[clipwise-recorder] move: not moved');
     } catch (err) {
         console.error(`move: failed: ${String(err)}`);
-        notify('Clipwise: could not move to Applications', 'Drag Clipwise into your Applications folder instead.');
+        notify('move-to-applications-failed', 'Clipwise: could not move to Applications', 'Drag Clipwise into your Applications folder instead.');
     }
     return false;
 }
@@ -4405,7 +4408,7 @@ async function offerMoveToApplications() {
 function copyRecordingNotice() {
     clipboard.writeText(consent.NOTICE_LINE);
     console.error('[clipwise-recorder] consent: recording notice copied to the clipboard');
-    notify('Recording notice copied', 'Paste it into the meeting chat.');
+    notify('notice-copied', 'Recording notice copied', 'Paste it into the meeting chat.');
 }
 
 // --- lifecycle ------------------------------------------------------------
@@ -4433,7 +4436,7 @@ function startRecording() {
         showSetupWindow('blocked');
         // A capture an app asked for would otherwise just not happen, silently.
         if (trigger) {
-            notify('Clipwise: agree to the recording notice',
+            notify('notice-start-blocked', 'Clipwise: agree to the recording notice',
                 'Recording starts when you do, if the call is still going.');
         }
         return;
@@ -4454,7 +4457,7 @@ function startRecording() {
         dev = readDevices();
     } catch (err) {
         console.error(String(err));
-        notify('Clipwise: capture not started',
+        notify('start-no-devices', 'Clipwise: capture not started',
             'Could not read the audio devices — see the recorder log.');
         return;
     }
@@ -4487,7 +4490,7 @@ function startRecording() {
         };
         renderTray();
         console.error(`start refused: denied permissions: ${denied.join(', ')}`);
-        notify('Clipwise: capture not started', permissionIssue.note);
+        notify('start-permission-denied', 'Clipwise: capture not started', permissionIssue.note);
         return;
     }
     permissionIssue = null;
@@ -4501,7 +4504,7 @@ function startRecording() {
         fs.writeFileSync(paths.manifest, JSON.stringify(manifest, null, 2) + '\n');
     } catch (err) {
         console.error(String(err));
-        notify('Clipwise: capture not started',
+        notify('start-no-manifest', 'Clipwise: capture not started',
             'Could not write the capture manifest — see the recorder log.');
         return;
     }
