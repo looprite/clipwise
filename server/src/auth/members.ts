@@ -59,8 +59,9 @@ export async function addMember(input: { email: string; role: Role; name?: strin
     .where(and(eq(schema.accountMembers.accountId, account.id), eq(schema.accountMembers.email, input.email)));
   if (existing) {
     // Any future re-add path must, in one transaction, delete the member's
-    // oauthRefreshToken, oauthAccessToken and oauthConsent rows and their auth
-    // sessions before clearing removed_at. A refresh grant racing removeMember
+    // oauthRefreshToken, oauthAccessToken, oauthConsent and
+    // refresh_token_recoveries rows and their auth sessions before clearing
+    // removed_at. A refresh grant racing removeMember
     // can leave a refresh token behind: the grant revokes the old row and inserts
     // the new one in separate statements, and a DELETE that commits between them
     // misses the new row. The refresh grant does not check membership, so that
@@ -123,6 +124,9 @@ export async function removeMember(email: string): Promise<{ member: MemberRow; 
     for (const table of ["oauthRefreshToken", "oauthAccessToken", "oauthConsent"]) {
       await pool.query(`DELETE FROM "${table}" WHERE "userId" = $1`, [member.authUserId]);
     }
+    // Ours, keyed by the same user id with no foreign key to Better Auth's tables
+    // (schema.ts refreshTokenRecoveries), so nothing cascades to it.
+    await pool.query(`DELETE FROM refresh_token_recoveries WHERE user_id = $1`, [member.authUserId]);
     revoked = true;
   }
   return { member: { ...member, removedAt: new Date() }, revoked };

@@ -635,6 +635,38 @@ export const noticeAcknowledgements = pgTable(
   }),
 );
 
+// One row per refresh token rotated by a lost-reply recovery (SAA-251,
+// src/auth/refresh-recovery.ts): a client presented a refresh token after the
+// token's reuse window, and instead of the family being deleted, the unused
+// successor was rotated for it.
+//
+//   presented_token_id  the oauthRefreshToken row that was presented, the original
+//   rotated_token_id    the row the recovery rotated in its place
+//
+// The recovery reads this table to follow a chain: a link counts as part of the
+// original's recovery only when a row here says a recovery for that same
+// original rotated it, and a presented token that appears as rotated_token_id is
+// never recovered. Both ids are soft links with no foreign key, because Better
+// Auth's tables are outside this schema; a row whose tokens are gone (the family
+// deleted, or the member removed) matches nothing.
+export const refreshTokenRecoveries = pgTable(
+  "refresh_token_recoveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    clientId: text("client_id").notNull(),
+    userId: text("user_id").notNull(),
+    presentedTokenId: text("presented_token_id").notNull(),
+    rotatedTokenId: text("rotated_token_id").notNull(),
+    recoveredAt: timestamp("recovered_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    // A token is rotated once, so at most one recovery can have rotated it.
+    rotatedIdx: uniqueIndex("refresh_token_recoveries_rotated_idx").on(t.rotatedTokenId),
+  }),
+);
+
 export const accountsRelations = relations(accounts, ({ many }) => ({
   people: many(people),
   recordings: many(recordings),
