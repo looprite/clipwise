@@ -203,6 +203,10 @@ cp "$APP_SRC/day-logs.js" "$C/Resources/app/day-logs.js"
 # Setup's FileVault warning (SAA-243 item 7). main.js requires it by relative
 # path; a bundle without it fails to launch.
 cp "$APP_SRC/filevault.js" "$C/Resources/app/filevault.js"
+# The permission gate at start and the system audio prompt's process (SAA-124).
+# main.js requires both by relative path; a bundle without them fails to launch.
+cp "$APP_SRC/start-gate.js" "$C/Resources/app/start-gate.js"
+cp "$APP_SRC/prompt-child.js" "$C/Resources/app/prompt-child.js"
 install -m 755 "$SYSTEMTAP_BIN" "$C/Resources/bin/systemtap"
 install -m 755 "$MICCAP_BIN"    "$C/Resources/bin/miccap"
 install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"
