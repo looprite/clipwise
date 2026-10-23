@@ -40,6 +40,10 @@ const logLines = require('./log-lines.js');
 const { pruneDayLogs } = require('./day-logs.js');
 // Setup's FileVault warning (SAA-243 item 7).
 const filevault = require('./filevault.js');
+// The permission gate at start and its resume, and the system audio prompt's
+// process (SAA-124).
+const startGate = require('./start-gate.js');
+const { createPromptChild } = require('./prompt-child.js');
 const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // The auto-stop decision (SAA-184). Pure: it returns what should happen, and
 // autostopFeed carries out the one effect that stops a capture.
@@ -524,6 +528,13 @@ function deniedServices(dev) {
     if (dev.micPerm === 'denied') out.push('Microphone');
     if (dev.tapPerm === 'denied') out.push('System Audio');
     return out;
+}
+
+// The tray's and the notification's line for the services deniedServices found.
+function deniedNote(denied) {
+    return denied.length === 2
+        ? 'Both audio permissions are off — capture would record nothing'
+        : `${denied[0]} permission is off — fix it to record`;
 }
 
 // The manifest is what makes a capture a thing rather than a naming
@@ -3932,11 +3943,13 @@ function registerIdentityIpc() {
 // permissions, opening at the first screen not yet done. After that it only
 // ever shows the notice, when the notice is not agreed to (a raised version).
 
-// What the gate last turned away: { trigger, at }, trigger null for a manual
-// start. Kept for a while, not forever: a start refused long ago is not
-// something agreeing now should quietly carry out.
+// What a gate last turned away: { trigger, at, reason }, trigger null for a
+// manual start, reason 'notice' (the recording notice) or 'permissions' (an
+// unanswered audio grant, SAA-124). Kept for a while, not forever: a start
+// refused long ago is not something agreeing or answering now should quietly
+// carry out. One expiry for both, start-gate.js's.
 let blockedStart = null;
-const BLOCKED_START_TTL_MS = 10 * 60 * 1000;
+const { BLOCKED_START_TTL_MS } = startGate;
 // { win, token, mode, noticeOnly, override, busy, waiting, error, asking, address }
 //   mode       'launch' or 'blocked' (consent.buttonLabel)
 //   noticeOnly setup was finished before this window opened
@@ -3989,12 +4002,21 @@ function setupCompleted() {
     return now;
 }
 
+// mode 'permissions' (SAA-124): a start is waiting on an unanswered audio grant,
+// so the full window opens at the permissions screen, even when setup was
+// finished before; it is drawn as a 'launch' window from there on.
 function showSetupWindow(mode = 'launch') {
-    const noticeOnly = setupCompleted();
+    const forPermissions = mode === 'permissions';
+    if (forPermissions) mode = 'launch';
+    const noticeOnly = setupCompleted() && !forPermissions;
     if (noticeOnly && consent.isAcknowledged(SUPPORT_DIR)) return;
+    // The notice alone has no permissions screen: replaced by the full window.
+    if (forPermissions && setupWindow && setupWindow.noticeOnly) closeSetupWindow();
     // Already open: bring it forward, and if a start has been blocked since it
     // opened by itself, say so on the notice's button.
     if (setupWindow) {
+        if (forPermissions) setupWindow.override = 'permissions';
+        if (forPermissions && setup.isSetupCompleted(SUPPORT_DIR)) setupWindow.permissionsOnly = true;
         if (mode === 'blocked') setupWindow.mode = 'blocked';
         sendSetupState();
         try {
@@ -4031,7 +4053,10 @@ function showSetupWindow(mode = 'launch') {
             'Recording stays off until the recording notice is agreed to. Try the Clipwise menu bar item.');
         return;
     }
-    setupWindow = { win, token, mode, noticeOnly, override: null, busy: false, waiting: false, error: '', asking: null, address: undefined, fileVault: null };
+    // permissionsOnly: opened for a blocked start after setup was finished, so it
+    // ends once both grants are answered (startGate.permissionsWindowNext).
+    setupWindow = { win, token, mode, noticeOnly, override: forPermissions ? 'permissions' : null, busy: false, waiting: false, error: '', asking: null, address: undefined, fileVault: null,
+        permissionsOnly: forPermissions && setup.isSetupCompleted(SUPPORT_DIR) };
     // Setup only, not the notice alone. A warning, never a step: read in the
     // background and drawn when it answers.
     if (!noticeOnly) {
@@ -4054,6 +4079,9 @@ function showSetupWindow(mode = 'launch') {
         if (!setupWindow || setupWindow.win !== win || setupWindow.noticeOnly) return;
         readPermissions();
         sendSetupState();
+        // An answer given in System Settings. Waits while the prompt's child is
+        // still running; its exit resumes instead.
+        resumePermissionBlockedStart('focus');
     });
     // Closing the window is "Not now": nothing is written, and the gate stays shut
     // if the notice was not agreed to.
@@ -4192,6 +4220,7 @@ async function requestPermission(which) {
     }
     readPermissions();
     console.error(`[clipwise-recorder] setup: permissions now mic=${lastPermissions.mic} tap=${lastPermissions.tap}`);
+    resumePermissionBlockedStart('request');
     if (setupWindow !== w) return;
     w.asking = null;
     sendSetupState();
@@ -4201,32 +4230,24 @@ async function requestPermission(which) {
 // app first opens a tap. So the bundled systemtap runs until the answer is in
 // (at most SYSTEM_AUDIO_PROMPT_WAIT_MS), writing to /dev/null, so nothing it
 // hears is kept anywhere. The person is on the setup screen, not on a call.
+// prompt-child.js runs it and knows until it has exited; no capture starts
+// while it runs (SAA-124), and its exit is one of the places a start waiting on
+// the grants is resumed from.
+const systemAudioPrompt = createPromptChild();
 function promptForSystemAudio() {
-    return new Promise((resolve) => {
-        let child;
-        try {
-            child = spawn(SYSTEMTAP_BIN, [], { env: { ...process.env, SYSTEMTAP_OUT: '/dev/null' }, stdio: 'ignore' });
-        } catch (err) {
-            console.error(`setup: could not run systemtap for the prompt: ${String(err)}`);
-            resolve();
-            return;
-        }
-        child.once('error', (err) => console.error(`setup: systemtap for the prompt: ${String(err)}`));
-        const started = Date.now();
-        const timer = setInterval(() => {
-            const answered = readPermissions().tap !== 'notDetermined';
-            const gone = child.exitCode !== null || child.signalCode !== null;
-            if (!answered && !gone && Date.now() - started < SYSTEM_AUDIO_PROMPT_WAIT_MS) return;
-            clearInterval(timer);
-            try { child.kill('SIGINT'); } catch {}
-            setTimeout(() => {
-                if (child.exitCode === null && child.signalCode === null) {
-                    try { child.kill('SIGKILL'); } catch {}
-                }
-                resolve();
-            }, KILL_GRACE_MS);
-        }, 1000);
-    });
+    return systemAudioPrompt.run(
+        SYSTEMTAP_BIN, [], { ...process.env, SYSTEMTAP_OUT: '/dev/null' },
+        () => readPermissions().tap !== 'notDetermined',
+        {
+            pollMs: 1000,
+            waitMs: SYSTEM_AUDIO_PROMPT_WAIT_MS,
+            graceMs: KILL_GRACE_MS,
+            onExit: () => {
+                readPermissions();
+                resumePermissionBlockedStart('prompt exit');
+            },
+        },
+    );
 }
 
 // "Done": setup is recorded as finished, launch at login gets its default, and
@@ -4252,6 +4273,8 @@ function finishSetup() {
 // consent.shouldStartAfterAcknowledgement's decision; this carries it out.
 function resumeBlockedStart(mode) {
     const blocked = blockedStartFresh();
+    // A start waiting on the audio grants is resumePermissionBlockedStart's.
+    if (blocked && blocked.reason === 'permissions') return;
     blockedStart = null;
     const holds = (key) => detectActive.has(key);
     if (!consent.shouldStartAfterAcknowledgement(mode, blocked, holds)) {
@@ -4265,6 +4288,59 @@ function resumeBlockedStart(mode) {
     }
     // Restores what startRecording consumed when it was turned away, so the
     // capture is attributed to its trigger app exactly as it would have been.
+    pendingStartTrigger = blocked.trigger || null;
+    startRecording();
+}
+
+// The setup window opened for a blocked start, once the grants have been read
+// again: kept while one is unanswered; then, if setup was finished before it
+// opened, closed, and otherwise sent on to setup's next unfinished screen.
+function settlePermissionsWindow() {
+    const w = setupWindow;
+    if (!w || w.override !== 'permissions') return;
+    const next = startGate.permissionsWindowNext(w.permissionsOnly, lastPermissions.mic, lastPermissions.tap);
+    if (next === 'stay') return;
+    console.error(`[clipwise-recorder] setup: permissions answered — window ${next === 'close' ? 'closed (setup was finished)' : 'goes on with setup'}`);
+    if (next === 'close') {
+        closeSetupWindow();
+        renderTray();
+        return;
+    }
+    w.override = null;
+    sendSetupState();
+}
+
+// A start the permission gate turned away (SAA-124), after the grants were read
+// again: from requestPermission, the setup window's focus, or the system audio
+// prompt's exit. Whether it starts is startGate.resumeAfterPermissions's
+// decision; never while the prompt's child is running.
+function resumePermissionBlockedStart(source) {
+    settlePermissionsWindow();
+    const blocked = blockedStartFresh();
+    const decision = startGate.resumeAfterPermissions(blocked, lastPermissions.mic, lastPermissions.tap,
+        (key) => detectActive.has(key), { promptRunning: systemAudioPrompt.running() });
+    if (decision === 'none') return;
+    if (decision === 'wait') {
+        if (systemAudioPrompt.running()) console.error(`[clipwise-recorder] permissions: blocked start waits for the prompt's child (${source})`);
+        return;
+    }
+    blockedStart = null;
+    console.error(`[clipwise-recorder] permissions: blocked start — ${decision} (${source})`);
+    if (decision === 'drop-denied') {
+        const denied = deniedServices({ micPerm: lastPermissions.mic, tapPerm: lastPermissions.tap });
+        permissionIssue = { denied, blocked: true, note: deniedNote(denied) };
+        renderTray();
+        notify('permissions-denied-dropped', 'Clipwise: capture not started',
+            `${permissionIssue.note}. Open System Settings from the Clipwise menu bar.`);
+        return;
+    }
+    if (decision === 'call-ended') {
+        notify('permissions-blocked-call-ended', 'Clipwise: nothing to record',
+            'The call that tried to start recording has ended.');
+        return;
+    }
+    // As resumeBlockedStart: the capture is attributed to its trigger app exactly
+    // as it would have been, and startRecording reads the grants again.
     pendingStartTrigger = blocked.trigger || null;
     startRecording();
 }
@@ -4452,7 +4528,7 @@ function startRecording() {
     // only place the gate needs to be. What was turned away is remembered so
     // that agreeing can start it (resumeBlockedStart).
     if (!consent.isAcknowledged(SUPPORT_DIR)) {
-        blockedStart = { trigger, at: Date.now() };
+        blockedStart = { trigger, at: Date.now(), reason: 'notice' };
         console.error(`[clipwise-recorder] consent: start blocked until the recording notice is agreed to `
             + `(${trigger ? `triggered by ${trigger.key}` : 'manual start'})`);
         showSetupWindow('blocked');
@@ -4501,19 +4577,38 @@ function startRecording() {
     // buys a whole recording rather than half of one. This is only about
     // START — a track dying mid-capture is a different case, and the
     // classifier's keep-with-flag path still exists for it.
-    const denied = deniedServices(dev);
-    if (denied.length) {
-        permissionIssue = {
-            denied,
-            blocked: true,
-            note: denied.length === 2
-                ? 'Both audio permissions are off — capture would record nothing'
-                : `${denied[0]} permission is off — fix it to record`,
-        };
+    //
+    // startGate.permissionGate decides (SAA-124): refuse on a denial, as above;
+    // wait for a grant nobody has answered; and start without the gate when the
+    // system audio grant cannot be read at all.
+    const gate = startGate.permissionGate(dev.micPerm, dev.tapPerm);
+    if (gate === 'refuse') {
+        const denied = deniedServices(dev);
+        permissionIssue = { denied, blocked: true, note: deniedNote(denied) };
         renderTray();
         console.error(`start refused: denied permissions: ${denied.join(', ')}`);
         notify('start-permission-denied', 'Clipwise: capture not started', permissionIssue.note);
         return;
+    }
+    // Unanswered: nothing is started, so the 9 s start timeout cannot run while
+    // macOS's prompt is up. Setup opens at the permissions screen, and answering
+    // there starts this capture (resumePermissionBlockedStart).
+    if (gate === 'block') {
+        blockedStart = { trigger, at: Date.now(), reason: 'permissions' };
+        console.error(`[clipwise-recorder] start blocked until the audio permissions are answered `
+            + `(mic_perm=${dev.micPerm} tap_perm=${dev.tapPerm}, ${trigger ? `triggered by ${trigger.key}` : 'manual start'})`);
+        showSetupWindow('permissions');
+        // A capture an app asked for would otherwise just not happen, silently.
+        if (trigger) {
+            notify('permissions-start-blocked', 'Clipwise: allow audio access',
+                'Recording starts when you answer, if the call is still going.');
+        }
+        return;
+    }
+    // A private API that vanished must never stop every capture: today's path,
+    // with the start timeout's blocked-in-setup detection, and a line saying so.
+    if (gate === 'fallback') {
+        console.error(`start: system audio permission unreadable (tap_perm=${dev.tapPerm}) — starting without the permission gate`);
     }
     permissionIssue = null;
 
