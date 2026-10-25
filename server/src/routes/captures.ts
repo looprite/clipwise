@@ -22,6 +22,10 @@
 //                         first request
 //   different segments    409 capture_content_conflict; the row is unchanged
 //   another member's id   409 capture_id_taken; the row is unchanged
+//   a stale correction    409 identity_correction_stale: identity.corrects is not
+//                         the answer stored (SAA-258); nothing written
+// A correction that is not stale replaces the stored answer: attendees, me and
+// them, scope (ingest/identity.ts applyIdentityCorrection).
 // "Same content" is a SHA-256 of the segments as sent, without their voice indexes
 // (metadata.capture.content_hash).
 //
@@ -41,12 +45,15 @@ import { db, schema } from "../db/index.js";
 import { CLIPWISE_SOURCE, titlePlaceholderFor } from "../ingest/clipwise.js";
 import {
   applyIdentity,
+  applyIdentityCorrection,
   applyScope,
   applySpeakerNames,
   identityAlreadyApplied,
+  identityCorrectionStale,
   storeIdentityMetadata,
   type IdentityAnswer,
 } from "../ingest/identity.js";
+import { speakerFingerprintHash } from "../extract/extract.js";
 import { applyVoiceNames, storeVoiceNamesMetadata, voiceNamesAlreadyApplied, type VoiceNamesAnswer } from "../ingest/voice-names.js";
 import { countObservedFidelity, sourceFidelitySchema } from "../lib/fidelity.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
@@ -88,6 +95,7 @@ const identitySchema = z.object({
     .optional(),
   guests: z.array(z.object({ name: z.string().max(256).nullable().optional() })).max(50).nullable().optional(),
   scope: z.enum(["work", "personal"]).nullable().optional(),
+  corrects: z.string().max(64).optional(),
 });
 
 // The recorder's voice-naming answer (ingest/voice-names.ts VoiceNamesAnswer), as
@@ -420,7 +428,18 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       // request, and a repeat with the same segments writes nothing for it.
       let identityApplied = false;
       let namesWritten = false;
-      if (identity && !identityAlreadyApplied(existing.metadata, identity)) {
+      if (identity && identity.corrects !== undefined && !identityAlreadyApplied(existing.metadata, identity)) {
+        // A correction (SAA-258). Stale when the recording holds a different
+        // answer than the one it corrects: refused, and since this throws inside
+        // the transaction, nothing in this request is written.
+        if (identityCorrectionStale(existing.metadata, identity)) throw new HttpError(409, "identity_correction_stale");
+        const before = await speakerFingerprintHash(existing.id, tx);
+        await applyIdentityCorrection(tx, existing.id, identity);
+        identityApplied = true;
+        // Extraction runs again only if what it reads changed: an unchanged
+        // answer, saved again, queues nothing.
+        namesWritten ||= (await speakerFingerprintHash(existing.id, tx)) !== before;
+      } else if (identity && !identityAlreadyApplied(existing.metadata, identity)) {
         await applyIdentity(tx, existing.id, identity);
         const mapping = await applySpeakerNames(tx, existing.id, identity);
         await applyScope(tx, existing.id, identity);
