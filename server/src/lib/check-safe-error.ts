@@ -9,6 +9,12 @@
 // util.inspect) DOES contain the phrase, so the check is not passing because the
 // phrase never reached the error.
 //
+// Passing conditions (SAA-257): an Anthropic spend-limit 400, credit 400, 402 and
+// 529 are passing conditions and keep Anthropic's message; an Anthropic content
+// 400 is not and does not. A Voyage-shaped 5xx (a status, headers, a request id
+// and a body whose message holds the phrase, as an SDK error has) is not one
+// either and keeps no message: only the Anthropic SDK's own class can be.
+//
 //   npx tsx src/lib/check-safe-error.ts
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -19,7 +25,7 @@ import { DatabaseError } from "pg";
 import { inspect } from "node:util";
 import { z } from "zod";
 import { errorHandler } from "./http.js";
-import { describeError, describeErrorLine } from "./safe-error.js";
+import { describeError, describeErrorLine, passingApiCondition } from "./safe-error.js";
 import { embed } from "./voyage.js";
 
 const PHRASE = "PURPLE-ELEPHANT-4417";
@@ -180,6 +186,39 @@ async function main(): Promise<void> {
   check("an oversized body answers 413 payload_too_large", tooBig.status === 413 && tooBig.text === `{"error":"payload_too_large"}`, `got ${tooBig.status} ${tooBig.text}`);
   check("  ...and neither the answer nor the log holds the phrase", !tooBig.text.includes(PHRASE) && !tooBig.logged.includes(PHRASE), `LOGGED: ${tooBig.logged.slice(0, 300)}`);
   server.close();
+
+  // Passing conditions (SAA-257): which errors are, and which keep a message.
+  const SPEND = "You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.";
+  const CREDIT = "Your credit balance is too low to access the Anthropic API.";
+  const anthropicErr = (status: number, type: string, message: string) =>
+    Anthropic.APIError.generate(status, { type: "error", error: { type, message } }, undefined, new Headers({ "request-id": "req_test_456" }));
+  const passingCases: Array<{ name: string; err: unknown; message: string }> = [
+    { name: "an Anthropic spend-limit 400", err: anthropicErr(400, "invalid_request_error", SPEND), message: SPEND },
+    { name: "an Anthropic credit-balance 400", err: anthropicErr(400, "invalid_request_error", CREDIT), message: CREDIT },
+    { name: "an Anthropic 402 billing_error", err: anthropicErr(402, "billing_error", "Billing issue on this account."), message: "Billing issue on this account." },
+    { name: "an Anthropic 529 overloaded_error", err: anthropicErr(529, "overloaded_error", "Overloaded"), message: "Overloaded" },
+    { name: "an Anthropic spend-limit 400 as the cause of our own error", err: new Error("extraction failed", { cause: anthropicErr(400, "invalid_request_error", SPEND) }), message: SPEND },
+  ];
+  for (const c of passingCases) {
+    const line = describeErrorLine(c.err);
+    check(`${c.name} is a passing condition, and its line keeps Anthropic's message`, passingApiCondition(c.err) && line.includes(`message=${JSON.stringify(c.message)}`), `LINE: ${line}`);
+  }
+  const contentLine = describeErrorLine(api);
+  check("an Anthropic content 400 (the message quotes the input) is not a passing condition and keeps no message", !passingApiCondition(api) && !contentLine.includes("message=") && !contentLine.includes(PHRASE), `LINE: ${contentLine}`);
+
+  // A Voyage-shaped 5xx: everything an SDK error carries, but not Anthropic's class.
+  class VoyageAPIError extends Error {
+    status = 503;
+    headers = new Headers({ "request-id": "req_voyage_789" });
+    requestID = "req_voyage_789";
+    error = { type: "error", error: { type: "api_error", message: `service unavailable while embedding: ${PHRASE}` } };
+  }
+  const voyageShaped = new VoyageAPIError(`503 service unavailable while embedding: ${PHRASE}`);
+  const voyageLine = describeErrorLine(voyageShaped);
+  check("control: the Voyage-shaped 5xx is read as an API error (its status and request id are on the line)", voyageLine.includes("status=503") && voyageLine.includes("request_id=req_voyage_789"), `LINE: ${voyageLine}`);
+  check("a Voyage-shaped 5xx whose message holds the phrase is not a passing condition", !passingApiCondition(voyageShaped));
+  check("  ...and its message is not kept: no message= and no phrase on the line or in the full form", !voyageLine.includes("message=") && !voyageLine.includes(PHRASE) && !describeError(voyageShaped).includes(PHRASE), `LINE: ${voyageLine}`);
+  check("the real embed()'s Voyage failure is not a passing condition", voyageErr !== undefined && !passingApiCondition(voyageErr));
 
   // What callers and checks match on must survive unchanged.
   const notFound = new Error("recording 11111111-2222-3333-4444-555555555555 not found");

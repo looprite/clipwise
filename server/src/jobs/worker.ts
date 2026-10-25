@@ -24,6 +24,12 @@
 //   - A failure is retried after backoffMs[attempts - 1] and after maxAttempts
 //     the job is failed. An abort is never a failure, whatever error it surfaced
 //     as (see abort.ts).
+//   - A passing condition (SAA-257: an Anthropic spend limit, credit balance,
+//     402, 429 or 5xx; lib/safe-error passingApiCondition) is retried after
+//     passingBackoffMs[attempts - 1] instead, up to one attempt more than that
+//     ladder has steps, so a limit lifted within a day still ends in a ready
+//     recording with nobody stepping in. The one-shot timer covers the waits.
+//     A lease that runs out is still judged by maxAttempts (claim()).
 //   - Extraction is done once: a job whose recording is already complete does not
 //     call Anthropic (a re_extract does, when the names have changed since the
 //     promoted run was built). Each run's id is recorded on the job before it
@@ -41,7 +47,7 @@ import { readExtractionCompletion, runExtraction, speakerFingerprintHash, LeaseL
 import { embedMomentsByIds, type Embedder } from "../extract/embeddings.js";
 import { describeCalendarMatchApplication } from "../ingest/calendar-match.js";
 import { matchRecording } from "../pipeline/match-calendar.js";
-import { describeErrorLine, errorClassOf, logError } from "../lib/safe-error.js";
+import { describeErrorLine, errorClassOf, logError, passingApiCondition } from "../lib/safe-error.js";
 import { abortableFetch } from "./abort.js";
 import type { Wakeable } from "./registry.js";
 
@@ -51,6 +57,9 @@ export type WorkerOptions = {
   // Waits before a retry: after the first failed attempt, after the second, ...
   backoffMs?: number[];
   maxAttempts?: number;
+  // Waits before a retry of a passing condition, by the same index; the job gets
+  // one attempt more than there are steps. Absent: PASSING_BACKOFF_MS.
+  passingBackoffMs?: number[];
   // After a database error in the worker loop or the boot check: the wait before
   // trying again, doubling for each consecutive error up to errorRetryMaxMs, and
   // back to the first on any pass that succeeds.
@@ -63,6 +72,9 @@ export type WorkerOptions = {
   anthropicFetch?: typeof fetch;
   embedder?: Embedder;
 };
+
+// 1 min, 5 min, 30 min, 2 h, 6 h, 24 h: seven attempts over about 33 hours.
+export const PASSING_BACKOFF_MS: readonly number[] = [60_000, 300_000, 1_800_000, 7_200_000, 21_600_000, 86_400_000];
 
 export type Query = <R extends QueryResultRow = QueryResultRow>(text: string, params?: unknown[]) => Promise<QueryResult<R>>;
 
@@ -104,6 +116,7 @@ export class JobWorker implements Wakeable {
   private readonly renewMs: number;
   private readonly backoffMs: number[];
   private readonly maxAttempts: number;
+  private readonly passingBackoffMs: readonly number[];
   private readonly errorRetryMs: number;
   private readonly errorRetryMaxMs: number;
   private readonly query: Query;
@@ -122,6 +135,7 @@ export class JobWorker implements Wakeable {
     this.renewMs = opts.renewMs ?? 20_000;
     this.backoffMs = opts.backoffMs ?? [60_000, 300_000];
     this.maxAttempts = opts.maxAttempts ?? 3;
+    this.passingBackoffMs = opts.passingBackoffMs ?? PASSING_BACKOFF_MS;
     this.errorRetryMs = opts.errorRetryMs ?? 30_000;
     this.errorRetryMaxMs = opts.errorRetryMaxMs ?? 3_600_000;
     this.query = opts.query ?? ((text, params) => pool.query(text, params));
@@ -464,24 +478,27 @@ export class JobWorker implements Wakeable {
       this.log(job.id, job.recording_id, job.kind, r.rowCount === 0 ? "lease lost" : "running→failed", `${line}; the attempt is not counted`);
       return;
     }
-    if (job.attempts >= this.maxAttempts) {
+    const passing = passingApiCondition(err);
+    const ladder = passing ? this.passingBackoffMs : this.backoffMs;
+    const allowed = passing ? this.passingBackoffMs.length + 1 : this.maxAttempts;
+    if (job.attempts >= allowed) {
       const r = await this.query(
         `update jobs set state = 'failed', finished_at = now(), updated_at = now(), lease_token = null, lease_expires_at = null,
                 error_class = $3, last_error = $4
          where id = $1 and lease_token = $2 and state = 'running'`,
         [job.id, job.lease_token, errorClass, line],
       );
-      this.log(job.id, job.recording_id, job.kind, r.rowCount === 0 ? "lease lost" : "running→failed", `${line}; attempt ${job.attempts} of ${this.maxAttempts}`);
+      this.log(job.id, job.recording_id, job.kind, r.rowCount === 0 ? "lease lost" : "running→failed", `${line}; attempt ${job.attempts} of ${allowed}`);
       return;
     }
-    const wait = this.backoffMs[Math.min(job.attempts - 1, this.backoffMs.length - 1)] ?? 0;
+    const wait = ladder[Math.min(job.attempts - 1, ladder.length - 1)] ?? 0;
     const r = await this.query(
       `update jobs set state = 'queued', run_after = now() + make_interval(secs => $5::float8), updated_at = now(), lease_token = null, lease_expires_at = null,
               error_class = $3, last_error = $4
        where id = $1 and lease_token = $2 and state = 'running'`,
       [job.id, job.lease_token, errorClass, line, wait / 1000],
     );
-    this.log(job.id, job.recording_id, job.kind, r.rowCount === 0 ? "lease lost" : "running→queued", `${line}; attempt ${job.attempts} of ${this.maxAttempts}, retry in ${Math.round(wait / 1000)} s`);
+    this.log(job.id, job.recording_id, job.kind, r.rowCount === 0 ? "lease lost" : "running→queued", `${line}; attempt ${job.attempts} of ${allowed}, retry in ${Math.round(wait / 1000)} s`);
   }
 
   // One line per state change, ids and words of ours only.
