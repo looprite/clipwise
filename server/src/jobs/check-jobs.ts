@@ -37,7 +37,20 @@
 //   h   a Voyage failure leaves null embeddings; the embedding step fills them
 //       before done
 //   i   three Anthropic failures: failed, attempts 3, no call content in
-//       last_error, recording pending
+//       last_error, recording pending; a worker started after finds nothing to
+//       run, so it stays failed
+// Passing conditions (SAA-257): the ladder is passingBackoffMs, 40 ms a step here
+//   l1  a spend-limit 400 for four attempts, then answers: done on attempt 5, the
+//       recording ready, the log names the cause in Anthropic's words
+//   l2  a spend-limit 400 that never clears: failed after 7 attempts, last_error
+//       holds Anthropic's message; it stays failed
+//   l3  a credit-balance 400 once, then answers: done on attempt 2
+//   l4  a 402 billing_error for four attempts, then answers: done on attempt 5
+//   l5  a 529 for four attempts (each one the SDK's three calls), then answers:
+//       done on attempt 5
+//   l6  the default ladder is 1 min, 5 min, 30 min, 2 h, 6 h, 24 h, and a worker
+//       built with no options, given a job with three attempts used, queues the
+//       fourth attempt's retry 2 h out (the wait after attempt N is step N)
 //   j   no ANTHROPIC_API_KEY: failed without using an attempt
 //   dur capture.tracks of every shape: the promotion reads a duration or ignores it,
 //       and never fails the job
@@ -86,6 +99,7 @@ import { captureScopeRouter } from "../routes/capture-scope.js";
 import { capturesPost } from "../routes/captures.js";
 import { encrypt } from "../lib/crypto.js";
 import { errorHandler } from "../lib/http.js";
+import * as workerModule from "./worker.js";
 import { JobWorker, type WorkerOptions } from "./worker.js";
 
 const only = (process.env.CLIPWISE_CHECK_CONTROL ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -282,13 +296,13 @@ async function main(): Promise<void> {
   const model = (o: Partial<Parameters<typeof makeStubModel>[0]> = {}) => makeStubModel({ segmentCount: SEGS.length, phrase: PHRASE, ...o });
   const workers: JobWorker[] = [];
   const worker = (stub: ReturnType<typeof makeStubModel>, emb: ReturnType<typeof makeStubEmbedder>, o: WorkerOptions = {}) => {
-    const w = new JobWorker({ anthropicFetch: stub.fetch, embedder: emb, renewMs: 200, leaseMs: 10_000, backoffMs: [40, 40], ...o });
+    const w = new JobWorker({ anthropicFetch: stub.fetch, embedder: emb, renewMs: 200, leaseMs: 10_000, backoffMs: [40, 40], passingBackoffMs: [40, 40, 40, 40, 40, 40], ...o });
     workers.push(w);
     return w;
   };
-  const runToEnd = async (w: JobWorker, recordingId: string) => {
+  const runToEnd = async (w: JobWorker, recordingId: string, ms?: number) => {
     w.wake();
-    const jobs = await settle(recordingId);
+    const jobs = await settle(recordingId, ms);
     await w.stop();
     return jobs;
   };
@@ -642,7 +656,112 @@ async function main(): Promise<void> {
       check("i three Anthropic failures end the job failed with attempts 3, an error class, and a last_error that holds none of the API's words", jobs[0].state === "failed" && jobs[0].attempts === 3 && jobs[0].errorClass === "BadRequestError" && !!jobs[0].lastError && !jobs[0].lastError.includes(PHRASE) && !jobs[0].lastError.includes("quoted back"), JSON.stringify({ state: jobs[0].state, attempts: jobs[0].attempts, errorClass: jobs[0].errorClass, lastError: jobs[0].lastError }));
       check("i the recording stays pending, with no moments and no current run", rec.status === "pending" && rec.run === null && (await momentsOf(recordingId)).length === 0, JSON.stringify(rec));
       check("i each attempt called Anthropic once (a 400 is not retried by the SDK)", stub.calls.length === 3, String(stub.calls.length));
+      const later = worker(model(), makeStubEmbedder());
+      later.wake();
+      await sleep(300);
+      await later.stop();
+      const after = (await jobsOf(recordingId))[0];
+      check("i a worker started after it leaves it failed with attempts 3", after.state === "failed" && after.attempts === 3, JSON.stringify({ state: after.state, attempts: after.attempts }));
     }
+
+    // ---- l1–l6: passing conditions (SAA-257) -------------------------------------
+    // These take about 40 s (l5 waits out the SDK's own 5xx retries) and were added
+    // inside the window that runs to e's lease wait, so they get a fresh one, and
+    // the cases after them keep the window they had before.
+    stall.refresh();
+    // Anthropic's words for a spend limit set in the Console (docs: api/rate-limits,
+    // "Setting your own spend limit"): a 400 invalid_request_error whose message
+    // starts "You have reached your specified API usage limits". The credit
+    // wording is the one reported for a 400; the 402's text is a stand-in (the
+    // status and type are what classify it).
+    const SPEND = "You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.";
+    const CREDIT = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
+    const BILLING = "There is an issue with the billing information on this account.";
+    const failing = (count: number, status: number, type: string, message: string) => (n: number) => (n <= count ? { status, type, message } : null);
+    const logOf = (recordingId: string) => captured.filter((l) => l.includes(`recording=${recordingId} `));
+
+    if (wanted("l1")) {
+      await clearJobs();
+      const stub = model({ failCalls: failing(4, 400, "invalid_request_error", SPEND) });
+      const { recordingId } = await fresh();
+      const jobs = await runToEnd(worker(stub, makeStubEmbedder()), recordingId);
+      const rec = await recOf(recordingId);
+      check("l1 a spend-limit 400 on four attempts, then an answer: done on attempt 5, with no step from outside", jobs.length === 1 && jobs[0].state === "done" && jobs[0].attempts === 5, JSON.stringify({ jobs: jobs.map((j) => [j.state, j.attempts, j.lastError]) }));
+      check("l1 the recording is ready with its current run", rec.status === "ready" && !!rec.run, JSON.stringify(rec));
+      check("l1 four refused pass 1 calls, then pass 1, two pass 2 and collapse", JSON.stringify(stub.calls) === JSON.stringify(["pass1", "pass1", "pass1", "pass1", "pass1", "pass2", "pass2", "collapse"]), JSON.stringify(stub.calls));
+      const queued = logOf(recordingId).filter((l) => l.includes("running→queued"));
+      check("l1 each retry's log line names the cause in Anthropic's words, out of 7 attempts", queued.length === 4 && queued.every((l) => l.includes("status=400") && l.includes("You have reached your specified API usage limits")) && queued[3].includes("attempt 4 of 7"), queued.join("\n     "));
+    }
+
+    if (wanted("l2")) {
+      await clearJobs();
+      const stub = model({ failCalls: failing(Infinity, 400, "invalid_request_error", SPEND) });
+      const { recordingId } = await fresh();
+      const jobs = await runToEnd(worker(stub, makeStubEmbedder()), recordingId);
+      check("l2 a spend limit that never clears: failed after 7 attempts, one call each", jobs[0].state === "failed" && jobs[0].attempts === 7 && stub.calls.length === 7, JSON.stringify({ state: jobs[0].state, attempts: jobs[0].attempts, calls: stub.calls.length }));
+      check("l2 last_error keeps Anthropic's message beside the class and status", jobs[0].errorClass === "BadRequestError" && !!jobs[0].lastError && jobs[0].lastError.includes("status=400") && jobs[0].lastError.includes(SPEND), JSON.stringify({ errorClass: jobs[0].errorClass, lastError: jobs[0].lastError }));
+      const later = worker(model(), makeStubEmbedder());
+      later.wake();
+      await sleep(300);
+      await later.stop();
+      const after = (await jobsOf(recordingId))[0];
+      check("l2 a worker started after it leaves it failed with attempts 7", after.state === "failed" && after.attempts === 7, JSON.stringify({ state: after.state, attempts: after.attempts }));
+    }
+
+    if (wanted("l3")) {
+      await clearJobs();
+      const stub = model({ failCalls: failing(1, 400, "invalid_request_error", CREDIT) });
+      const { recordingId } = await fresh();
+      const jobs = await runToEnd(worker(stub, makeStubEmbedder()), recordingId);
+      const queued = logOf(recordingId).filter((l) => l.includes("running→queued"));
+      check("l3 a credit-balance 400, then an answer: done on attempt 2, the retry's line quoting the credit message", jobs[0].state === "done" && jobs[0].attempts === 2 && queued.length === 1 && queued[0].includes("credit balance is too low") && queued[0].includes("attempt 1 of 7"), JSON.stringify({ jobs: jobs.map((j) => [j.state, j.attempts]), queued }));
+    }
+
+    if (wanted("l4")) {
+      await clearJobs();
+      const stub = model({ failCalls: failing(4, 402, "billing_error", BILLING) });
+      const { recordingId } = await fresh();
+      const jobs = await runToEnd(worker(stub, makeStubEmbedder()), recordingId);
+      const queued = logOf(recordingId).filter((l) => l.includes("running→queued"));
+      check("l4 a 402 billing_error on four attempts, then an answer: done on attempt 5", jobs[0].state === "done" && jobs[0].attempts === 5 && (await recOf(recordingId)).status === "ready", JSON.stringify({ jobs: jobs.map((j) => [j.state, j.attempts]) }));
+      check("l4 the retry lines name status 402, billing_error and the message", queued.length === 4 && queued.every((l) => l.includes("status=402") && l.includes("type=billing_error") && l.includes(BILLING)), queued.join("\n     "));
+    }
+
+    if (wanted("l5")) {
+      await clearJobs();
+      // The SDK retries a 5xx twice inside one attempt, so each attempt is three calls.
+      const stub = model({ failCalls: failing(12, 529, "overloaded_error", "Overloaded") });
+      const { recordingId } = await fresh();
+      const jobs = await runToEnd(worker(stub, makeStubEmbedder()), recordingId, 60_000);
+      const queued = logOf(recordingId).filter((l) => l.includes("running→queued"));
+      check("l5 a 529 on four attempts, then an answer: done on attempt 5", jobs[0].state === "done" && jobs[0].attempts === 5 && stub.calls.length === 16, JSON.stringify({ jobs: jobs.map((j) => [j.state, j.attempts]), calls: stub.calls.length }));
+      check("l5 the retry lines name status 529, overloaded_error and the message", queued.length === 4 && queued.every((l) => l.includes("status=529") && l.includes("type=overloaded_error") && l.includes('message="Overloaded"')), queued.join("\n     "));
+    }
+
+    if (wanted("l6")) {
+      await clearJobs();
+      check("l6 the default ladder is 1 min, 5 min, 30 min, 2 h, 6 h, 24 h", JSON.stringify(workerModule.PASSING_BACKOFF_MS) === JSON.stringify([60_000, 300_000, 1_800_000, 7_200_000, 21_600_000, 86_400_000]), JSON.stringify(workerModule.PASSING_BACKOFF_MS));
+      const stub = model({ failCalls: failing(Infinity, 400, "invalid_request_error", SPEND) });
+      const { recordingId } = await fresh();
+      // Three attempts already used, so this claim is the fourth: past maxAttempts,
+      // where only a passing condition is retried, and step 4 of the ladder: 2 h out.
+      await pool.query(`update jobs set attempts = 3 where recording_id = $1`, [recordingId]);
+      // Production's worker: no backoff options at all (server.ts builds it bare).
+      const w = new JobWorker({ anthropicFetch: stub.fetch, embedder: makeStubEmbedder(), renewMs: 200, leaseMs: 10_000 });
+      workers.push(w);
+      w.wake();
+      const t0 = Date.now();
+      let row: { state: string; attempts: number; wait_s: number } | undefined;
+      for (;;) {
+        row = (await pool.query(`select state, attempts, extract(epoch from run_after - now())::float8 as wait_s from jobs where recording_id = $1`, [recordingId])).rows[0];
+        if ((row?.state === "queued" && row.attempts === 4) || row?.state === "failed" || Date.now() - t0 > 10_000) break;
+        await sleep(25);
+      }
+      await w.stop();
+      check("l6 a worker with no options queues a spend limit's fourth attempt again, 2 h out", row?.state === "queued" && row.attempts === 4 && row.wait_s > 7_190 && row.wait_s <= 7_200.5 && stub.calls.length === 1, JSON.stringify({ row, calls: stub.calls.length }));
+      await clearJobs();
+    }
+    stall.refresh();
 
     // ---- j ---------------------------------------------------------------------
     if (wanted("j")) {
