@@ -82,6 +82,7 @@ function listMeetings(dir, now = Date.now(), days = DAYS, opts = {}) {
         const manifest = readJson(path.join(dir, `manifest-${stem}.json`));
         const appRaw = manifest && manifest.trigger_app ? cleanName(manifest.trigger_app.name) : null;
         const identity = readJson(path.join(dir, `identity-${stem}.json`));
+        const uploadEntry = opts.uploadQueueDir ? readJson(path.join(opts.uploadQueueDir, `${stem}.json`)) : null;
         const participants = participantsFor(dir, stem);
         const hasVoices = fs.existsSync(path.join(dir, `voices-${stem}.json`));
         const named = fs.existsSync(path.join(dir, `voice-names-${stem}.json`));
@@ -106,6 +107,11 @@ function listMeetings(dir, now = Date.now(), days = DAYS, opts = {}) {
             canFix: hasVoices && (named || !settled),
             hasNames: named,
             namingPending: hasVoices && !settled,
+            // A saved answer can be corrected (SAA-258); an unanswered call is
+            // answered through its tray item instead. Not while its upload has
+            // failed: the queue doesn't send that capture again, so a correction
+            // would be written here and never reach the server.
+            canChangeIdentity: !!identity && !(uploadEntry && uploadEntry.state === 'failed'),
         };
         row.line = identifyingLine(row);
         rows.push(row);
