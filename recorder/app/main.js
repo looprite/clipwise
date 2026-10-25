@@ -21,8 +21,8 @@ const {
     IDENTITY_WINDOW, contentHeightFor, knownGuestNames, mergeGuestNames,
     buildAnswerDoc, writeAnswer,
     writeLaterMarker, readLaterMarker, deleteLaterMarker,
-    pendingIdentityStems, recentPendingIdentityStems,
-    buildVoiceNamesDoc, writeVoiceNamesAnswer, readNamingData, pendingVoiceNamingStems,
+    recentPendingIdentityStems,
+    buildVoiceNamesDoc, writeVoiceNamesAnswer, readNamingData, recentPendingVoiceNamingStems,
     readVoiceNamesAnswer, mostRecentNamedStem, mostRecentCaptureStem, assignVoice,
 } = require('./identity-answer.js');
 const { stopMessageFor } = require('./voice-naming-wait.js');
@@ -1575,7 +1575,6 @@ function renderTray() {
     // Older markers are untouched on disk — recovery can still apply a late
     // identity-<stem>.json answer whenever one arrives; this only bounds
     // what the tray lists.
-    const pendingIdentitySet = new Set(pendingIdentityStems(OUTDIR));
     const recentPendingIdentity = recentPendingIdentityStems(OUTDIR);
     if (recentPendingIdentity.length > 0) {
         items.push({ type: 'separator' });
@@ -1599,8 +1598,11 @@ function renderTray() {
     // items together would be confusing about which to answer first (SAA-197
     // decision). It becomes visible again once identity is answered or
     // explicitly skipped — both clear the identity pending marker.
-    const pendingVoiceNaming = pendingVoiceNamingStems(OUTDIR)
-        .filter((stem) => !pendingIdentitySet.has(stem));
+    //
+    // Capped like the identity block: the 3 most recent calls from the last
+    // 7 days (recentPendingVoiceNamingStems, SAA-255). Older ones stay in
+    // Recent meetings only.
+    const pendingVoiceNaming = recentPendingVoiceNamingStems(OUTDIR);
     if (pendingVoiceNaming.length > 0) {
         items.push({ type: 'separator' });
         for (const stem of pendingVoiceNaming) {

@@ -251,11 +251,17 @@ function stemTimestampMs(stem) {
 // the tray lists. `now` is a parameter, not Date.now() inline, so this is
 // exercisable without mocking the clock.
 function recentPendingIdentityStems(dir, opts = {}) {
+    return recentStems(pendingIdentityStems(dir), opts);
+}
+
+// The ascending `stems` narrowed to the maxItems most recent from the last
+// windowMs (3 and 7 days unless given), shared by both tray lists.
+function recentStems(stems, opts = {}) {
     const now = opts.now ?? Date.now();
     const maxItems = opts.maxItems ?? 3;
     const windowMs = opts.windowMs ?? 7 * 24 * 60 * 60 * 1000;
     const cutoff = now - windowMs;
-    const recent = pendingIdentityStems(dir).filter((stem) => {
+    const recent = stems.filter((stem) => {
         const t = stemTimestampMs(stem);
         return t !== null && t >= cutoff;
     });
@@ -398,6 +404,16 @@ function pendingVoiceNamingStems(dir) {
     return stems;
 }
 
+// The tray's "Name N voices…" list (SAA-255): pendingVoiceNamingStems less any
+// stem still pending on identity (naming voices before knowing who was on the
+// call isn't useful), then narrowed the way recentPendingIdentityStems narrows
+// its list. The exclusion comes first so the slots go to calls that can be
+// named. Older calls stay in Recent meetings, which doesn't read this.
+function recentPendingVoiceNamingStems(dir, opts = {}) {
+    const pendingIdentity = new Set(pendingIdentityStems(dir));
+    return recentStems(pendingVoiceNamingStems(dir).filter((stem) => !pendingIdentity.has(stem)), opts);
+}
+
 // The newest capture that already has a saved voice-names answer — the one
 // and only "Rename voices…" candidate (SAA-195: only one call gets this
 // item, never a list of past calls).
@@ -462,6 +478,7 @@ module.exports = {
     readNamingData,
     namingSettled,
     pendingVoiceNamingStems,
+    recentPendingVoiceNamingStems,
     readVoiceNamesAnswer,
     assignVoice,
     mostRecentNamedStem,
