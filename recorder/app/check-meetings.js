@@ -452,6 +452,33 @@ check('without the processing capture, the tray item is the newest ready meeting
     fs.rmSync(c7, { recursive: true, force: true });
 }
 
+// SAA-255 part 2: the tray lists "Name voices" items the way it lists identity
+// items, the 3 most recent calls from the last 7 days. Five two-guest calls
+// pending naming, aged 1 hour, 1, 3, 6 and 8 days before NOW.
+{
+    const ia = require('./identity-answer.js');
+    const c8 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-naming-cap-check-'));
+    const cw = (name, doc) => fs.writeFileSync(path.join(c8, name), JSON.stringify(doc));
+    const stemAgo = (ms) => new Date(NOW - ms).toISOString().slice(0, 19).replace(/:/g, '-') + 'Z';
+    const DAY = 24 * 3600e3;
+    const [H1, D1, D3, D6, D8] = [3600e3, DAY, 3 * DAY, 6 * DAY, 8 * DAY].map(stemAgo);
+    for (const stem of [H1, D1, D3, D6, D8]) {
+        cw(`manifest-${stem}.json`, { started_at: stem, tracks: [{ duration_s: 1800 }] });
+        cw(`voices-${stem}.json`, { voices: [{ voiceIndex: 1 }, { voiceIndex: 2 }] });
+        cw(`identity-${stem}.json`, { self: { name: 'Jon Example' }, guests: [{ name: 'Ann Example' }, { name: 'Bob Example' }], scope: 'work' });
+    }
+    const listed = ia.recentPendingVoiceNamingStems(c8, { now: NOW });
+    check('SAA-255 part 2: of 5 pending calls, the tray lists the 3 newest within 7 days',
+        listed.join() === [D3, D1, H1].join(), listed.join());
+    const all = ia.pendingVoiceNamingStems(c8);
+    check('control: all 5 calls are pending naming (the list before the cap)',
+        all.join() === [D8, D6, D3, D1, H1].join(), all.join());
+    const windowOnly = ia.recentPendingVoiceNamingStems(c8, { now: NOW, maxItems: 10 });
+    check('control: with no 3-item cap, the 8-day call is still left out by the 7 days',
+        windowOnly.join() === [D6, D3, D1, H1].join(), windowOnly.join());
+    fs.rmSync(c8, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);
