@@ -3257,14 +3257,18 @@ function drainUploadQueue(reason) {
 // calendar-match-<stem>.json for Recent Meetings (decision 15). jobPollStep has
 // the limit: past JOB_POLL_LIMIT_MS of answers, a state still unsettled is
 // "stale" (status unknown) and is asked about again only by askJobsAgain, at
-// launch, on wake and when Recent meetings opens (SAA-183). A new send of a
-// capture (an answer) makes its state unknown again, which starts the asking,
-// and the limit, again.
+// launch, on wake and when Recent meetings opens (SAA-183). That pass also asks
+// about a failed capture from the last JOB_FAILED_ASK_MS, since a server retry
+// can finish it later; a reply that still says failed leaves it failed. A new
+// send of a capture (an answer) makes its state unknown again, which starts the
+// asking, and the limit, again.
+
+const JOB_FAILED_ASK_MS = 7 * 24 * 60 * 60 * 1000;
 
 let jobPollTimer = null;
 let jobPolling = false;
 // Set by askJobsAgain: the next pass asks about every sent capture whose state
-// is unsettled or stale, due or not.
+// is unsettled or stale, or failed within JOB_FAILED_ASK_MS, due or not.
 let jobAskAll = false;
 
 function unsettledUploads() {
@@ -3282,9 +3286,9 @@ function scheduleJobPoll(delayMs) {
     jobPollTimer = setTimeout(() => { jobPollTimer = null; pollJobStates(); }, waitMs);
 }
 
-// Asks once about every sent capture not known to be finished, stale ones
-// included, without waiting for any backoff (SAA-183). A pass already running
-// leaves it to the next one.
+// Asks once about every sent capture not known to be finished, stale ones and
+// failed ones from the last JOB_FAILED_ASK_MS included, without waiting for any
+// backoff (SAA-183). A pass already running leaves it to the next one.
 function askJobsAgain(reason) {
     jobAskAll = true;
     console.error(`[clipwise-recorder] jobs: asking again (${reason})`);
@@ -3302,7 +3306,7 @@ async function pollJobStates() {
     try {
         const now = Date.now();
         const asking = listUploadQueue().filter((e) => e.state === 'sent' && (
-            (askAll && e.jobState === 'stale') ||
+            (askAll && (e.jobState === 'stale' || (e.jobState === 'failed' && stemTimeMs(e.stem) >= now - JOB_FAILED_ASK_MS))) ||
             ((!JOB_SETTLED.has(e.jobState) || e.matchPending === true) && (askAll || !(Date.parse(e.nextJobPollAt) > now)))));
         for (const entry of asking) {
             const captureId = captureIdFor(entry.stem);
