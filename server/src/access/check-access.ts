@@ -271,6 +271,7 @@ async function cleanup(accountId: string | null): Promise<void> {
   for (const t of ["oauthRefreshToken", "oauthAccessToken", "oauthConsent"]) {
     await run(`delete from "${t}" where "userId" in (select id from auth_user where email like $1)`, [like]);
   }
+  await run(`delete from refresh_token_recoveries where user_id in (select id from auth_user where email like $1)`, [like]);
   await run(`delete from auth_session where "userId" in (select id from auth_user where email like $1)`, [like]);
   await run(`delete from auth_account where "userId" in (select id from auth_user where email like $1)`, [like]);
   await run(`delete from auth_user where email like $1`, [like]);
@@ -1837,8 +1838,38 @@ async function main(): Promise<void> {
     record(unconfigured.status === 503, "with no sign-in configured, content routes answer 503, not data", `status ${unconfigured.status}`);
 
     // ---- revocation --------------------------------------------------------
+    // refresh_token_recoveries (SAA-251) has no foreign key to Better Auth's
+    // tables, so nothing cascades from them and 18f's pg_constraint walk does not
+    // find it: removeMember must delete its rows itself. One fixture row for B,
+    // who is removed, and one for A, who is not (the control). The user ids are
+    // read before the removal and the rows counted by them: a lookup by email
+    // afterwards would count 0 for B if removal ever deleted the auth_user row,
+    // whether or not the recovery rows went.
+    const userIdOf = async (email: string): Promise<string | null> =>
+      ((await pool.query<{ id: string }>(`select id from auth_user where email = $1`, [email])).rows[0]?.id ?? null);
+    const bUserId = await userIdOf(B.email);
+    const aUserId = await userIdOf(A.email);
+    const recoveryFixture = async (userId: string | null) =>
+      pool.query(
+        `insert into refresh_token_recoveries (client_id, user_id, presented_token_id, rotated_token_id) values ($1, $2, $3, $4)`,
+        [RECORDER_CLIENT_ID, userId, `check-access-${tag}-presented-${userId}`, `check-access-${tag}-rotated-${userId}`],
+      );
+    const recoveryCount = async (userId: string | null) =>
+      Number((await pool.query(`select count(*) as n from refresh_token_recoveries where user_id = $1`, [userId])).rows[0].n);
+    if (bUserId && aUserId) {
+      await recoveryFixture(bUserId);
+      await recoveryFixture(aUserId);
+    }
+    const recoveriesBefore = { b: await recoveryCount(bUserId), a: await recoveryCount(aUserId) };
     const before = await http("GET", `/accounts/${acc}/moments?q=${WORD}&scope=all`, { token: B.token });
     await removeMember(B.email);
+    const recoveriesAfter = { b: await recoveryCount(bUserId), a: await recoveryCount(aUserId) };
+    record(
+      !!bUserId && !!aUserId && recoveriesBefore.b === 1 && recoveriesBefore.a === 1 && recoveriesAfter.b === 0 && recoveriesAfter.a === 1,
+      "revocation: removing a member deletes their refresh_token_recoveries rows, and another member's stay",
+      `user ids ${bUserId ? "read" : "missing"}/${aUserId ? "read" : "missing"}; before: removed ${recoveriesBefore.b}, other ${recoveriesBefore.a}; after: removed ${recoveriesAfter.b}, other ${recoveriesAfter.a}`,
+    );
+    await pool.query(`delete from refresh_token_recoveries where presented_token_id like $1`, [`check-access-${tag}-%`]);
     const after = await http("GET", `/accounts/${acc}/moments?q=${WORD}&scope=all`, { token: B.token });
     const afterMe = await http("GET", "/accounts/me", { token: B.token });
     const afterTr = await http("GET", `/recordings/${rec.a2.id}/transcript`, { token: B.token });
@@ -1896,10 +1927,11 @@ async function main(): Promise<void> {
     // garbled: the server's whole reply is read and the recorder gets its status
     // with an empty body, the status recorded in `garbled`; or hung: never sent
     // to the server, and ended only when the request's own signal or `limit`
-    // aborts, with `hung` recording which ended it and after how long.
+    // aborts, with `hung` recording which ended it and after how long. With `via`,
+    // every request goes to that instance's handler instead of this server.
     const hung: { by: string | null; ms: number | null } = { by: null, ms: null };
     const garbled: { status: number | null } = { status: null };
-    const recorderRefresh = async (held: Held, first: "deliver" | "drop" | "garble" | "hang", limit?: AbortSignal) => {
+    const recorderRefresh = async (held: Held, first: "deliver" | "drop" | "garble" | "hang", limit?: AbortSignal, via?: ReturnType<typeof createAuth>) => {
       if (!refreshModule || !held.tokens) return null;
       const realFetch = globalThis.fetch;
       let mode = first;
@@ -1921,7 +1953,7 @@ async function main(): Promise<void> {
             limit?.addEventListener("abort", () => end("the check's limit", limit.reason));
           });
         }
-        const res = await realFetch(base + url.slice(cfg.baseURL.length), init);
+        const res = via ? await via.handler(new Request(url, init)) : await realFetch(base + url.slice(cfg.baseURL.length), init);
         if (mode === "garble") {
           mode = "deliver";
           await res.arrayBuffer();
@@ -1999,6 +2031,199 @@ async function main(): Promise<void> {
       "recorder refresh, a 2xx reply whose body can't be read: the recorder retries at once, and is refreshed and still signed in",
       `flow error ${garbledFlow.error} at ${garbledFlow.step}; server answered ${garbled.status}; refresh ${garbledRefresh}; signed out ${garbledHeld.signedOut}`,
     );
+
+    // ---- lost-reply recovery (SAA-251, src/auth/refresh-recovery.ts) ---------
+    // A refresh token presented after its reuse window, when the reply that
+    // rotated it was lost. The rotations here are made by a second instance whose
+    // window is 2 seconds (createAuth's control), so each case gets past a window
+    // in about 3 seconds instead of 31. A reply "lost" is one this check asks for
+    // and throws away, so the holder keeps the token it presented. Each case has
+    // its own member: a family is one client and one user, and several of these
+    // cases delete theirs.
+    //
+    // Waits 301 seconds first, past the sign-in rate limit's window (10 per 5
+    // minutes, auth/auth.ts) and so past the token endpoint's 60 seconds too:
+    // each case's member signs in once, and its recorder sign-in is a token
+    // request to this server.
+    await new Promise((resolve) => setTimeout(resolve, 301_000));
+    const shortAuth = createAuth(cfg, { refreshTokenReuseInterval: 2 });
+    type TokenReply = { status: number; json: any };
+    const tokenVia = async (refresh: string | undefined, via: "short" | "server" = "short"): Promise<TokenReply> => {
+      const form = { grant_type: "refresh_token", refresh_token: refresh ?? "", client_id: recorder.clientId, resource: cfg.captureResource };
+      if (via === "server") {
+        const r = await http("POST", "/api/auth/oauth2/token", { form });
+        return { status: r.status, json: r.json };
+      }
+      const res = await shortAuth.handler(
+        new Request(`${cfg.baseURL}/api/auth/oauth2/token`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", origin: cfg.baseURL },
+          body: new URLSearchParams(form),
+        }),
+      );
+      const text = await res.text();
+      let json: any = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = null;
+      }
+      return { status: res.status, json };
+    };
+    // A member with a password login and nothing else; the recorder sign-in is
+    // the case's own.
+    const recoveryMember = async (label: string): Promise<{ who: Who; userId: string | null }> => {
+      const email = `${label}-${tag}@clipwise.test`;
+      const member = await addMember({ email, role: "member", name: `Check ${label}` });
+      await createPasswordLogin(email, `Check ${label}`, PASSWORD);
+      return { who: { email, memberId: member.id, token: "", refresh: null }, userId: await userIdOf(email) };
+    };
+    type FamilyRow = { token: string; revoked: Date | null; until: Date | null };
+    const familyOf = async (userId: string | null): Promise<FamilyRow[]> =>
+      (
+        await pool.query<FamilyRow>(
+          `select token, revoked, "rotationReplayExpiresAt" as until from "oauthRefreshToken" where "clientId" = $1 and "userId" = $2`,
+          [recorder.clientId, userId],
+        )
+      ).rows;
+    // Until every reuse window in the family has passed.
+    const pastWindows = async (userId: string | null) => {
+      const ends = (await familyOf(userId)).map((r) => r.until?.getTime() ?? 0);
+      const end = Math.max(0, ...ends);
+      while (Date.now() <= end) await new Promise((resolve) => setTimeout(resolve, end - Date.now() + 1));
+    };
+    // The stored form of a refresh token (oauth-provider utils defaultHasher).
+    const storedForm = (refresh: string | undefined) => createHash("sha256").update(refresh ?? "").digest("base64url");
+    // Intact: the family still has its rows, exactly one of them live, and the
+    // live one is the token the holder now has.
+    const describeFamily = (rows: FamilyRow[], held: string | undefined) => {
+      const live = rows.filter((r) => r.revoked === null);
+      return {
+        intact: rows.length >= 2 && live.length === 1 && live[0].token === storedForm(held),
+        text: `${rows.length} rows, ${live.length} live${live.length === 1 ? (live[0].token === storedForm(held) ? " (the one held)" : " (not the one held)") : ""}`,
+      };
+    };
+
+    // R1. The reply is lost; the original is presented after the window, and its
+    // successor was never used: refreshed, signed in, the family intact.
+    {
+      const { who, userId } = await recoveryMember("rena");
+      const flow = await recFlow(who);
+      const held = heldFrom(flow);
+      const lost = await tokenVia(held.tokens?.refresh);
+      await pastWindows(userId);
+      const outcome = await recorderRefresh(held, "deliver", undefined, shortAuth);
+      const fam = describeFamily(await familyOf(userId), held.tokens?.refresh);
+      const recovered = await recoveryCount(userId);
+      record(
+        lost.status === 200 && outcome === "refreshed" && held.signedOut === null && fam.intact && recovered === 1,
+        "refresh recovery: a reply lost, the original presented after the window with its successor unused: refreshed, still signed in, the family intact",
+        `recorder sign-in ${flow.step}${flow.error ? ` (${flow.error})` : ""}; lost refresh ${lost.status}; recorder ${outcome}; signed out ${held.signedOut}; family ${fam.text}; recoveries ${recovered}`,
+      );
+    }
+
+    // R2. The recovery's own reply is lost too, and the original is presented
+    // again: recovered again through the chain (original, its successor rotated
+    // by a recovery for it, that one's successor unused), the family intact.
+    {
+      const { who, userId } = await recoveryMember("rhea");
+      const flow = await recFlow(who);
+      const held = heldFrom(flow);
+      const lost = await tokenVia(held.tokens?.refresh);
+      await pastWindows(userId);
+      const lostRecovery = await tokenVia(held.tokens?.refresh);
+      await pastWindows(userId);
+      const outcome = await recorderRefresh(held, "deliver", undefined, shortAuth);
+      const fam = describeFamily(await familyOf(userId), held.tokens?.refresh);
+      const recovered = await recoveryCount(userId);
+      record(
+        lost.status === 200 && lostRecovery.status === 200 && outcome === "refreshed" && held.signedOut === null && fam.intact && recovered === 2,
+        "refresh recovery: the recovery's reply lost as well, the original presented again: recovered again through the chain, still signed in, the family intact",
+        `recorder sign-in ${flow.step}${flow.error ? ` (${flow.error})` : ""}; lost refresh ${lost.status}; lost recovery ${lostRecovery.status} ${lostRecovery.json?.error ?? ""}; recorder ${outcome}; signed out ${held.signedOut}; family ${fam.text}; recoveries ${recovered}`,
+      );
+    }
+
+    // C1 (control). The successor is used by an ordinary refresh, then the
+    // original is presented after the window: two holders, so 400 and the family
+    // deleted, as before the recovery existed.
+    {
+      const { who, userId } = await recoveryMember("ruth");
+      const flow = await recFlow(who);
+      const held = heldFrom(flow);
+      const lost = await tokenVia(held.tokens?.refresh);
+      const used = await tokenVia(lost.json?.refresh_token);
+      await pastWindows(userId);
+      const outcome = await recorderRefresh(held, "deliver", undefined, shortAuth);
+      const rows = await familyOf(userId);
+      const recovered = await recoveryCount(userId);
+      record(
+        lost.status === 200 && used.status === 200 && outcome === "signed-out" && held.signedOut === "refresh 400 invalid_grant" && rows.length === 0 && recovered === 0,
+        "refresh recovery, control: the successor used by an ordinary refresh, then the original presented after the window: 400 invalid_grant and the family deleted",
+        `recorder sign-in ${flow.step}${flow.error ? ` (${flow.error})` : ""}; lost refresh ${lost.status}; successor used ${used.status}; recorder ${outcome} (${held.signedOut}); family ${rows.length} rows; recoveries ${recovered}`,
+      );
+    }
+
+    // C2 (control, recover once). A token that a recovery rotated is presented
+    // after its window: it is a link, not an original, so 400 and the family
+    // deleted. (Before the recovery exists, the recovery step here already
+    // deletes the family, and this line passes on that.)
+    {
+      const { who, userId } = await recoveryMember("rosa");
+      const flow = await recFlow(who);
+      const held = heldFrom(flow);
+      const lost = await tokenVia(held.tokens?.refresh);
+      const successor: string | undefined = lost.json?.refresh_token;
+      await pastWindows(userId);
+      const recovery = await tokenVia(held.tokens?.refresh);
+      await pastWindows(userId);
+      const link = await tokenVia(successor);
+      const rows = await familyOf(userId);
+      record(
+        lost.status === 200 && link.status === 400 && link.json?.error === "invalid_grant" && rows.length === 0,
+        "refresh recovery, control: a token rotated by a recovery, presented after its window, is not recovered: 400 invalid_grant and the family deleted",
+        `recorder sign-in ${flow.step}${flow.error ? ` (${flow.error})` : ""}; lost refresh ${lost.status}; recovery ${recovery.status}; link presented ${link.status} ${link.json?.error ?? ""}; family ${rows.length} rows`,
+      );
+    }
+
+    // C3 (control). The chain has an ordinary rotation in it: the original is
+    // recovered once, the holder then refreshes normally with what the recovery
+    // gave, and the original is presented again: 400 and the family deleted.
+    {
+      const { who, userId } = await recoveryMember("rita");
+      const flow = await recFlow(who);
+      const held = heldFrom(flow);
+      const lost = await tokenVia(held.tokens?.refresh);
+      await pastWindows(userId);
+      const recovery = await tokenVia(held.tokens?.refresh);
+      const ordinary = await tokenVia(recovery.json?.refresh_token);
+      await pastWindows(userId);
+      const original = await tokenVia(held.tokens?.refresh);
+      const rows = await familyOf(userId);
+      record(
+        lost.status === 200 && original.status === 400 && original.json?.error === "invalid_grant" && rows.length === 0,
+        "refresh recovery, control: a chain with an ordinary rotation in it, the original presented again: 400 invalid_grant and the family deleted",
+        `recorder sign-in ${flow.step}${flow.error ? ` (${flow.error})` : ""}; lost refresh ${lost.status}; recovery ${recovery.status}; ordinary refresh ${ordinary.status}; original presented ${original.status} ${original.json?.error ?? ""}; family ${rows.length} rows`,
+      );
+    }
+
+    // C4 (control, inside the window). A reply lost and the token presented
+    // again inside the 30-second window of this server: the library's replay
+    // answers, with the same new refresh token, and no recovery is recorded.
+    // Neither are any for F after the drop, hang and garble cases above.
+    {
+      const { who, userId } = await recoveryMember("rina");
+      const flow = await recFlow(who);
+      const held = heldFrom(flow);
+      const lost = await tokenVia(held.tokens?.refresh, "server");
+      const outcome = await recorderRefresh(held, "deliver");
+      const recovered = await recoveryCount(userId);
+      const recoveredF = await recoveryCount(await userIdOf(F.email));
+      record(
+        lost.status === 200 && outcome === "refreshed" && held.tokens?.refresh === lost.json?.refresh_token && recovered === 0 && recoveredF === 0,
+        "refresh recovery, control: inside the reuse window the library's replay answers with the same tokens, and no recovery is recorded",
+        `recorder sign-in ${flow.step}${flow.error ? ` (${flow.error})` : ""}; lost refresh ${lost.status}; recorder ${outcome}; same refresh token ${held.tokens?.refresh === lost.json?.refresh_token}; recoveries ${recovered}, F's ${recoveredF}`,
+      );
+    }
   } finally {
     server.close();
     await cleanup(acc);

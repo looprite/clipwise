@@ -31,6 +31,10 @@ export type StubModelOptions = {
   // Answer every call with this HTTP status and an error body that quotes the
   // phrase, as the real API's error text can.
   failStatus?: number;
+  // Answer call n (counted over every call, from 1) with this error instead of a
+  // reply, or null to answer it as usual. For the passing conditions the API
+  // returns (a spend limit's 400, a 402, a 529), whose wording a check needs.
+  failCalls?: (n: number) => { status: number; type: string; message: string } | null;
 };
 
 export type StubModel = {
@@ -123,6 +127,13 @@ export function makeStubModel(opts: StubModelOptions): StubModel {
       return new Response(
         JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: `${opts.phrase} quoted back by the API` } }),
         { status: opts.failStatus, headers: { "content-type": "application/json", "request-id": "req_stub_fail" } },
+      );
+    }
+    const fail = opts.failCalls?.(calls.length);
+    if (fail) {
+      return new Response(
+        JSON.stringify({ type: "error", error: { type: fail.type, message: fail.message }, request_id: "req_stub_fail" }),
+        { status: fail.status, headers: { "content-type": "application/json", "request-id": "req_stub_fail" } },
       );
     }
     if (kind === "pass1") {
