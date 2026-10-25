@@ -178,13 +178,25 @@ async function loadIdentityResolved(recordingId: string): Promise<boolean> {
 // answers "is at least one speaker named," not "did the set of names
 // change." Sorted by label so row order from Postgres never produces a
 // spurious difference between two reads of the same underlying state.
-async function loadSpeakerFingerprint(recordingId: string): Promise<string> {
-  const rows = await db
+//
+// The attendee names too (SAA-258): the prompt carries them as the call's known
+// attendees, so a corrected attendee list is a different input to extraction
+// even when no speaker name moves. Sorted the same way. `executor` lets a
+// caller read it inside its own transaction, before and after a write.
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+async function loadSpeakerFingerprint(recordingId: string, executor: typeof db | Tx = db): Promise<string> {
+  const speakers = await executor
     .select({ label: schema.speakers.label, displayName: schema.speakers.displayName })
     .from(schema.speakers)
     .where(eq(schema.speakers.recordingId, recordingId))
     .orderBy(asc(schema.speakers.label));
-  return JSON.stringify(rows);
+  const attendees = (await executor
+    .select({ name: schema.attendees.name, isHost: schema.attendees.isHost })
+    .from(schema.attendees)
+    .where(eq(schema.attendees.recordingId, recordingId)))
+    .map((a) => `${a.isHost ? "host" : "guest"}:${a.name ?? ""}`)
+    .sort();
+  return JSON.stringify({ speakers, attendees });
 }
 
 // The fingerprint as stored on a recording when a run is promoted
@@ -192,8 +204,8 @@ async function loadSpeakerFingerprint(recordingId: string): Promise<string> {
 // not copied into a second place. The jobs worker compares it with the current
 // one to know whether a re-extract job has anything to do.
 const hashOf = (fingerprint: string): string => createHash("sha256").update(fingerprint).digest("hex");
-export async function speakerFingerprintHash(recordingId: string): Promise<string> {
-  return hashOf(await loadSpeakerFingerprint(recordingId));
+export async function speakerFingerprintHash(recordingId: string, executor: typeof db | Tx = db): Promise<string> {
+  return hashOf(await loadSpeakerFingerprint(recordingId, executor));
 }
 
 // Ground truth for the roster the unresolved-identity guard hands the

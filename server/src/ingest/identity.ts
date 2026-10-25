@@ -68,6 +68,9 @@ export type IdentityAnswer = {
   // asked — recordings.scope stays NULL in that case, which search_moments
   // already treats as "work" by default (moments.ts).
   scope?: "work" | "personal" | null;
+  // Set on a correction made from Recent meetings (SAA-258): the answered_at of
+  // the answer it replaces. See applyIdentityCorrection.
+  corrects?: string;
 };
 
 export type AttendeeRow = { name: string | null; isHost: boolean };
@@ -395,27 +398,7 @@ export async function applySpeakerNames(
   // whichever one Postgres returns first — the near-empty original, most
   // likely — naming it while every reassigned segment stayed pointed at the
   // other, unnamed one.
-  const voiceRows = oneGuestNamed ? speakers.filter((s) => isVoiceLabel(s.label)) : [];
-  if (voiceRows.length > 0) {
-    const voiceIds = voiceRows.map((s) => s.id);
-    const existingThem = speakers.find((s) => s.label === GUEST_LABEL);
-    const them =
-      existingThem ??
-      (await executor
-        .insert(schema.speakers)
-        .values({ recordingId, label: GUEST_LABEL })
-        .returning({ id: schema.speakers.id, label: schema.speakers.label, displayName: schema.speakers.displayName }))[0];
-    await executor
-      .update(schema.segments)
-      .set({ speakerId: them.id })
-      .where(inArray(schema.segments.speakerId, voiceIds));
-    await executor.delete(schema.speakers).where(inArray(schema.speakers.id, voiceIds));
-    process.stdout.write(
-      `identity: disagreement on recording=${recordingId} — the answer names exactly one guest, but diarization ` +
-        `had already split \`them\` into ${voiceRows.length} voice(s); merged back into ${existingThem ? "the existing" : "a freshly inserted"} \`them\` row\n`,
-    );
-    speakers = speakers.filter((s) => !isVoiceLabel(s.label) && s.id !== them.id).concat([them]);
-  }
+  if (oneGuestNamed) speakers = await mergeVoicesIntoThem(executor, recordingId, speakers);
 
   const wanted = new Map<string, string | null>([
     [HOST_LABEL, host?.name ?? null],
@@ -452,6 +435,129 @@ export async function applySpeakerNames(
     mapping.applied.push({ label, displayName: name });
   }
   return mapping;
+}
+
+type SpeakerRow = { id: string; label: string | null; displayName: string | null };
+
+// The Voice N rows merged back into one `them` row, for an answer naming exactly
+// one guest (applySpeakerNames' disagreement case above, and a correction to
+// one guest). -> the recording's speakers as they now stand.
+async function mergeVoicesIntoThem(
+  executor: typeof db | Tx,
+  recordingId: string,
+  speakers: SpeakerRow[],
+): Promise<SpeakerRow[]> {
+  const voiceRows = speakers.filter((s) => isVoiceLabel(s.label));
+  if (voiceRows.length === 0) return speakers;
+  const voiceIds = voiceRows.map((s) => s.id);
+  const existingThem = speakers.find((s) => s.label === GUEST_LABEL);
+  const them =
+    existingThem ??
+    (await executor
+      .insert(schema.speakers)
+      .values({ recordingId, label: GUEST_LABEL })
+      .returning({ id: schema.speakers.id, label: schema.speakers.label, displayName: schema.speakers.displayName }))[0];
+  await executor
+    .update(schema.segments)
+    .set({ speakerId: them.id })
+    .where(inArray(schema.segments.speakerId, voiceIds));
+  await executor.delete(schema.speakers).where(inArray(schema.speakers.id, voiceIds));
+  process.stdout.write(
+    `identity: disagreement on recording=${recordingId} — the answer names exactly one guest, but diarization ` +
+      `had already split \`them\` into ${voiceRows.length} voice(s); merged back into ${existingThem ? "the existing" : "a freshly inserted"} \`them\` row\n`,
+  );
+  return speakers.filter((s) => !isVoiceLabel(s.label) && s.id !== them.id).concat([them]);
+}
+
+// --- correcting a saved answer (SAA-258) ------------------------------------
+//
+// A correction is an answer carrying `corrects`: the answered_at of the answer
+// it replaces. It is stale when the recording holds a different answer than the
+// one it corrects; the caller refuses it then, before writing anything. With no
+// answer stored, there is nothing for it to be stale against, and it applies as
+// the first answer would.
+export function identityCorrectionStale(metadata: unknown, answer: IdentityAnswer): boolean {
+  const storedAt = (metadata as { identity?: IdentityAnswer } | null | undefined)?.identity?.answered_at;
+  return Boolean(storedAt) && storedAt !== answer.corrects;
+}
+
+export type CorrectionApplication = {
+  attendees: number;
+  // Voice N rows whose name was a guest the correction removed, now unnamed.
+  voicesUnnamed: number;
+};
+
+// Applies a correction in place of the stored answer. Where applyIdentity,
+// applySpeakerNames and applyScope add to what is there and never overwrite,
+// this replaces it: the corrected answer is the better one by definition.
+//   attendees  all of the recording's rows deleted, then the answer's inserted
+//   me         the answer's own name, or none
+//   them       the one guest's name; with none or two or more guests, unnamed
+//              (a mixed track, as in applySpeakerNames). Voice N rows are merged
+//              into it first when there is one guest
+//   Voice N    a voice named after a guest the correction removed is unnamed;
+//              the others keep their names
+//   scope      the answer's, when it gives one; an answer without one leaves the
+//              recording's as it is
+// Then the answer is stored. Whether extraction runs again is the caller's: it
+// compares the speaker fingerprint before and after.
+export async function applyIdentityCorrection(
+  executor: typeof db | Tx,
+  recordingId: string,
+  answer: IdentityAnswer,
+): Promise<CorrectionApplication> {
+  const seen = new Set<string>();
+  const wanted = attendeeRowsFrom(answer).filter((row) => {
+    const key = row.isHost ? "\u0000host" : (row.name ?? "").toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const guests = wanted.filter((r) => !r.isHost && r.name);
+  const host = wanted.find((r) => r.isHost) ?? null;
+
+  const previous = await executor
+    .select({ name: schema.attendees.name, isHost: schema.attendees.isHost })
+    .from(schema.attendees)
+    .where(eq(schema.attendees.recordingId, recordingId));
+  await executor.delete(schema.attendees).where(eq(schema.attendees.recordingId, recordingId));
+  if (wanted.length > 0) {
+    await executor.insert(schema.attendees).values(wanted.map((row) => ({ recordingId, name: row.name, isHost: row.isHost })));
+  }
+
+  let speakers: SpeakerRow[] = await executor
+    .select({ id: schema.speakers.id, label: schema.speakers.label, displayName: schema.speakers.displayName })
+    .from(schema.speakers)
+    .where(eq(schema.speakers.recordingId, recordingId));
+  if (guests.length === 1) speakers = await mergeVoicesIntoThem(executor, recordingId, speakers);
+  const names = new Map<string, string | null>([
+    [HOST_LABEL, host?.name ?? null],
+    [GUEST_LABEL, guests.length === 1 ? guests[0].name : null],
+  ]);
+  for (const [label, name] of names) {
+    const speaker = speakers.find((s) => s.label === label);
+    if (speaker && speaker.displayName !== name) {
+      await executor.update(schema.speakers).set({ displayName: name }).where(eq(schema.speakers.id, speaker.id));
+    }
+  }
+
+  const kept = new Set(guests.map((g) => (g.name ?? "").trim().toLowerCase()));
+  const removed = new Set(
+    previous
+      .filter((r) => !r.isHost && r.name)
+      .map((r) => (r.name ?? "").trim().toLowerCase())
+      .filter((key) => !kept.has(key)),
+  );
+  const unname = speakers.filter((s) => isVoiceLabel(s.label) && s.displayName && removed.has(s.displayName.trim().toLowerCase()));
+  if (unname.length > 0) {
+    await executor.update(schema.speakers).set({ displayName: null }).where(inArray(schema.speakers.id, unname.map((s) => s.id)));
+  }
+
+  if (answer.scope === "work" || answer.scope === "personal") {
+    await executor.update(schema.recordings).set({ scope: answer.scope }).where(eq(schema.recordings.id, recordingId));
+  }
+  await storeIdentityMetadata(executor, recordingId, answer);
+  return { attendees: wanted.length, voicesUnnamed: unname.length };
 }
 
 // The two describe functions below go into logs, so they print counts and
