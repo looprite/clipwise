@@ -332,6 +332,12 @@
     }
   }
 
+  const LINE_WORDS = 20;
+  function shortLine(text) {
+    const words = (text || '').trim().split(/\s+/).filter(Boolean);
+    return words.length > LINE_WORDS ? words.slice(0, LINE_WORDS).join(' ') + '…' : words.join(' ');
+  }
+
   function renderVoices(namingData) {
     document.getElementById('waiting').style.display = 'none';
     // Re-enable Save, disabled by showStep2Waiting() until there was
@@ -364,11 +370,15 @@
       playRow.appendChild(playButton);
       card.appendChild(playRow);
 
+      // One line per voice, its longest (voice-clips.ts sorts them), cut to
+      // LINE_WORDS words (SAA-195): Play is how a voice is named, and a
+      // longest line can run to hundreds of words.
       const lines = document.createElement('div');
       lines.className = 'lines';
-      for (const line of voice.lines || []) {
+      const line = (voice.lines || [])[0];
+      if (line) {
         const d = document.createElement('div');
-        d.textContent = '“' + (line.text || '').trim() + '”';
+        d.textContent = '“' + shortLine(line.text) + '”';
         lines.appendChild(d);
       }
       card.appendChild(lines);
