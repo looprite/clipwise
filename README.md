@@ -123,15 +123,17 @@ identity; override with `CLIPWISE_SIGN_IDENTITY` if you have your own.
 (cd recorder/app && ./build-app.sh)
 ```
 
-It is not notarized and there is no DMG, so it is a build for the machine that
-built it rather than something to hand to anyone. The app never registers
-itself for launch at login — Login Items is a thing you add it to.
+It is signed with the hardened runtime but not notarized, and there is no disk
+image: `notarize.sh` does both, after this. The app registers itself for launch
+at login the first time it runs from Applications with setup finished; the
+tray's "Open at login" turns that off.
 
-The bundle carries the three Swift binaries. It does not carry the server, so
-`build-app.sh` stamps the path of this checkout into the bundle and the packaged
-app runs the capture pipeline (transcribe, classify, diarize) out of it, then
-uploads each capture to the server named in `capture-server.json`, which makes the
-moments. Move the repo and rebuild.
+The bundle carries the capture pipeline whole: its tools (systemtap, miccap,
+audiodevs, micwatch, diarize, parakeet, aec and ffmpeg), their models, its own
+Python, and the pipeline compiled to JavaScript. It reads nothing from the
+checkout or PATH. It uploads each capture to the server named in
+`capture-server.json`, which makes the moments.
+
 The developer keys (the database URL and the API keys) are not in the checkout:
 they are in `~/.config/clipwise/dev.env`, which only `server/scripts/scratch-db.sh`
 and the schema push (`server/drizzle.config.ts`) load, by name. Nothing the app
@@ -191,6 +193,52 @@ step is transcription.
 - A selected engine that isn't installed is an error, not a fallback to the other one. The capture's
   audio is kept and re-transcribes once the engine is present. Each transcript records which engine
   wrote it in its `engine` key, and ingest stores that as the transcript's `provider`.
+
+## Building, notarizing and installing the Mac app
+
+The commands that built, notarized and installed the app from a fresh worktree on 2026-10-25, run
+from the repo root.
+
+**Prerequisites.** The app shell's packages and Electron runtime, and the server's packages:
+`build-app.sh` compiles the capture pipeline with the server's own `tsc`
+(`server/node_modules/.bin/tsc`), and fails without them.
+
+```sh
+(cd recorder/app && npm install && npx install-electron)
+(cd server && npm ci)
+```
+
+**Build and sign.** Produces `recorder/app/dist/Clipwise.app`, and ends with `built …` naming the
+commit.
+
+```sh
+(cd recorder/app && ./build-app.sh)
+```
+
+**Notarize.** `notarize.sh` needs `CLIPWISE_NOTARY_PROFILE`, the notarytool keychain profile name,
+exported from `~/.zprofile`; the command below runs under a login shell so it picks that up. It
+notarizes and staples the app, then packs, signs, notarizes and staples
+`recorder/app/dist/Clipwise.dmg`. Both submissions print `status=Accepted`, and Gatekeeper prints
+`source=Notarized Developer ID` for each.
+
+```sh
+zsh -l -c 'cd recorder/app && ./notarize.sh'
+```
+
+**Install from the disk image.** Quit the running app and confirm it has quit (`pgrep` prints
+nothing), move the installed copy aside, copy the app out of the disk image, then launch it.
+
+```sh
+osascript -e 'quit app "Clipwise"'
+pgrep -fl Clipwise
+mv /Applications/Clipwise.app <backup folder>/Clipwise.app.prev
+hdiutil attach -nobrowse -readonly -mountpoint <mount folder> recorder/app/dist/Clipwise.dmg
+ditto <mount folder>/Clipwise.app /Applications/Clipwise.app
+hdiutil detach <mount folder>
+xcrun stapler validate /Applications/Clipwise.app
+spctl --assess --type execute --verbose=2 /Applications/Clipwise.app
+open /Applications/Clipwise.app
+```
 
 ## Server database login
 
