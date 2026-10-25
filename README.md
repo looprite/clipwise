@@ -215,6 +215,37 @@ logins or databases. Everything that changes the schema keeps using the owner.
 `db:push`, `db:sync`, `db:provision`, `db:checks`, `auth:migrate` and the `auth` CLI keep using
 the owner.
 
+## Deploying the server
+
+From `server/`, on a clean `main` that has been pushed (`git status --porcelain` prints nothing):
+
+```sh
+fly deploy --label org.opencontainers.image.revision=$(git rev-parse HEAD)
+```
+
+`fly.toml` supplies the app, the Dockerfile and its `prod` target. The label is passed by hand
+because the Dockerfile doesn't set it yet; without it, nothing on Fly says which commit an image
+was built from.
+
+After the deploy:
+
+- `fly releases`: the new version is at the top, `complete`.
+- `fly image show`: `LABELS` reads `org.opencontainers.image.revision=<the full hash of HEAD>`.
+- `curl https://clipwise-looprite.fly.dev/live` answers `{"status":"ok"}` (the Fly health check;
+  it never touches the database).
+- `curl https://clipwise-looprite.fly.dev/health` answers `{"status":"ok","db":"ok"}`.
+
+To roll back, find the previous release's image with `fly releases --image` and deploy it as it
+is, without building:
+
+```sh
+fly deploy --image registry.fly.io/clipwise-looprite:<that release's deployment tag>
+```
+
+Then run the same checks; `fly image show` reads the old image's own revision label, or none if
+it was deployed without one. A rollback swaps the image only: it does not undo a schema push to
+the database.
+
 ## License
 
 [Apache License 2.0](./LICENSE)
