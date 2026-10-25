@@ -129,7 +129,12 @@ function mergeGuestNames(selected, typedRaw) {
 // 'personal' is written as null: an unrecognised value is not a scope
 // server-side (recordings_scope_valid only permits those two), and null is
 // the honest "not answered" rather than a guess at which one was meant.
-function buildAnswerDoc({ stem, recordingId, names, selfName, scope, answeredAt }) {
+//
+// `corrects` (SAA-258) is set only on a correction from Recent meetings: the
+// answered_at of the answer it replaces (correctsFor below). The server applies
+// a correction in place of that answer, and refuses one whose answer it no
+// longer holds.
+function buildAnswerDoc({ stem, recordingId, names, selfName, scope, answeredAt, corrects }) {
     return {
         identity_version: IDENTITY_VERSION,
         recording_id: recordingId,
@@ -141,7 +146,30 @@ function buildAnswerDoc({ stem, recordingId, names, selfName, scope, answeredAt 
         },
         guests: (names || []).map(name => ({ name })),
         scope: scope === 'work' || scope === 'personal' ? scope : null,
+        ...(corrects ? { corrects } : {}),
     };
+}
+
+// The saved answer for a capture, or null when there is none or it can't be read.
+function readAnswer(dir, stem) {
+    try {
+        return JSON.parse(fs.readFileSync(path.join(dir, `identity-${stem}.json`), 'utf8'));
+    } catch {
+        return null;
+    }
+}
+
+// What a new correction corrects (SAA-258): the answer the server holds. Only
+// this Mac changes a recording's answer, so that is the last one the server
+// accepted (`acceptedAt`, the queue entry's identityAcceptedAt), whatever is on
+// disk: an unsent correction the queue never sent, or one the server refused as
+// stale. With none known yet (a capture sent before this was recorded, or not
+// sent at all), the answer on disk (`previous`) says: what it corrects if it is
+// itself an unsent correction, else its own answered_at.
+function correctsFor(previous, acceptedAt) {
+    if (acceptedAt) return acceptedAt;
+    if (!previous || !previous.answered_at) return null;
+    return previous.corrects || previous.answered_at;
 }
 
 // Where the answer lives until there is a row to attach it to.
@@ -467,6 +495,8 @@ module.exports = {
     mergeGuestNames,
     buildAnswerDoc,
     writeAnswer,
+    readAnswer,
+    correctsFor,
     writeLaterMarker,
     readLaterMarker,
     deleteLaterMarker,

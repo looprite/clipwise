@@ -208,6 +208,13 @@
   captureEl.title = stem;
   document.getElementById('self').value = params.get('self') || '';
 
+  // A correction from Recent meetings (SAA-258): the saved guests come checked,
+  // and saving ends here, with no step 2.
+  const correcting = params.get('correcting') === '1';
+  let checkedNames = [];
+  try { checkedNames = JSON.parse(params.get('checkedNames') || '[]'); } catch { checkedNames = []; }
+  const checkedKeys = new Set((Array.isArray(checkedNames) ? checkedNames : []).map((n) => String(n).toLowerCase()));
+
   let knownNames = [];
   try { knownNames = JSON.parse(params.get('knownNames') || '[]'); } catch { knownNames = []; }
   const knownEl = document.getElementById('known');
@@ -217,6 +224,7 @@
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.value = name;
+      checkbox.checked = checkedKeys.has(String(name).toLowerCase());
       label.appendChild(checkbox);
       label.appendChild(document.createTextNode(name));
       knownEl.appendChild(label);
@@ -241,7 +249,7 @@
       seen.add(key);
       count++;
     }
-    document.getElementById('save').textContent = count === 1 ? 'Save' : 'Next';
+    document.getElementById('save').textContent = count === 1 || correcting ? 'Save' : 'Next';
   }
   knownEl.addEventListener('change', updateStep1ButtonLabel);
   document.getElementById('names').addEventListener('input', updateStep1ButtonLabel);
@@ -249,10 +257,14 @@
 
   const scopeEl = document.getElementById('scope');
   const inferredScope = params.get('inferredScope');
-  if (inferredScope === 'work' || inferredScope === 'personal') {
+  const savedScope = params.get('savedScope');
+  if (savedScope === 'work' || savedScope === 'personal') {
+    scopeEl.querySelector(`button[data-value="${savedScope}"]`).classList.add('active');
+  } else if (inferredScope === 'work' || inferredScope === 'personal') {
     scopeEl.querySelector(`button[data-value="${inferredScope}"]`).classList.add('active');
     document.getElementById('scope-label').textContent = 'Personal or work? (guessed from the app — change if wrong)';
   }
+  if (correcting) document.getElementById('skip').textContent = 'Cancel';
   scopeEl.addEventListener('click', (e) => {
     const button = e.target.closest('button');
     if (!button) return;

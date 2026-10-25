@@ -19,7 +19,7 @@ const os = require('os');
 const path = require('path');
 const {
     IDENTITY_WINDOW, contentHeightFor, knownGuestNames, mergeGuestNames,
-    buildAnswerDoc, writeAnswer,
+    buildAnswerDoc, writeAnswer, readAnswer, correctsFor,
     writeLaterMarker, readLaterMarker, deleteLaterMarker,
     recentPendingIdentityStems,
     buildVoiceNamesDoc, writeVoiceNamesAnswer, readNamingData, recentPendingVoiceNamingStems,
@@ -1229,6 +1229,91 @@ function registerMeetingsIpc() {
         // A rename only when names were already saved; otherwise it is the
         // first naming of this call's voices.
         reopenVoiceNaming(stem, { rename: readVoiceNamesAnswer(OUTDIR, stem) !== null });
+    });
+    ipcMain.on('meetings:change-identity', (_event, payload) => {
+        const stem = payload && payload.stem;
+        if (typeof stem !== 'string' || !STEM_PATTERN.test(stem)) return;
+        if (isTrashed(OUTDIR, stem)) return; // in the trash: not acted on (SAA-154)
+        reopenIdentityForCorrection(stem);
+    });
+}
+
+// "Change who was on this call…" in Recent meetings (SAA-258): the identity
+// window again, filled from the saved answer: its own name, its guests checked,
+// its scope. Saving writes a correction (identity:submit, capture.correcting)
+// and sends it through the upload queue; Cancel or closing the window writes
+// nothing, and leaves no Later marker, since the call was answered.
+function reopenIdentityForCorrection(stem) {
+    if (identityWindow) {
+        try { identityWindow.win.show(); app.focus({ steal: true }); } catch {}
+        return;
+    }
+    const saved = readAnswer(OUTDIR, stem);
+    if (!saved) {
+        console.error(`identity: no saved answer for ${stem} — nothing to change`);
+        notify('identity-change-missing', 'Clipwise: could not change who was on this call',
+            `The saved answer for ${stem} could not be read.`);
+        return;
+    }
+    const guests = (Array.isArray(saved.guests) ? saved.guests : [])
+        .map((g) => (g && typeof g.name === 'string' ? g.name.trim() : ''))
+        .filter(Boolean);
+    const known = knownGuestNames(OUTDIR);
+    const knownKeys = new Set(known.map((n) => n.toLowerCase()));
+    const capture = { stem, recordingId: saved.recording_id || null, correcting: true, token: randomUUID() };
+
+    let win;
+    try {
+        win = new BrowserWindow({
+            useContentSize: true,
+            width: IDENTITY_WINDOW.width,
+            height: IDENTITY_WINDOW.maxHeight,
+            show: false,
+            resizable: false,
+            minimizable: false,
+            maximizable: false,
+            fullscreenable: false,
+            alwaysOnTop: true,
+            title: 'Who was on this call?',
+            webPreferences: { nodeIntegration: true, contextIsolation: false },
+        });
+    } catch (err) {
+        console.error(`identity: could not open the correction: ${String(err)}`);
+        notify('identity-change-failed', 'Clipwise: could not change who was on this call', `${stem} could not be opened.`);
+        return;
+    }
+    identityWindow = { win, capture, shown: false, step: 1, resolved: false, fromQueue: false, pollTimer: null };
+    const reveal = () => {
+        if (!identityWindow || identityWindow.win !== win || identityWindow.shown) return;
+        identityWindow.shown = true;
+        win.show();
+        try { app.focus({ steal: true }); } catch {}
+    };
+    identityWindow.reveal = reveal;
+    win.once('ready-to-show', () => setTimeout(reveal, IDENTITY_REVEAL_GRACE_MS));
+    win.once('closed', () => {
+        if (identityWindow && identityWindow.win === win && !identityWindow.resolved) {
+            console.error(`[clipwise-recorder] identity ${stem}: correction closed — saved answer kept`);
+            resolveIdentityWindow();
+        }
+        identityWindow = null;
+        pumpIdentityQueue();
+    });
+    win.loadFile(IDENTITY_HTML, {
+        query: {
+            token: capture.token,
+            stem,
+            self: saved.self && typeof saved.self.name === 'string' ? saved.self.name : '',
+            knownNames: JSON.stringify([...known, ...guests.filter((n) => !knownKeys.has(n.toLowerCase()))]),
+            checkedNames: JSON.stringify(guests),
+            savedScope: saved.scope === 'work' || saved.scope === 'personal' ? saved.scope : '',
+            correcting: '1',
+        },
+    }).catch((err) => {
+        console.error(`identity: correction failed to open: ${String(err)}`);
+        notify('identity-change-load-failed', 'Clipwise: could not change who was on this call', `${stem} could not be opened.`);
+        identityWindow = null;
+        try { win.close(); } catch {}
     });
 }
 
@@ -3129,6 +3214,9 @@ function enqueueUpload(stem) {
             lastError: null,
             recordingId: prior ? prior.recordingId : null,
             sentAt: prior ? prior.sentAt : null,
+            // The identity answer the server last accepted (sendQueuedCapture),
+            // which a correction corrects (identity-answer.js correctsFor).
+            identityAcceptedAt: prior ? prior.identityAcceptedAt || null : null,
         });
         console.error(`[clipwise-recorder] upload ${stem}: queued`);
     } catch (err) {
@@ -3172,8 +3260,11 @@ async function sendQueuedCapture(server, entry) {
     };
     if (!captureTokens || captureTokens.server !== server) return retryLater(null, 'not_signed_in');
     let body;
+    let sentAnsweredAt = null;
     try {
-        body = JSON.stringify(buildCapturePayload(stem));
+        const payload = buildCapturePayload(stem);
+        sentAnsweredAt = (payload.identity && payload.identity.answered_at) || null;
+        body = JSON.stringify(payload);
     } catch (err) {
         return retryLater(null, `not_built ${err.message}`);
     }
@@ -3181,12 +3272,25 @@ async function sendQueuedCapture(server, entry) {
     if (reply.status === 401 && await refreshCaptureToken()) {
         reply = await postCapture(server, body);
     }
+    // Asked again from the start: a new send makes the job state unknown.
+    const jobStateReset = { jobState: null, jobAnsweredMs: 0, jobPolledAt: null, jobUnanswered: 0, nextJobPollAt: null };
     if (reply.status === 200 || reply.status === 201) {
         console.error(`[clipwise-recorder] upload ${stem}: ${reply.status}`);
         return {
             ...entry, state: 'sent', lastStatus: reply.status, lastError: null, recordingId: reply.recordingId || entry.recordingId, sentAt: new Date().toISOString(),
-            jobState: null, jobAnsweredMs: 0, jobPolledAt: null, jobUnanswered: 0, nextJobPollAt: null,
+            identityAcceptedAt: sentAnsweredAt || entry.identityAcceptedAt || null,
+            ...jobStateReset,
         };
+    }
+    // A correction of an answer the server no longer holds (SAA-258). The
+    // capture itself is stored, so this is not a failed upload: the entry stays
+    // sent, and only the correction is refused. Not retried, since it would be
+    // refused the same way.
+    if (reply.status === 409 && reply.error === 'identity_correction_stale') {
+        console.error(`[clipwise-recorder] upload ${stem}: 409 identity_correction_stale (correction refused, capture still sent)`);
+        notify('identity-correction-refused', 'Clipwise: change not saved',
+            `Who was on the ${stemDateLabel(stem)} call wasn't changed: the server holds a different answer than the one this change replaced.`);
+        return { ...entry, state: 'sent', lastStatus: 409, lastError: 'identity_correction_stale', ...jobStateReset };
     }
     if (reply.status === 409 || reply.status === 422) {
         console.error(`[clipwise-recorder] upload ${stem}: ${reply.status} ${reply.error || ''} (failed, not retried)`);
@@ -3544,6 +3648,7 @@ function writeIdentityAnswer(capture, answer) {
         names: answer.names,
         selfName: answer.selfName,
         scope: answer.scope,
+        corrects: answer.corrects,
     });
     const finalPath = writeAnswer(OUTDIR, doc);
     console.error(logLines.identityLine(capture.stem, !!doc.self.name, doc.guests.length, doc.scope, finalPath));
@@ -3838,9 +3943,15 @@ function registerIdentityIpc() {
         // 'personal' when a button is actually active (inferred or clicked);
         // anything else means neither was, and null is the honest answer.
         const scope = payload.scope === 'personal' || payload.scope === 'work' ? payload.scope : null;
-        writeSelfName(selfName);
+        // A correction (SAA-258) corrects the answer the server holds, which is
+        // not always the one on disk (correctsFor). It doesn't change the name
+        // remembered for the next call: it is about this call only.
+        const corrects = capture.correcting
+            ? correctsFor(readAnswer(OUTDIR, capture.stem), (readUploadEntry(capture.stem) || {}).identityAcceptedAt || null)
+            : undefined;
+        if (!capture.correcting) writeSelfName(selfName);
         try {
-            writeIdentityAnswer(capture, { names, selfName, scope });
+            writeIdentityAnswer(capture, { names, selfName, scope, corrects });
         } catch (err) {
             // The answer is lost; the capture is not. Say so where it can be
             // read rather than pretending it was written.
@@ -3857,6 +3968,14 @@ function registerIdentityIpc() {
         // when there was never one.
         deleteLaterMarker(OUTDIR, capture.stem);
         renderTray();
+
+        if (capture.correcting) {
+            // Step 1 only: the server unnames a voice it no longer has a guest
+            // for, and Fix names in Recent meetings names voices again.
+            console.error(`[clipwise-recorder] identity ${capture.stem}: corrected, sent with the upload queue`);
+            finishIdentityWindow();
+            return;
+        }
 
         if (names.length === 1) {
             // One-guest rule (SAA-194 §5, SAA-195): the one guest is the other
@@ -3921,6 +4040,12 @@ function registerIdentityIpc() {
     ipcMain.on('identity:skip', (_event, payload) => {
         const capture = currentCapture(payload && payload.token);
         if (!capture) return;
+        if (capture.correcting) {
+            // Cancel on a correction: the saved answer stands, nothing is written.
+            console.error(`[clipwise-recorder] identity ${capture.stem}: correction cancelled — saved answer kept`);
+            finishIdentityWindow();
+            return;
+        }
         console.error(`[clipwise-recorder] identity ${capture.stem}: skipped — recording is unidentified`);
         // Skip's own meaning is unchanged (SAA-197) — nothing is written
         // here, same as before. This only clears a marker a previous close

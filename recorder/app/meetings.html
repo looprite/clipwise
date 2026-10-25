@@ -277,7 +277,8 @@
         fix.addEventListener('click', () => ipcRenderer.send('meetings:fix', { stem: r.stem }));
         acts.appendChild(fix);
       }
-      // ⋯ menu: Move to trash (not while the capture is still processing).
+      // ⋯ menu: Change who was on this call (when it has a saved answer), and
+      // Move to trash (not while the capture is still processing).
       const wrap = el('div', 'menuwrap');
       const more = el('button', null, '⋯');
       more.setAttribute('aria-haspopup', 'menu');
@@ -290,6 +291,12 @@
       if (openMenu === r.stem) {
         const menu = el('div', 'menu');
         menu.setAttribute('role', 'menu');
+        if (r.canChangeIdentity) {
+          const c = el('button', null, 'Change who was on this call…');
+          c.setAttribute('role', 'menuitem');
+          c.addEventListener('click', () => { openMenu = null; render(); ipcRenderer.send('meetings:change-identity', { stem: r.stem }); });
+          menu.appendChild(c);
+        }
         const t = el('button', null, 'Move to trash');
         t.setAttribute('role', 'menuitem');
         t.addEventListener('click', () => send('meetings:trash', [r.stem]));

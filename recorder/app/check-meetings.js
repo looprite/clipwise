@@ -479,6 +479,55 @@ check('without the processing capture, the tray item is the newest ready meeting
     fs.rmSync(c8, { recursive: true, force: true });
 }
 
+// SAA-258: "Change who was on this call…" shows on a row with a saved answer,
+// and not on one without or one whose upload has failed; and what a correction
+// corrects (correctsFor). The server holds A. B1 is a correction made offline
+// and never sent; B2 is made after it, and the queue sends only B2.
+{
+    const ia = require('./identity-answer.js');
+    const c9 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-correct-identity-check-'));
+    const q9 = path.join(c9, 'upload-queue');
+    fs.mkdirSync(q9);
+    const cw = (name, doc) => fs.writeFileSync(path.join(c9, name), JSON.stringify(doc));
+    const call = (stem, identity, uploadState) => {
+        cw(`manifest-${stem}.json`, { started_at: stem, tracks: [{ duration_s: 1800 }] });
+        cw(`pipeline-${stem}.json`, { db_recording_id: `rid-${stem}`, updated_at: new Date(NOW - 3600e3).toISOString(), steps: { transcribe: { state: 'ok' }, ingest: { state: 'ok' } } });
+        cw(`transcript-${stem}.json`, { segments: [{}, {}, {}] });
+        if (identity) cw(`identity-${stem}.json`, identity);
+        if (uploadState) fs.writeFileSync(path.join(q9, `${stem}.json`), JSON.stringify({ stem, state: uploadState, lastStatus: uploadState === 'failed' ? 422 : 201 }));
+    };
+    const answerFor = (stem) => ia.buildAnswerDoc({ stem, recordingId: 'r', names: ['Ann Example'], selfName: 'Jon Example', scope: 'work' });
+    const ANS = '2026-03-05T10-00-00Z', NONE = '2026-03-05T11-00-00Z', FAILED = '2026-03-05T12-00-00Z';
+    call(ANS, answerFor(ANS), 'sent');
+    call(NONE, null, 'sent');
+    call(FAILED, answerFor(FAILED), 'failed');
+    const rows = Object.fromEntries(listMeetings(c9, NOW, undefined, { uploadQueueDir: q9 }).map((r) => [r.stem, r]));
+    const can = (stem) => JSON.stringify(rows[stem] && rows[stem].canChangeIdentity);
+    check('SAA-258: a call with a saved answer, sent, offers "Change who was on this call…"',
+        !!rows[ANS] && rows[ANS].canChangeIdentity === true, can(ANS));
+    check('control: a call with no saved answer does not', !!rows[NONE] && rows[NONE].canChangeIdentity === false, can(NONE));
+    check('SAA-258: a call with a saved answer whose upload failed does not (the queue would never send the correction)',
+        !!rows[FAILED] && rows[FAILED].canChangeIdentity === false, can(FAILED));
+    check('SAA-258: a correction carries corrects in the answer file, a first answer does not',
+        ia.buildAnswerDoc({ stem: ANS, names: [], corrects: 'A' }).corrects === 'A' && !('corrects' in ia.buildAnswerDoc({ stem: ANS, names: [] })));
+    fs.rmSync(c9, { recursive: true, force: true });
+
+    const A = { answered_at: 'A' };
+    const B1 = { answered_at: 'B1', corrects: 'A' };
+    // Refused as stale: corrects an answer the server never held. The server
+    // still holds A, the last one it accepted.
+    const R = { answered_at: 'R', corrects: 'X' };
+    check('SAA-258: correcting the accepted answer A corrects A', ia.correctsFor(A, 'A') === 'A', String(ia.correctsFor(A, 'A')));
+    check('SAA-258: B2 after B1, which the server never accepted, corrects A', ia.correctsFor(B1, 'A') === 'A', String(ia.correctsFor(B1, 'A')));
+    check('control: the answer on disk alone would give B1, which the server would refuse (check-identity-correction o)', B1.answered_at === 'B1' && ia.correctsFor(B1, 'A') !== B1.answered_at);
+    check('SAA-258: B2 after B1 was accepted corrects B1', ia.correctsFor(B1, 'B1') === 'B1', String(ia.correctsFor(B1, 'B1')));
+    check('SAA-258: after a stale 409, the next correction corrects the accepted answer', ia.correctsFor(R, 'A') === 'A', String(ia.correctsFor(R, 'A')));
+    check('control: the refused correction\'s own corrects would be X, refused again', R.corrects === 'X' && ia.correctsFor(R, 'A') !== R.corrects);
+    check('SAA-258: none accepted yet, a first answer on disk is corrected as itself', ia.correctsFor(A, null) === 'A', String(ia.correctsFor(A, null)));
+    check('SAA-258: none accepted yet, an unsent correction on disk carries its corrects forward', ia.correctsFor(B1, null) === 'A', String(ia.correctsFor(B1, null)));
+    check('SAA-258: no saved answer, nothing to correct', ia.correctsFor(null, null) === null);
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);
