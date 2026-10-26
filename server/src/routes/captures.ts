@@ -26,6 +26,11 @@
 //                         the answer stored (SAA-258); nothing written
 // A correction that is not stale replaces the stored answer: attendees, me and
 // them, scope (ingest/identity.ts applyIdentityCorrection).
+// inviteeNames, the invitees the member named once in the prompt (SAA-221), are
+// applied on the first request and on every repeat, after the identity answer
+// (ingest/invitee-names.ts; idempotent). They are never stored in the
+// recording's metadata, and only their counts are logged: they pair an address
+// with a name.
 // "Same content" is a SHA-256 of the segments as sent, without their voice indexes
 // (metadata.capture.content_hash).
 //
@@ -54,6 +59,7 @@ import {
   type IdentityAnswer,
 } from "../ingest/identity.js";
 import { speakerFingerprintHash } from "../extract/extract.js";
+import { applyInviteeNames, describeInviteeNames, ownerAddressesFor } from "../ingest/invitee-names.js";
 import { applyVoiceNames, storeVoiceNamesMetadata, voiceNamesAlreadyApplied, type VoiceNamesAnswer } from "../ingest/voice-names.js";
 import { countObservedFidelity, sourceFidelitySchema } from "../lib/fidelity.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
@@ -109,6 +115,11 @@ const voiceNamesSchema = z.object({
   voices: z.array(z.object({ voiceIndex: z.number().int().positive(), name: z.string().max(256).nullable().optional() })).max(64),
   rename: z.boolean().optional(),
 });
+
+// The invitees named once in the prompt (SAA-221), as identity-answer.js
+// buildInviteeNamesDoc writes them. Strict: an address and a name, nothing else.
+const inviteeNameSchema = z.object({ email: z.string().email().max(320), name: z.string().min(1).max(256) }).strict();
+const inviteeNamesSchema = z.array(inviteeNameSchema).max(50);
 
 // capture.tracks is the capture manifest's `tracks`, as the recorder writes it:
 // recorder/app/main.js buildManifest (:466-502) makes the array of two, one per
@@ -199,6 +210,7 @@ const captureSchema = z.object({
   // Names for the voices, once the person has given them (SAA-227 decision 3).
   // Applied after the split on a first request, and on a repeat.
   voiceNames: voiceNamesSchema.optional(),
+  inviteeNames: inviteeNamesSchema.optional(),
 }).superRefine((body, ctx) => {
   const listed = new Set((body.voices ?? []).map((v) => v.voiceIndex));
   if (listed.size !== (body.voices ?? []).length) {
@@ -348,6 +360,14 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
   const identity = (body.identity ?? null) as IdentityAnswer | null;
   const voiceNames = (body.voiceNames ?? null) as VoiceNamesAnswer | null;
   const notice = body.notice ?? null;
+  const inviteeNames = body.inviteeNames ?? [];
+  // After the identity answer, so the guest attendee row a name links to exists.
+  // -> the counts for the log, or null when none were sent.
+  const nameInvitees = async (tx: Tx, recordingId: string): Promise<string | null> => {
+    if (inviteeNames.length === 0) return null;
+    const owner = await ownerAddressesFor(tx, ctx.memberId, ctx.email);
+    return describeInviteeNames(await applyInviteeNames(tx, ctx.accountId, recordingId, owner, inviteeNames));
+  };
   const slug = captureSlug(body.stem, body.captureId);
   const labelSet = new Set(kept.map((s) => s.track));
   const engine = body.engine;
@@ -459,8 +479,9 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
         voiceNamesApplied = true;
         namesWritten ||= naming.applied.length > 0;
       }
+      const inviteeNamesLog = await nameInvitees(tx, existing.id);
       const reextractJobId = namesWritten ? await enqueueReextractForLateNames(tx, existing) : null;
-      return { kind: "repeat" as const, recordingId: existing.id, identityApplied, voiceNamesApplied, reextractJobId };
+      return { kind: "repeat" as const, recordingId: existing.id, identityApplied, voiceNamesApplied, reextractJobId, inviteeNamesLog };
     }
 
     const [transcript] = await tx
@@ -505,6 +526,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       await applySpeakerNames(tx, recording.id, identity);
       await applyScope(tx, recording.id, identity);
     }
+    const inviteeNamesLog = await nameInvitees(tx, recording.id);
 
     // The member's acknowledgement of that notice version, recorded the first time
     // a capture carries it. A later capture with the same version adds nothing,
@@ -559,6 +581,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       kind: "created" as const,
       jobId,
       matchJobId,
+      inviteeNamesLog,
       stored: {
         recordingId: recording.id,
         transcriptId: transcript.id,
@@ -570,6 +593,8 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
     };
   });
 
+  // After the commit, so a rolled-back request logs nothing. Counts only.
+  if (outcome.inviteeNamesLog) console.log(`invitee-names: recording=${outcome.kind === "created" ? outcome.stored.recordingId : outcome.recordingId} ${outcome.inviteeNamesLog}`);
   if (outcome.kind === "created") {
     afterStore(res, outcome.stored, outcome.jobId, outcome.matchJobId);
     return;

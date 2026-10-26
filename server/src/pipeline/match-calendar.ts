@@ -115,8 +115,9 @@ export async function resolveCalendarConnection(
 
 // The window queried around the capture's own start. Generous relative to
 // the 10-minute match threshold — this is just what's fetched, matchEvent
-// still applies the real rule.
-const WINDOW_MS = 60 * 60 * 1000;
+// still applies the real rule. Exported for the calendar preview at stop
+// (routes/calendar-preview.ts), which queries the same window.
+export const WINDOW_MS = 60 * 60 * 1000;
 
 // Fetches events across every calendar the connection is authorized to
 // search, in parallel. No writes of any kind — read-only against Google,
