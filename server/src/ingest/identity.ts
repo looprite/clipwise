@@ -112,6 +112,11 @@ export function readIdentityAnswer(
 
 // Trailing/leading whitespace and empty entries are the typing, not the
 // answer. Order is preserved: host first, then the names as they were typed.
+//
+// A name with an @ is dropped (SAA-221): it is an address typed as a name, and
+// attendee names reach extraction, and so Anthropic. The prompt refuses one and
+// the recorder drops it at write time (identity-answer.js); this is the server's
+// backstop. A host name with one is treated as no name.
 export function attendeeRowsFrom(answer: IdentityAnswer): AttendeeRow[] {
   const rows: AttendeeRow[] = [];
   const selfName = clean(answer.self?.name);
@@ -132,7 +137,7 @@ export function attendeeRowsFrom(answer: IdentityAnswer): AttendeeRow[] {
 function clean(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  return trimmed.length ? trimmed : null;
+  return trimmed.length && !trimmed.includes("@") ? trimmed : null;
 }
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];

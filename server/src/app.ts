@@ -33,6 +33,7 @@ import { mcpMethodNotAllowed, mcpPost } from "./mcp/server.js";
 import { accountsRouter } from "./routes/accounts.js";
 import { momentsRouter } from "./routes/moments.js";
 import { capturesPost } from "./routes/captures.js";
+import { calendarPreviewPost } from "./routes/calendar-preview.js";
 import { captureScopeRouter } from "./routes/capture-scope.js";
 import { oauthRouter } from "./routes/oauth.js";
 import { demoRouter } from "./routes/demo.js";
@@ -116,6 +117,10 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   // The recorder hands over a finished capture. A capture token (SAA-244); the
   // account and the owner come from it.
   app.post("/captures", requireCapture, capturesPost);
+  // Who the calendar says a capture that just stopped was with, for the identity
+  // prompt (SAA-221; routes/calendar-preview.ts). Ahead of /captures/:captureId,
+  // whose routes take a capture id this path is not.
+  app.post("/captures/calendar-preview", requireCapture, calendarPreviewPost);
   // What the recorder does with a stored capture of its owner's: the transcript,
   // trash, restore, delete permanently and job status (routes/capture-scope.ts).
   app.use("/captures/:captureId", requireCapture);

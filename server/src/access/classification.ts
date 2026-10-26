@@ -64,6 +64,12 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
     note: "stores a finished capture as a recording owned by the caller (account and owner from the token); a repeat of the caller's own capture is idempotent, another member's capture id is 409",
   },
 
+  "POST /captures/calendar-preview": {
+    access: "member",
+    requires: "capture",
+    note: "the caller's own calendar event at a capture's start time (SAA-221): its title, the names of invitees a person record visible to the caller names, and the other invitees' addresses; never the owner's own addresses; writes nothing",
+  },
+
   // The recorder's own captures (SAA-227, 10-11): a capture token for reads too,
   // and only the caller's own capture; anyone else's is the same 404 as one that
   // is not there.
