@@ -277,7 +277,7 @@
         fix.addEventListener('click', () => ipcRenderer.send('meetings:fix', { stem: r.stem }));
         acts.appendChild(fix);
       }
-      // ⋯ menu: Change who was on this call (when it has a saved answer), and
+      // ⋯ menu: Change attendees (when it has a saved answer), and
       // Move to trash (not while the capture is still processing).
       const wrap = el('div', 'menuwrap');
       const more = el('button', null, '⋯');
@@ -292,7 +292,7 @@
         const menu = el('div', 'menu');
         menu.setAttribute('role', 'menu');
         if (r.canChangeIdentity) {
-          const c = el('button', null, 'Change who was on this call…');
+          const c = el('button', null, 'Change attendees…');
           c.setAttribute('role', 'menuitem');
           c.addEventListener('click', () => { openMenu = null; render(); ipcRenderer.send('meetings:change-identity', { stem: r.stem }); });
           menu.appendChild(c);

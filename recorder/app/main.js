@@ -1244,7 +1244,7 @@ function registerMeetingsIpc() {
     });
 }
 
-// "Change who was on this call…" in Recent meetings (SAA-258): the identity
+// "Change attendees…" in Recent meetings (SAA-258): the identity
 // window again, filled from the saved answer: its own name, its guests checked,
 // its scope. Saving writes a correction (identity:submit, capture.correcting)
 // and sends it through the upload queue; Cancel or closing the window writes
