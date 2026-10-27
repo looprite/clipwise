@@ -37,6 +37,23 @@ function voiceNamesLine(stem, voiceCount, namedCount, finalPath) {
     return `[clipwise-recorder] voice-names ${stem}: voices=${voiceCount} named=${namedCount} -> ${finalPath}`;
 }
 
+// The calendar preview at stop (SAA-221): what came of it, how long it took and
+// how many invitees it named and left unnamed. Never a title, name or address.
+function calendarPreviewLine(stem, outcome, ms, prefill) {
+    const timing = Number.isFinite(ms) ? ` after ${ms}ms` : '';
+    const counts = prefill ? ` named=${prefill.named.length} unnamed=${prefill.unnamed.length}` : '';
+    return `[clipwise-recorder] calendar-preview ${stem}: ${outcome}${timing}${counts}`;
+}
+
+// Names typed for invitees at the prompt, as a count.
+function inviteeNamesLine(stem, count, finalPath) {
+    return `[clipwise-recorder] invitee-names ${stem}: invitees=${count} -> ${finalPath}`;
+}
+
+function inviteeNamesFailedLine(stem, err) {
+    return `[clipwise-recorder] invitee-names ${stem}: could not write — ${errCode(err)}`;
+}
+
 function errCode(err) {
     return (err && (err.code || err.name)) || 'error';
 }
@@ -45,4 +62,5 @@ module.exports = {
     notifyLine, notifyDeliveredLine,
     saveTranscriptSavedLine, saveTranscriptFailedLine,
     identityLine, voiceNamesLine,
+    calendarPreviewLine, inviteeNamesLine, inviteeNamesFailedLine,
 };

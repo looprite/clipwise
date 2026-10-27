@@ -20,7 +20,14 @@
      Loaded from file:// with nodeIntegration on, same reasoning as before:
      ships inside the bundle, loads no remote content. Step 2 additionally
      plays local clip files via new Audio(), which is the same trust
-     boundary — a local file this same machine's capture just wrote. -->
+     boundary — a local file this same machine's capture just wrote.
+
+     SAA-221: after a stop, a calendar preview may arrive (identity:calendar,
+     at most once, at step 1 only): its title goes on the capture line, the
+     invitees it names get a box, checked only if the guest list is untouched,
+     and the invitees it can't name get a name field each. The guest list's
+     state is identity-answer.js's (guestList and friends), so its rules are
+     checked without a window. SAA-260 replaces this checklist. -->
 <title>Who was on this call?</title>
 <style>
   :root {
@@ -95,6 +102,11 @@
   #known label:hover { background: var(--bg); }
   #known input[type="checkbox"] { width: auto; }
   #known.empty { display: none; }
+  #invitees .invitee { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; }
+  #invitees .invitee .address { flex: 0 1 45%; font-size: 11px; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #invitees .invitee input { flex: 1 1 auto; padding: 4px 6px; }
+  #at-hint { color: #c4302b; }
 
   .segmented { display: flex; border: 1px solid var(--field-border); border-radius: 6px; overflow: hidden; }
   .segmented button { flex: 1 1 0; border: none; border-radius: 0; }
@@ -130,10 +142,16 @@
         <div id="known"></div>
       </div>
 
+      <div class="field" id="invitees-field" style="display:none">
+        <label>Invited, not yet named — typing a name adds them to this call and remembers them</label>
+        <div id="invitees"></div>
+      </div>
+
       <div class="field">
         <label for="names">Someone new? Full name(s) — one per line, or separated by commas</label>
         <textarea id="names" spellcheck="false" placeholder="Grace Hopper"></textarea>
         <p class="hint">Just you on the call? Leave everything empty.</p>
+        <p class="hint" id="at-hint" style="display:none">A name can't contain @: type the person's name, not their address.</p>
       </div>
 
       <div class="field">
@@ -215,23 +233,30 @@
   try { checkedNames = JSON.parse(params.get('checkedNames') || '[]'); } catch { checkedNames = []; }
   const checkedKeys = new Set((Array.isArray(checkedNames) ? checkedNames : []).map((n) => String(n).toLowerCase()));
 
+  const ia = require('./identity-answer.js');
+
   let knownNames = [];
   try { knownNames = JSON.parse(params.get('knownNames') || '[]'); } catch { knownNames = []; }
+  // Step 1's guest list (SAA-221): the boxes and the names typed for invitees,
+  // kept in identity-answer.js's guestList so check-calendar-prefill.js covers
+  // the same rules this page runs.
+  const list = ia.guestList(Array.isArray(knownNames) ? knownNames : [], [...checkedKeys]);
   const knownEl = document.getElementById('known');
-  if (Array.isArray(knownNames) && knownNames.length > 0) {
-    for (const name of knownNames) {
+  function renderBoxes() {
+    knownEl.innerHTML = '';
+    for (const box of list.boxes) {
       const label = document.createElement('label');
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
-      checkbox.value = name;
-      checkbox.checked = checkedKeys.has(String(name).toLowerCase());
+      checkbox.value = box.name;
+      checkbox.checked = box.checked;
       label.appendChild(checkbox);
-      label.appendChild(document.createTextNode(name));
+      label.appendChild(document.createTextNode(box.name));
       knownEl.appendChild(label);
     }
-  } else {
-    document.getElementById('known-field').style.display = 'none';
+    document.getElementById('known-field').style.display = list.boxes.length > 0 ? '' : 'none';
   }
+  renderBoxes();
 
   // Mirrors main.js's own names.length === 1 branch (identity:submit) so
   // the button never promises a step 2 that won't happen, or vice versa
@@ -239,7 +264,7 @@
   // rule closely enough to get the count right, not reproduce it exactly.
   function updateStep1ButtonLabel() {
     if (document.getElementById('step2').style.display !== 'none') return;
-    const selected = Array.from(knownEl.querySelectorAll('input:checked')).map((c) => c.value);
+    const selected = ia.checkedGuestNames(list);
     const typed = document.getElementById('names').value.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
     const seen = new Set();
     let count = 0;
@@ -251,9 +276,32 @@
     }
     document.getElementById('save').textContent = count === 1 || correcting ? 'Save' : 'Next';
   }
-  knownEl.addEventListener('change', updateStep1ButtonLabel);
-  document.getElementById('names').addEventListener('input', updateStep1ButtonLabel);
+  knownEl.addEventListener('change', (e) => {
+    if (e.target && e.target.type === 'checkbox') ia.setGuestChecked(list, e.target.value, e.target.checked);
+    updateStep1ButtonLabel();
+  });
+  document.getElementById('names').addEventListener('input', () => {
+    ia.touchGuests(list);
+    updateStep1ButtonLabel();
+    updateAtBlock();
+  });
+  document.getElementById('self').addEventListener('input', updateAtBlock);
   updateStep1ButtonLabel();
+
+  // Invitee address -> its name field (SAA-221).
+  const inviteeInputs = new Map();
+
+  // A name with an @ blocks Save at step 1 (SAA-221): in "Someone new?", in
+  // the host's own name, or in an invitee's name field. buildAnswerDoc drops
+  // one as the backstop. Checked on every keystroke; it never changes the list.
+  function updateAtBlock() {
+    if (document.getElementById('step2').style.display !== 'none') return;
+    const typed = document.getElementById('names').value.split(/[\n,]/);
+    const values = [...typed, document.getElementById('self').value, ...[...inviteeInputs.values()].map((i) => i.value)];
+    const blocked = values.some((v) => v.trim().includes('@'));
+    document.getElementById('save').disabled = blocked;
+    document.getElementById('at-hint').style.display = blocked ? '' : 'none';
+  }
 
   const scopeEl = document.getElementById('scope');
   const inferredScope = params.get('inferredScope');
@@ -276,6 +324,47 @@
     if (!active) return null;
     return active.dataset.value === 'personal' ? 'personal' : 'work';
   }
+
+  // The calendar preview (SAA-221), applied once, at step 1 only, and never to
+  // a correction. The title goes on the capture line; named invitees get a box,
+  // checked only while the list is untouched; each unnamed invitee gets a name
+  // field, committed on change (blur, or Enter) and again by Save.
+  let calendarApplied = false;
+  function applyCalendar(prefill) {
+    if (calendarApplied || correcting || !prefill) return;
+    if (document.getElementById('step2').style.display !== 'none') return;
+    calendarApplied = true;
+    if (prefill.title) captureEl.textContent = `${captureEl.textContent} · ${prefill.title}`;
+    ia.applyCalendarNames(list, Array.isArray(prefill.named) ? prefill.named : []);
+    renderBoxes();
+    const invitees = document.getElementById('invitees');
+    for (const email of Array.isArray(prefill.unnamed) ? prefill.unnamed : []) {
+      const row = document.createElement('div');
+      row.className = 'invitee';
+      const address = document.createElement('span');
+      address.className = 'address';
+      address.textContent = email;
+      address.title = email;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.spellcheck = false;
+      input.placeholder = 'Full name';
+      input.addEventListener('input', updateAtBlock);
+      input.addEventListener('change', () => {
+        ia.nameInvitee(list, email, input.value);
+        renderBoxes();
+        updateStep1ButtonLabel();
+      });
+      row.appendChild(address);
+      row.appendChild(input);
+      invitees.appendChild(row);
+      inviteeInputs.set(email, input);
+    }
+    if (inviteeInputs.size > 0) document.getElementById('invitees-field').style.display = '';
+    updateStep1ButtonLabel();
+    resize();
+  }
+  ipcRenderer.on('identity:calendar', (_event, prefill) => applyCalendar(prefill));
 
   function measuredHeight() {
     const body = document.body;
@@ -503,13 +592,20 @@
     if (document.getElementById('save').disabled) return;
     if (document.getElementById('step2').style.display === 'none') {
       // Step 1.
-      const selectedNames = Array.from(knownEl.querySelectorAll('input:checked')).map((c) => c.value);
+      // Enter saves on keydown, before a name field's change event: commit any
+      // field whose text differs from its entry first (SAA-221).
+      for (const [email, input] of inviteeInputs) {
+        const entry = list.entries.get(email);
+        if (input.value.trim() !== (entry ? entry.name : '')) ia.nameInvitee(list, email, input.value);
+      }
+      const selectedNames = ia.checkedGuestNames(list);
       ipcRenderer.send('identity:submit', {
         token: params.get('token'),
         selectedNames,
         newNames: document.getElementById('names').value,
         self: document.getElementById('self').value,
         scope: selectedScope(),
+        inviteeNames: ia.inviteeEntries(list),
       });
     } else {
       // Step 2.
@@ -542,6 +638,10 @@
     try { namingData = JSON.parse(params.get('namingData') || 'null'); } catch { namingData = null; }
     if (namingData) renderVoices(namingData);
   }
+
+  // A saved self name can predate the @ rule (SAA-221): checked once here, so
+  // Save starts blocked if it holds one. A no-op once step 2 is showing.
+  updateAtBlock();
 
   ipcRenderer.send('identity:resize', { token: params.get('token'), height: measuredHeight() });
 </script>

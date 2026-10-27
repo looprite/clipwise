@@ -16,12 +16,16 @@
 // Cases 6-8 read main.js and build-app.sh as text: they show which values the
 // console lines interpolate, that every notify() names a fixed kind, and that
 // the bundle gets the module, not that any of it runs.
+//
+// Cases 9-10 (SAA-221): the calendar preview and invitee-names lines are given
+// a preview holding the title, the guest's name and an invitee's address, and
+// the day log holds no @; the control plants an address line in a copy of it.
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { buildAnswerDoc, buildVoiceNamesDoc } = require('./identity-answer.js');
+const { buildAnswerDoc, buildVoiceNamesDoc, calendarPrefillFrom, buildInviteeNamesDoc } = require('./identity-answer.js');
 
 const REV = process.env.CLIPWISE_CHECK_SOURCE || '';
 const fromRev = (file) => execFileSync('git', ['show', `${REV}:recorder/app/${file}`], { cwd: __dirname, encoding: 'utf8' });
@@ -32,6 +36,7 @@ const SELF = 'Yvette Quillfeather';
 const GUEST = 'Desmond Arkwright';
 const TITLE = 'Made-Up Sync Orchard Review';
 const NEEDLES = [SELF, GUEST, TITLE];
+const ADDRESS = 'desmond.arkwright@example.test';
 const STEM = '2026-03-02T15-00-00Z';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-check-log-lines-'));
@@ -44,6 +49,9 @@ const fixture = {
     voices: [{ voice: 'S1', name: SELF }, { voice: 'S2', name: GUEST }],
     suggestedFileName: `2026-03-02 ${TITLE} – transcript.txt`,
     meta: { turns: 12, unattributedTurns: 1 },
+    // The server's calendar-preview reply and what the member typed (SAA-221).
+    preview: { matched: true, title: TITLE, named: [SELF], unnamed: [ADDRESS] },
+    inviteeNames: [{ email: ADDRESS, name: GUEST }],
 };
 const fixturePath = path.join(root, 'fixture.json');
 fs.writeFileSync(fixturePath, JSON.stringify(fixture, null, 2) + '\n');
@@ -51,6 +59,9 @@ const identityDoc = buildAnswerDoc({ stem: STEM, recordingId: 'R', ...fixture.an
 const voicesDoc = buildVoiceNamesDoc({ stem: STEM, recordingId: 'R', voices: fixture.voices });
 const identityPath = path.join(outdir, `identity-${STEM}.json`);
 const voicesPath = path.join(outdir, `voice-names-${STEM}.json`);
+const prefill = calendarPrefillFrom(fixture.preview);
+const inviteeDoc = buildInviteeNamesDoc({ stem: STEM, recordingId: 'R', pairs: fixture.inviteeNames, allowed: prefill.unnamed });
+const inviteePath = path.join(outdir, `invitee-names-${STEM}.json`);
 const savedPath = path.join(root, 'Downloads', fixture.suggestedFileName);
 
 // A real failed write to a title-bearing path: a folder the copy cannot write into.
@@ -74,6 +85,10 @@ function newLines() {
         L.notifyDeliveredLine('transcript-saved'),
         L.saveTranscriptFailedLine(STEM, writeErr),
         L.notifyLine('transcript-not-saved'),
+        L.calendarPreviewLine(STEM, 'applied', 812, prefill),
+        L.calendarPreviewLine(STEM, 'not_signed_in'),
+        L.inviteeNamesLine(STEM, inviteeDoc.invitees.length, inviteePath),
+        L.inviteeNamesFailedLine(STEM, writeErr),
     ];
 }
 
@@ -164,6 +179,13 @@ const CASES = [
         notifySites.length > 0 && unkinded.length === 0],
     ['build-app.sh (text): copies log-lines.js into the bundle (main.js requires it)', () =>
         BUILD.includes('cp "$APP_SRC/log-lines.js" "$C/Resources/app/log-lines.js"')],
+    ['SAA-221: the day log, with the calendar-preview and invitee-names lines, holds no @ (fixture holds the address)', () =>
+        grepCount(ADDRESS, fixturePath) > 0 && inviteeDoc.invitees.length === 1 && grepCount('@', checkedLog) === 0],
+    ['control: the same grep finds an @ planted in a copy of that day log', () => {
+        const planted = path.join(root, 'planted.log');
+        fs.writeFileSync(planted, fs.readFileSync(checkedLog, 'utf8') + `x calendar-preview ${STEM}: ${ADDRESS}\n`);
+        return grepCount('@', planted) > 0;
+    }],
 ];
 
 console.log(`source: ${REV ? `${REV} main.js and build-app.sh; line formats: COPY of c5b1408, not run from git` : 'log-lines.js, main.js and build-app.sh in the checkout'}`);
