@@ -134,17 +134,22 @@ function mergeGuestNames(selected, typedRaw) {
 // answered_at of the answer it replaces (correctsFor below). The server applies
 // a correction in place of that answer, and refuses one whose answer it no
 // longer holds.
+//
+// A name with an @ is an address, not a name (SAA-221): the page blocks Save on
+// one, and this drops any that get past it, so identity files carry no
+// addresses. ingest/identity.ts drops them again on the server.
 function buildAnswerDoc({ stem, recordingId, names, selfName, scope, answeredAt, corrects }) {
+    const self = selfName && !hasAt(selfName) ? selfName : null;
     return {
         identity_version: IDENTITY_VERSION,
         recording_id: recordingId,
         stem,
         answered_at: answeredAt || new Date().toISOString(),
         self: {
-            name: selfName || null,
-            source: selfName ? 'recorder_identity_prompt' : null,
+            name: self,
+            source: self ? 'recorder_identity_prompt' : null,
         },
-        guests: (names || []).map(name => ({ name })),
+        guests: (names || []).filter((name) => !hasAt(name)).map(name => ({ name })),
         scope: scope === 'work' || scope === 'personal' ? scope : null,
         ...(corrects ? { corrects } : {}),
     };
@@ -191,6 +196,227 @@ function writeAnswer(dir, doc) {
     fs.writeFileSync(tmpPath, JSON.stringify(doc, null, 2) + '\n');
     fs.renameSync(tmpPath, finalPath);
     return finalPath;
+}
+
+// --- the calendar's guests (SAA-221) ----------------------------------------
+//
+// At stop, main.js asks the server (POST /captures/calendar-preview) who the
+// calendar says the call was with. calendarPrefillFrom keeps only what the page
+// may use from the reply. The guest list below is what the page checks and
+// submits, kept here so check-calendar-prefill.js can exercise it without a
+// window. SAA-260 replaces the checklist; nothing on the server depends on it.
+
+// A preview is applied only if it arrives this soon after the stop.
+const CALENDAR_PREVIEW_WAIT_MS = 5000;
+const MAX_PREFILL = 50;
+
+function hasAt(value) {
+    return String(value).includes('@');
+}
+
+// The server's reply, or null when it is not a match. Named entries are names
+// (none with an @); unnamed entries are addresses (each with one), lowercased
+// and once each.
+function calendarPrefillFrom(json) {
+    if (!json || json.matched !== true) return null;
+    const strings = (list) => (Array.isArray(list) ? list : [])
+        .filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim());
+    const named = strings(json.named).filter((n) => !hasAt(n)).slice(0, MAX_PREFILL);
+    const unnamed = [...new Set(strings(json.unnamed).filter(hasAt).map((e) => e.toLowerCase()))].slice(0, MAX_PREFILL);
+    const title = typeof json.title === 'string' && json.title.trim() ? json.title.trim().slice(0, 200) : null;
+    return { title, named, unnamed };
+}
+
+// Step 1's guest list: one box per name, checked or not, and the names the
+// member typed for invitees the calendar could not name (entries, address ->
+// { name, created, borrowed }). An entry is its own record: unchecking a box
+// takes that person out of the guests and keeps the entry, so they are still
+// named once.
+//   created   the box the entry added, or null. Only a created box is ever
+//             renamed or removed.
+//   borrowed  { box, wasChecked, toggled } when the entry checked a box that
+//             existed before it: the box, its checked state before, and whether
+//             the member has toggled it since. When the entry moves off the
+//             box (retyped or cleared) the box goes back to wasChecked, unless
+//             toggled; a borrowed box is never removed.
+// `touched` is set by any change the member makes to the list; after that the
+// calendar preselects nothing.
+function guestList(knownNames, checkedNames) {
+    const checked = new Set((checkedNames || []).map((n) => String(n).toLowerCase()));
+    return {
+        boxes: (knownNames || []).map((name) => ({ name, checked: checked.has(String(name).toLowerCase()) })),
+        entries: new Map(),
+        touched: false,
+    };
+}
+
+function boxFor(list, name, except) {
+    const key = String(name).toLowerCase();
+    return list.boxes.find((b) => b !== except && b.name.toLowerCase() === key) || null;
+}
+
+// Another entry than `email`'s that borrows `box`, or null.
+function borrowerOf(list, email, box) {
+    for (const [otherEmail, other] of list.entries) {
+        if (otherEmail !== email && other.borrowed && other.borrowed.box === box) return other;
+    }
+    return null;
+}
+
+// The calendar's named invitees: a box for each, an existing one or a new one,
+// checked only while the list is untouched.
+function applyCalendarNames(list, named) {
+    for (const name of named || []) {
+        if (!name || hasAt(name)) continue;
+        let box = boxFor(list, name);
+        if (!box) {
+            box = { name, checked: false };
+            list.boxes.push(box);
+        }
+        if (!list.touched) box.checked = true;
+    }
+}
+
+// The member toggling a box directly. An entry borrowing it then leaves it as
+// the member set it.
+function setGuestChecked(list, name, checked) {
+    list.touched = true;
+    const box = boxFor(list, name);
+    if (!box) return;
+    box.checked = !!checked;
+    for (const entry of list.entries.values()) {
+        if (entry.borrowed && entry.borrowed.box === box) entry.borrowed.toggled = true;
+    }
+}
+
+// Any other change to the guest list (typing in "Someone new?").
+function touchGuests(list) {
+    list.touched = true;
+}
+
+// `email`'s entry moving off its box. A created box passes to an entry that
+// borrows it, which then owns it, or else is removed. A borrowed box goes back
+// to its state from before, unless the member toggled it or another entry
+// still holds it.
+function letGoOfBox(list, email, entry) {
+    if (entry.created) {
+        const box = entry.created;
+        entry.created = null;
+        const heir = borrowerOf(list, email, box);
+        if (heir) {
+            heir.created = box;
+            heir.borrowed = null;
+        } else {
+            list.boxes = list.boxes.filter((b) => b !== box);
+        }
+    }
+    if (entry.borrowed) {
+        const { box, wasChecked, toggled } = entry.borrowed;
+        entry.borrowed = null;
+        const stillHeld = borrowerOf(list, email, box)
+            || [...list.entries].some(([e, other]) => e !== email && other.created === box);
+        if (!stillHeld && !toggled && list.boxes.includes(box)) box.checked = wasChecked;
+    }
+}
+
+// A name committed for an invitee's address (the page calls this on the
+// field's change event, and for every field on Save). Records the entry and
+// checks its box:
+//   first name     a box with that name is borrowed and checked, or one is
+//                  created
+//   retyped        the box this entry created is renamed in place, unless the
+//                  new name already has its own box or another entry borrows
+//                  it: then the entry lets go of it and takes the new name's
+//                  box. A borrowed box goes back to its state from before.
+//   same name      nothing changes (a box the member unchecked stays so)
+//   cleared        the entry goes, and lets go of its box
+//   name with @    nothing changes (the page blocks Save on it)
+// Returns the entry's box, or null.
+function nameInvitee(list, email, name) {
+    list.touched = true;
+    const n = String(name || '').trim();
+    if (hasAt(n)) return null;
+    const entry = list.entries.get(email) || null;
+    if (!n) {
+        if (entry) letGoOfBox(list, email, entry);
+        list.entries.delete(email);
+        return null;
+    }
+    if (entry && entry.name === n) return entry.created || (entry.borrowed && entry.borrowed.box) || null;
+    if (entry && entry.created && !boxFor(list, n, entry.created) && !borrowerOf(list, email, entry.created)) {
+        entry.created.name = n;
+        entry.created.checked = true;
+        entry.name = n;
+        return entry.created;
+    }
+    if (entry) letGoOfBox(list, email, entry);
+    let box = boxFor(list, n);
+    if (!box) {
+        box = { name: n, checked: true };
+        list.boxes.push(box);
+        list.entries.set(email, { name: n, created: box, borrowed: null });
+        return box;
+    }
+    // A box another entry already borrows was checked by that entry: its state
+    // from before is the one that entry recorded.
+    const earlier = borrowerOf(list, email, box);
+    const wasChecked = earlier ? earlier.borrowed.wasChecked : box.checked;
+    box.checked = true;
+    list.entries.set(email, { name: n, created: null, borrowed: { box, wasChecked, toggled: false } });
+    return box;
+}
+
+function checkedGuestNames(list) {
+    return list.boxes.filter((b) => b.checked).map((b) => b.name);
+}
+
+function inviteeEntries(list) {
+    return [...list.entries].map(([email, entry]) => ({ email, name: entry.name }));
+}
+
+const INVITEE_NAMES_VERSION = 1;
+
+// What the member typed for invitees the calendar could not name, for POST
+// /captures' inviteeNames (server/src/ingest/invitee-names.ts). A file of its
+// own, invitee-names-<stem>.json, never the identity file: identity files carry
+// no addresses. `allowed` is the addresses the preview offered: a pair for any
+// other address, an empty name, a name with an @ or one past the server's
+// bounds is dropped, and each address is kept once.
+function buildInviteeNamesDoc({ stem, recordingId, pairs, allowed }) {
+    const ok = new Set((allowed || []).map((e) => String(e).toLowerCase()));
+    const seen = new Set();
+    const invitees = [];
+    for (const pair of pairs || []) {
+        const email = String(pair?.email || '').trim().toLowerCase();
+        const name = String(pair?.name || '').trim();
+        if (!ok.has(email) || seen.has(email)) continue;
+        if (!name || hasAt(name) || name.length > 256 || email.length > 320) continue;
+        seen.add(email);
+        invitees.push({ email, name });
+    }
+    return {
+        invitee_names_version: INVITEE_NAMES_VERSION,
+        recording_id: recordingId,
+        stem,
+        invitees: invitees.slice(0, MAX_PREFILL),
+    };
+}
+
+// Written whole or not at all, as writeAnswer.
+function writeInviteeNames(dir, doc) {
+    const finalPath = path.join(dir, `invitee-names-${doc.stem}.json`);
+    const tmpPath = `${finalPath}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(doc, null, 2) + '\n');
+    fs.renameSync(tmpPath, finalPath);
+    return finalPath;
+}
+
+function readInviteeNames(dir, stem) {
+    try {
+        return JSON.parse(fs.readFileSync(path.join(dir, `invitee-names-${stem}.json`), 'utf8'));
+    } catch {
+        return null;
+    }
 }
 
 // --- step 1 deferred: "Later" (SAA-197) -------------------------------------
@@ -497,6 +723,19 @@ module.exports = {
     writeAnswer,
     readAnswer,
     correctsFor,
+    CALENDAR_PREVIEW_WAIT_MS,
+    calendarPrefillFrom,
+    guestList,
+    applyCalendarNames,
+    setGuestChecked,
+    touchGuests,
+    nameInvitee,
+    checkedGuestNames,
+    inviteeEntries,
+    INVITEE_NAMES_VERSION,
+    buildInviteeNamesDoc,
+    writeInviteeNames,
+    readInviteeNames,
     writeLaterMarker,
     readLaterMarker,
     deleteLaterMarker,

@@ -20,6 +20,7 @@ const path = require('path');
 const {
     IDENTITY_WINDOW, contentHeightFor, knownGuestNames, mergeGuestNames,
     buildAnswerDoc, writeAnswer, readAnswer, correctsFor,
+    CALENDAR_PREVIEW_WAIT_MS, calendarPrefillFrom, buildInviteeNamesDoc, writeInviteeNames,
     writeLaterMarker, readLaterMarker, deleteLaterMarker,
     recentPendingIdentityStems,
     buildVoiceNamesDoc, writeVoiceNamesAnswer, readNamingData, recentPendingVoiceNamingStems,
@@ -448,6 +449,11 @@ function detectActiveName(key) {
 // answer. { stem, recordingId, token }
 const identityQueue = [];
 let identityWindow = null;
+// The calendar's guests for a capture waiting on step 1 (SAA-221), by window
+// token: calendarPrefillFrom's { title, named, unnamed }. Kept here and never on
+// the capture object, because the later-marker is written from that object and
+// a preview holds invitee addresses. Dropped when the window closes.
+const calendarPreviews = new Map();
 
 const LABEL = {
     stopped:   'Stopped',
@@ -3058,6 +3064,14 @@ function buildCapturePayload(stem) {
     } catch (err) {
         if (err.code !== 'ENOENT') throw err;
     }
+    // Names typed at the prompt for invitees the calendar could not name
+    // (SAA-221), from their own file: never part of identity.
+    let inviteeNames;
+    try {
+        inviteeNames = readJson(`invitee-names-${stem}.json`).invitees;
+    } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+    }
     // What diarize produced (SAA-227 decisions 1 and 4): each voice's index and
     // total seconds, and each `them` segment's voice by the majority rule. The
     // server decides whether that is a split. Its turn times, clip ranges and
@@ -3115,6 +3129,7 @@ function buildCapturePayload(stem) {
         autostop: transcript.autostop,
         identity,
         voiceNames,
+        inviteeNames: Array.isArray(inviteeNames) && inviteeNames.length ? inviteeNames : undefined,
         voices: diarized ? diarized.voices.map((v) => ({ voiceIndex: v.voiceIndex, totalSeconds: v.totalSeconds })) : undefined,
     };
 }
@@ -3689,7 +3704,50 @@ function promptForIdentity(capture) {
     // is what makes an auto-stop with nobody at the Mac safe, and it closes the
     // same gap for a manual stop.
     deferIdentityPrompt(queued);
+    requestCalendarPreview(queued);
     pumpIdentityQueue();
+}
+
+// Who the calendar says a capture that just stopped was with (SAA-221). Asked
+// once, here at stop, and never for a window reopened from the tray or a
+// correction. A reply is applied only if it comes within
+// CALENDAR_PREVIEW_WAIT_MS of the request and the capture's window has not
+// closed meanwhile; the page gets it now if it is loaded, or when it loads.
+// The log is the outcome and counts only.
+function requestCalendarPreview(capture) {
+    const server = signedInServer();
+    let startedAt = null;
+    try {
+        startedAt = JSON.parse(fs.readFileSync(path.join(OUTDIR, `manifest-${capture.stem}.json`), 'utf8')).started_at || null;
+    } catch {}
+    if (!server || !startedAt) {
+        console.error(logLines.calendarPreviewLine(capture.stem, server ? 'no_start_time' : 'not_signed_in'));
+        return;
+    }
+    const askedAt = Date.now();
+    captureServerRequest(server, 'POST', '/captures/calendar-preview', { startedAt }).then((reply) => {
+        const ms = Date.now() - askedAt;
+        const line = (outcome, prefill) => console.error(logLines.calendarPreviewLine(capture.stem, outcome, ms, prefill));
+        if (ms > CALENDAR_PREVIEW_WAIT_MS) return line('late');
+        if (reply.status === null) return line('no_reply');
+        if (reply.status !== 200) return line(`status_${reply.status}`);
+        const prefill = calendarPrefillFrom(reply.json);
+        if (!prefill) return line('no_match');
+        if (!identityQueue.some((c) => c.token === capture.token)) return line('window_gone');
+        calendarPreviews.set(capture.token, prefill);
+        line('applied', prefill);
+        sendCalendarPreview(capture.token);
+    });
+}
+
+// To the page, if this token's window is on screen at step 1 with its page
+// loaded. Sent at most once per window: the page also ignores a second one.
+function sendCalendarPreview(token) {
+    const prefill = calendarPreviews.get(token);
+    if (!prefill || !identityWindow || identityWindow.capture.token !== token) return;
+    if (!identityWindow.loaded || identityWindow.step !== 1 || identityWindow.calendarSent) return;
+    identityWindow.calendarSent = true;
+    identityWindow.win.webContents.send('identity:calendar', prefill);
 }
 
 // Records that step 1 is unanswered (SAA-197; also written when the capture is
@@ -3819,10 +3877,10 @@ function pumpIdentityQueue() {
         // A prompt that cannot be drawn leaves the recording unidentified. The
         // capture is already on disk and already in the pipeline.
         console.error(`identity: could not open the prompt: ${String(err)}`);
-        identityQueue.shift();
+        calendarPreviews.delete(identityQueue.shift().token);
         return;
     }
-    identityWindow = { win, capture, shown: false, step: 1, resolved: false, fromQueue: true, pollTimer: null };
+    identityWindow = { win, capture, shown: false, step: 1, resolved: false, fromQueue: true, pollTimer: null, loaded: false, calendarSent: false };
     // Shown once, by whichever comes first: the page's own height message, or
     // a deadline. The deadline is what stops a broken measurement from leaving
     // the prompt invisible — a window nobody can see is worse than one sized
@@ -3839,6 +3897,12 @@ function pumpIdentityQueue() {
     };
     identityWindow.reveal = reveal;
     win.once('ready-to-show', () => setTimeout(reveal, IDENTITY_REVEAL_GRACE_MS));
+    // A calendar preview that came before the page could receive it (SAA-221).
+    win.webContents.once('did-finish-load', () => {
+        if (!identityWindow || identityWindow.win !== win) return;
+        identityWindow.loaded = true;
+        sendCalendarPreview(capture.token);
+    });
     win.once('closed', () => {
         // SAA-197: closing via the window's own controls used to reopen the
         // same capture immediately — this queue never advanced, because
@@ -3860,6 +3924,7 @@ function pumpIdentityQueue() {
             }
             resolveIdentityWindow();
         }
+        calendarPreviews.delete(capture.token);
         identityWindow = null;
         pumpIdentityQueue();
     });
@@ -3949,7 +4014,30 @@ function registerIdentityIpc() {
         const corrects = capture.correcting
             ? correctsFor(readAnswer(OUTDIR, capture.stem), (readUploadEntry(capture.stem) || {}).identityAcceptedAt || null)
             : undefined;
-        if (!capture.correcting) writeSelfName(selfName);
+        // A name with an @ is an address (SAA-221): the page blocks Save on one,
+        // and it is never remembered as the member's name. buildAnswerDoc drops
+        // it from the answer too.
+        if (!capture.correcting && selfName && !selfName.includes('@')) writeSelfName(selfName);
+        // Names typed for invitees the calendar could not name (SAA-221): their
+        // own file, and only for addresses this window's preview offered. A
+        // failure loses those names, not the answer; it is logged and the
+        // answer is still written.
+        const prefill = calendarPreviews.get(capture.token);
+        if (prefill && !capture.correcting) {
+            const doc = buildInviteeNamesDoc({
+                stem: capture.stem,
+                recordingId: capture.recordingId,
+                pairs: Array.isArray(payload.inviteeNames) ? payload.inviteeNames : [],
+                allowed: prefill.unnamed,
+            });
+            if (doc.invitees.length > 0) {
+                try {
+                    console.error(logLines.inviteeNamesLine(capture.stem, doc.invitees.length, writeInviteeNames(OUTDIR, doc)));
+                } catch (err) {
+                    console.error(logLines.inviteeNamesFailedLine(capture.stem, err));
+                }
+            }
+        }
         try {
             writeIdentityAnswer(capture, { names, selfName, scope, corrects });
         } catch (err) {
