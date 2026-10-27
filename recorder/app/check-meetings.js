@@ -479,7 +479,7 @@ check('without the processing capture, the tray item is the newest ready meeting
     fs.rmSync(c8, { recursive: true, force: true });
 }
 
-// SAA-258: "Change who was on this call…" shows on a row with a saved answer,
+// SAA-258: "Change attendees…" shows on a row with a saved answer,
 // and not on one without or one whose upload has failed; and what a correction
 // corrects (correctsFor). The server holds A. B1 is a correction made offline
 // and never sent; B2 is made after it, and the queue sends only B2.
@@ -503,7 +503,7 @@ check('without the processing capture, the tray item is the newest ready meeting
     call(FAILED, answerFor(FAILED), 'failed');
     const rows = Object.fromEntries(listMeetings(c9, NOW, undefined, { uploadQueueDir: q9 }).map((r) => [r.stem, r]));
     const can = (stem) => JSON.stringify(rows[stem] && rows[stem].canChangeIdentity);
-    check('SAA-258: a call with a saved answer, sent, offers "Change who was on this call…"',
+    check('SAA-258: a call with a saved answer, sent, offers "Change attendees…"',
         !!rows[ANS] && rows[ANS].canChangeIdentity === true, can(ANS));
     check('control: a call with no saved answer does not', !!rows[NONE] && rows[NONE].canChangeIdentity === false, can(NONE));
     check('SAA-258: a call with a saved answer whose upload failed does not (the queue would never send the correction)',
@@ -511,6 +511,15 @@ check('without the processing capture, the tray item is the newest ready meeting
     check('SAA-258: a correction carries corrects in the answer file, a first answer does not',
         ia.buildAnswerDoc({ stem: ANS, names: [], corrects: 'A' }).corrects === 'A' && !('corrects' in ia.buildAnswerDoc({ stem: ANS, names: [] })));
     fs.rmSync(c9, { recursive: true, force: true });
+
+    // The menu item's wording (SAA-221): meetings.html as text.
+    const page = fs.readFileSync(path.join(__dirname, 'meetings.html'), 'utf8');
+    const OLD = 'Change who was on this call';
+    check('SAA-221: the ⋯ menu item reads "Change attendees…"',
+        page.includes("el('button', null, 'Change attendees…')"));
+    check('SAA-221: the old wording is gone from meetings.html', !page.includes(OLD));
+    check('control: the same includes() finds the old wording planted in a copy of that text',
+        `${page}\n          const c = el('button', null, 'Change who was on this call…');\n`.includes(OLD));
 
     const A = { answered_at: 'A' };
     const B1 = { answered_at: 'B1', corrects: 'A' };
