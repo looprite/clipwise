@@ -5086,10 +5086,35 @@ function stopRecording(cause) {
     });
 }
 
-// The tray's Quit… asks first: a quit stops all recording until Clipwise is
-// opened again, and nothing else says so. While a capture is starting or running
-// the message says so. Only the tray item comes through here; a logout or restart
-// quits through Electron's own quit events, which nothing here holds up.
+// The application menu, which shows while one of Clipwise's windows is in front.
+// Electron's default has Quit (Cmd+Q) as role 'quit', which calls app.quit() and
+// skips both the question and quitApp: on 2026-10-28 Cmd+Q from Recent meetings
+// quit with no dialog and no quit: line. This is that default with Quit sent
+// through confirmQuit. Edit stays, for paste into setup's team address.
+function installAppMenu() {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+        { label: app.name, submenu: [
+            { role: 'about' },
+            { type: 'separator' },
+            { role: 'services' },
+            { type: 'separator' },
+            { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
+            { type: 'separator' },
+            { label: 'Quit Clipwise…', accelerator: 'Command+Q', click: confirmQuit },
+        ] },
+        { role: 'fileMenu' },
+        { role: 'editMenu' },
+        { role: 'viewMenu' },
+        { role: 'windowMenu' },
+    ]));
+}
+
+// The tray's Quit… and Cmd+Q (installAppMenu) ask first: a quit stops all
+// recording until Clipwise is opened again, and nothing else says so. While a
+// capture is starting or running the message says so. Only those two come
+// through here; a logout or restart still quits through Electron's own quit
+// events and never comes through here, though macOS refuses that quit while
+// this dialog is open (errn -128, live check 2026-10-28).
 let quitConfirmOpen = false;
 async function confirmQuit() {
     if (quitConfirmOpen) return;
@@ -5248,6 +5273,7 @@ app.whenReady().then(async () => {
     // keeps a launch from showing one at all; this is the runtime half, and the
     // two only mean something together (SAA-105).
     if (app.dock) app.dock.hide();
+    installAppMenu();
     // First, before the tray or any child exists: a move relaunches the app from
     // Applications, and this process quits.
     if (await offerMoveToApplications()) return;

@@ -95,6 +95,8 @@ const quitText = (phase) => {
     return m ? { message: m[2], detail: m[4] } : null;
 };
 const noteAt = (o) => setup.locationWarning({ bundled: true, inApplications: false, appPath: '/Users/jd/code/x/Clipwise.app', home: '/Users/jd', ...o });
+// A menu item that quits without asking: Electron's quit role, or the app menu role that contains it.
+const QUIT_ROLE = /role: '(quit|appMenu)'/;
 const startBody = (() => {
     const a = SRC.indexOf('\nfunction startRecording()');
     const b = SRC.indexOf('\nfunction onCaptureChildExit', a);
@@ -451,6 +453,19 @@ const CASES = [
         return t >= 0 && f > t
             && /\} finally \{\s*(\/\/[^\n]*\n\s*)?quitConfirmOpen = false;\s*\}/.test(body)
             && body.split('quitConfirmOpen = false;').length - 1 === 1; }],
+    ['quit: Cmd+Q goes through confirmQuit: the app menu\'s Quit has Command+Q and click confirmQuit, and no item has role quit or appMenu', () =>
+        fnBody('installAppMenu').includes("{ label: 'Quit Clipwise…', accelerator: 'Command+Q', click: confirmQuit },")
+        && !QUIT_ROLE.test(SRC)],
+    ['quit: control: the role pattern finds role quit and role appMenu when they are there', () =>
+        QUIT_ROLE.test("{ role: 'quit' }") && QUIT_ROLE.test("{ role: 'appMenu' }") && !QUIT_ROLE.test("{ role: 'editMenu' }")],
+    ['quit: the app menu is installed at launch, after the lock and before the move offer', () => {
+        const l = whenReadyBody.indexOf('if (!GOT_SINGLE_INSTANCE_LOCK) return;');
+        const i = whenReadyBody.indexOf('installAppMenu();');
+        const m = whenReadyBody.indexOf('if (await offerMoveToApplications()) return;');
+        return l >= 0 && i > l && m > i; }],
+    ['quit: the app menu keeps Edit (paste in setup) and Window', () => {
+        const body = fnBody('installAppMenu');
+        return body.includes("{ role: 'editMenu' },") && body.includes("{ role: 'windowMenu' },"); }],
     ['lock: requested at load, a second launch quits, and the boot code does nothing without it', () =>
         /\nconst GOT_SINGLE_INSTANCE_LOCK = app\.requestSingleInstanceLock\(\);\nif \(!GOT_SINGLE_INSTANCE_LOCK\) \{[\s\S]{0,200}app\.quit\(\);/.test(SRC)
         && whenReadyBody.includes('if (!GOT_SINGLE_INSTANCE_LOCK) return;')
