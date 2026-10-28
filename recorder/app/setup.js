@@ -186,8 +186,36 @@ function shouldApplyLoginDefault({ inApplications, setupCompleted, defaultApplie
 // The offer to move to Applications: only for the built app, and only when it is
 // running from anywhere else (straight from the .dmg, or translocated). A run
 // from a checkout is development, not an install.
-function shouldOfferMove({ bundled, inApplications }) {
-    return !!bundled && !inApplications;
+//
+// Not when the installed copy is this build or a newer one: Electron's move
+// replaces a same-named app in Applications, so a stale copy started from a
+// worktree or a backup would put itself in place of the one installed. An older
+// installed copy keeps the offer, since a newer .dmg is how an update arrives
+// until there is auto-update, and so does one whose build-info can't be read.
+function shouldOfferMove({ bundled, inApplications, running = null, installed = null }) {
+    return !!bundled && !inApplications && !installedIsSameOrNewer(running, installed);
+}
+
+// Same commit, or a later built_at. Either side missing reads as not same-or-newer, so the offer stays.
+function installedIsSameOrNewer(running, installed) {
+    if (!running || !installed) return false;
+    if (installed.commit && installed.commit === running.commit) return true;
+    const a = Date.parse(installed.built_at);
+    const b = Date.parse(running.built_at);
+    return Number.isFinite(a) && Number.isFinite(b) && a > b;
+}
+
+// What a built app running from outside Applications says about it: a tray line
+// and a notification, both naming the path (~ for the home folder). Null in
+// Applications, and for a run from a checkout.
+function locationWarning({ bundled, inApplications, appPath, home }) {
+    if (!bundled || inApplications) return null;
+    const shown = home && appPath.startsWith(home + '/') ? '~' + appPath.slice(home.length) : appPath;
+    return {
+        tray: `Not the installed app: running from ${shown}`,
+        title: 'Clipwise is running from outside Applications',
+        body: `${shown}\nIt keeps recording, but it may be an old build.`,
+    };
 }
 
 module.exports = {
@@ -197,5 +225,5 @@ module.exports = {
     normalizeTeamAddress, isClipwiseDiscovery, claudeAddress,
     trayAccountItems, formatElapsed,
     loginItemPath, loginDefaultApplied, recordLoginDefaultApplied, shouldApplyLoginDefault,
-    shouldOfferMove,
+    shouldOfferMove, locationWarning,
 };
