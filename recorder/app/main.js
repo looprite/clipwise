@@ -155,6 +155,12 @@ const BUILD_INFO = (() => {
     }
 })();
 
+// The .app this process runs from (Contents/MacOS/Clipwise, three levels down).
+// Meaningful only from a bundle. The launch line names it so a day log says which
+// copy ran as well as which build: on 2026-10-26 a 274f52b build ran while
+// cb8795d was installed, and nothing in the log said where it was.
+const APP_BUNDLE_PATH = path.resolve(process.execPath, '..', '..', '..');
+
 const RECORDER_DIR = path.resolve(__dirname, '..');
 const BUNDLED_BIN = path.resolve(__dirname, '..', 'bin');
 const SYSTEMTAP_BIN = BUILD_INFO
@@ -260,7 +266,8 @@ if (BUILD_INFO) {
     };
     console.error(
         `[clipwise-recorder] launched from bundle — built ${BUILD_INFO.built_at} ` +
-        `commit ${BUILD_INFO.commit}${BUILD_INFO.dirty ? '+dirty' : ''}`);
+        `commit ${BUILD_INFO.commit}${BUILD_INFO.dirty ? '+dirty' : ''} ` +
+        `app ${APP_BUNDLE_PATH}`);
 }
 
 // One Clipwise at a time (SAA-198, Jon's call 6). A second launch quits here and
@@ -1579,6 +1586,10 @@ function syncTrayClock() {
     }
 }
 
+// Set once at launch (whenReady) from setup.locationWarning: the tray's line for
+// a built app running from outside Applications, null otherwise.
+let locationNote = null;
+
 function renderTray() {
     const label = LABEL[state];
     const pipelineNote = pipeline && PIPELINE_NOTE[pipeline.state]
@@ -1593,6 +1604,7 @@ function renderTray() {
     const items = [
         { label: `Status: ${label}`, enabled: false },
     ];
+    if (locationNote) items.push({ label: locationNote.tray, enabled: false });
     if (pipelineNote) items.push({ label: pipelineNote, enabled: false });
     if (permNote) items.push({ label: permNote, enabled: false });
     // The three most recent uploads, while a server is set.
@@ -1745,7 +1757,7 @@ function renderTray() {
           enabled: app.isInApplicationsFolder(), click: (item) => setOpenAtLogin(item.checked) },
         { label: 'About Clipwise', click: () => app.showAboutPanel() },
         { label: 'Acknowledgements…', click: openAcknowledgements },
-        { label: 'Quit', click: quitApp },
+        { label: 'Quit…', click: confirmQuit },
     );
     tray.setContextMenu(Menu.buildFromTemplate(items));
 }
@@ -4689,12 +4701,37 @@ function applyLoginDefault() {
     }
 }
 
+// The copy an install puts in Applications, read only when this app runs from
+// somewhere else (offerMoveToApplications). Its path rather than this app's own,
+// which outside Applications is by definition another bundle.
+const INSTALLED_APP = '/Applications/Clipwise.app';
+function readInstalledBuildInfo() {
+    const file = path.join(INSTALLED_APP, 'Contents', 'Resources', 'app', 'build-info.json');
+    try {
+        const info = JSON.parse(fs.readFileSync(file, 'utf8'));
+        console.error(`[clipwise-recorder] move: installed app read from ${file} — built ${info.built_at} commit ${info.commit}`);
+        return info;
+    } catch (err) {
+        console.error(`[clipwise-recorder] move: installed app not read from ${file} — ${err.code || err.name}`);
+        return null;
+    }
+}
+
 // Run from anywhere but Applications (straight from the .dmg, or translocated),
 // the built app offers to move itself there and relaunch, since launch at login
-// needs a path that stays put. Resolves true when the move has started and this
-// process is about to quit, so nothing else should start.
+// needs a path that stays put. Not when the installed copy is this build or a
+// newer one (setup.shouldOfferMove): the move would replace it. Resolves true
+// when the move has started and this process is about to quit, so nothing else
+// should start.
 async function offerMoveToApplications() {
-    if (!setup.shouldOfferMove({ bundled: !!BUILD_INFO, inApplications: app.isInApplicationsFolder() })) return false;
+    const bundled = !!BUILD_INFO;
+    const inApplications = app.isInApplicationsFolder();
+    if (!bundled || inApplications) return false;
+    const installed = readInstalledBuildInfo();
+    if (!setup.shouldOfferMove({ bundled, inApplications, running: BUILD_INFO, installed })) {
+        console.error('[clipwise-recorder] move: not offered — the installed app is this build or newer');
+        return false;
+    }
     console.error(`[clipwise-recorder] move: running from ${app.getPath('exe')}, not Applications — offering to move`);
     try { app.focus({ steal: true }); } catch {}
     const { response } = await dialog.showMessageBox({
@@ -5049,6 +5086,40 @@ function stopRecording(cause) {
     });
 }
 
+// The tray's Quit… asks first: a quit stops all recording until Clipwise is
+// opened again, and nothing else says so. While a capture is starting or running
+// the message says so. Only the tray item comes through here; a logout or restart
+// quits through Electron's own quit events, which nothing here holds up.
+let quitConfirmOpen = false;
+async function confirmQuit() {
+    if (quitConfirmOpen) return;
+    quitConfirmOpen = true;
+    // starting: the capture children are up but no track has written yet, so a
+    // quit now hands nothing to the pipeline (quitApp passes it no stem).
+    const phase = state === 'stopped' ? 'stopped' : state === 'starting' ? 'starting' : 'capture';
+    const text = {
+        stopped:  { message: "Clipwise won't record meetings until you open it again", detail: '' },
+        starting: { message: 'Clipwise is about to record this call',
+                    detail: "Quitting now stops it before anything is recorded, so nothing from this call is processed. Clipwise won't record meetings until you open it again." },
+        capture:  { message: 'Clipwise is recording this call',
+                    detail: "Quitting stops the recording now. What's been recorded so far is still processed. Clipwise won't record meetings until you open it again." },
+    }[phase];
+    try { app.focus({ steal: true }); } catch {}
+    let response;
+    try {
+        ({ response } = await dialog.showMessageBox({
+            type: 'warning', buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1,
+            message: text.message, detail: text.detail,
+        }));
+    } finally {
+        // A failed dialog must not leave Quit… doing nothing until a relaunch.
+        quitConfirmOpen = false;
+    }
+    const during = { stopped: '', starting: ' (while starting)', capture: ' (during a capture)' }[phase];
+    console.error(`[clipwise-recorder] quit: ${response === 0 ? 'confirmed' : 'cancelled'}${during}`);
+    if (response === 0) quitApp();
+}
+
 function quitApp() {
     // A capture that already happened should still become moments, so quitting
     // mid-recording hands off rather than discards. The child is detached, so
@@ -5180,6 +5251,13 @@ app.whenReady().then(async () => {
     // First, before the tray or any child exists: a move relaunches the app from
     // Applications, and this process quits.
     if (await offerMoveToApplications()) return;
+    // Outside Applications, a copy still records (a stale build beats none) and
+    // says where it runs from: a line in the tray, and once in a notification.
+    locationNote = setup.locationWarning({
+        bundled: !!BUILD_INFO, inApplications: app.isInApplicationsFolder(),
+        appPath: APP_BUNDLE_PATH, home: os.homedir(),
+    });
+    if (locationNote) notify('not-in-applications', locationNote.title, locationNote.body);
     tray = new Tray(iconFor('stopped'));
     {
         const server = readCaptureServerUrl();

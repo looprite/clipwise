@@ -27,7 +27,8 @@
 //      main.js, build-app.sh): the screen order and what counts as done; an
 //      install with all four done is recorded as set up; the tray's account
 //      items before and after setup; the team address and the Clipwise check;
-//      the recording time; launch at login and the move offer; and static checks
+//      the recording time; launch at login, the move offer, where the app runs
+//      from, and the quit warning; and static checks
 //      for the lock, the Dock, the build number, Electron's default texts and
 //      the system audio prompt writing nowhere.
 //
@@ -85,6 +86,15 @@ const fnBody = (name) => {
     return a >= 0 && b > a ? SRC.slice(a, b) : '';
 };
 const ALL_DONE = { acknowledged: true, server: 'https://team.example.com', signedIn: true, mic: 'granted', tap: 'granted' };
+// The running build, for the move offer's installed-copy cases.
+const RUNNING = { commit: 'bbbbbbb', built_at: '2026-10-27T10:00:00Z' };
+const offerWith = (installed) => setup.shouldOfferMove({ bundled: true, inApplications: false, running: RUNNING, installed });
+// One phase's { message, detail } as written in confirmQuit's text table, or null.
+const quitText = (phase) => {
+    const m = new RegExp(`\\n\\s*${phase}: +\\{ message: (['"])(.*?)\\1,\\s*detail: (['"])(.*?)\\3 \\}`).exec(fnBody('confirmQuit'));
+    return m ? { message: m[2], detail: m[4] } : null;
+};
+const noteAt = (o) => setup.locationWarning({ bundled: true, inApplications: false, appPath: '/Users/jd/code/x/Clipwise.app', home: '/Users/jd', ...o });
 const startBody = (() => {
     const a = SRC.indexOf('\nfunction startRecording()');
     const b = SRC.indexOf('\nfunction onCaptureChildExit', a);
@@ -371,6 +381,76 @@ const CASES = [
         const m = whenReadyBody.indexOf('if (await offerMoveToApplications()) return;');
         const t = whenReadyBody.indexOf('tray = new Tray(');
         return m >= 0 && t > m && fnBody('offerMoveToApplications').includes('app.moveToApplicationsFolder()'); }],
+    ['move: an older installed app keeps the offer (a newer .dmg is the update path)', () =>
+        offerWith({ commit: 'aaaaaaa', built_at: '2026-10-13T09:00:00Z' }) === true],
+    ['move: an installed app of the same commit skips the offer', () =>
+        offerWith({ commit: RUNNING.commit, built_at: '2026-10-13T09:00:00Z' }) === false],
+    ['move: a newer installed app skips the offer', () =>
+        offerWith({ commit: 'ccccccc', built_at: '2026-10-28T09:00:00Z' }) === false],
+    ['move: an installed app with no readable build-info, or no usable built_at, keeps the offer', () =>
+        offerWith(null) === true && offerWith({ commit: 'ccccccc', built_at: 'garbled' }) === true],
+    ['move: the installed build-info is read from /Applications/Clipwise.app/Contents/Resources/app/build-info.json, only off the Applications path, and passed with this build\'s', () => {
+        const body = fnBody('offerMoveToApplications');
+        const gate = body.indexOf('if (!bundled || inApplications) return false;');
+        const read = body.indexOf('readInstalledBuildInfo()');
+        return SRC.includes("const INSTALLED_APP = '/Applications/Clipwise.app';")
+            && fnBody('readInstalledBuildInfo').includes("path.join(INSTALLED_APP, 'Contents', 'Resources', 'app', 'build-info.json')")
+            && gate >= 0 && read > gate
+            && body.includes('setup.shouldOfferMove({ bundled, inApplications, running: BUILD_INFO, installed })'); }],
+    ['location: no note in Applications or from a checkout; outside Applications, one naming the path', () => {
+        const out = noteAt({});
+        return noteAt({ inApplications: true }) === null && noteAt({ bundled: false }) === null
+            && out.tray === 'Not the installed app: running from ~/code/x/Clipwise.app'
+            && out.body.startsWith('~/code/x/Clipwise.app\n'); }],
+    ['location: a path outside home, or one that only shares its prefix, is shown whole', () =>
+        noteAt({ appPath: '/Volumes/Clipwise/Clipwise.app' }).tray.endsWith(' /Volumes/Clipwise/Clipwise.app')
+        && noteAt({ appPath: '/Users/jdx/Clipwise.app' }).tray.endsWith(' /Users/jdx/Clipwise.app')],
+    ['location: the launch line names the app\'s path, from process.execPath', () =>
+        SRC.includes("const APP_BUNDLE_PATH = path.resolve(process.execPath, '..', '..', '..');")
+        && /launched from bundle[\s\S]{0,200}`app \$\{APP_BUNDLE_PATH\}`/.test(SRC)],
+    ['location: set at launch after the move offer and before the tray, from app.isInApplicationsFolder(); notified; the tray line sits under Status', () => {
+        const m = whenReadyBody.indexOf('if (await offerMoveToApplications()) return;');
+        const l = whenReadyBody.indexOf('locationNote = setup.locationWarning({');
+        const t = whenReadyBody.indexOf('tray = new Tray(');
+        return m >= 0 && l > m && t > l
+            && /locationNote = setup\.locationWarning\(\{\s*bundled: !!BUILD_INFO, inApplications: app\.isInApplicationsFolder\(\),/.test(whenReadyBody)
+            && whenReadyBody.includes("if (locationNote) notify('not-in-applications', locationNote.title, locationNote.body);")
+            && /\{ label: `Status: \$\{label\}`, enabled: false \},\n    \];\n    if \(locationNote\) items\.push\(\{ label: locationNote\.tray, enabled: false \}\);/.test(fnBody('renderTray')); }],
+    ['quit: the tray\'s Quit… asks first, and only Quit (response 0) reaches quitApp', () => {
+        const body = fnBody('confirmQuit');
+        return SRC.includes("{ label: 'Quit…', click: confirmQuit },") && !SRC.includes('click: quitApp')
+            && body.includes("buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1,")
+            && body.includes('if (response === 0) quitApp();')
+            && SRC.split('quitApp();').length - 1 === 1; }],
+    ['quit: three phases: stopped, starting, and capture for both recording and stalled', () =>
+        fnBody('confirmQuit').includes("const phase = state === 'stopped' ? 'stopped' : state === 'starting' ? 'starting' : 'capture';")],
+    ['quit: stopped says Clipwise won\'t record until opened again, with no detail', () => {
+        const t = quitText('stopped');
+        return !!t && t.message === "Clipwise won't record meetings until you open it again" && t.detail === ''; }],
+    ['quit: starting says it is about to record, and that nothing from the call is processed', () => {
+        const t = quitText('starting');
+        return !!t && t.message === 'Clipwise is about to record this call'
+            && t.detail === "Quitting now stops it before anything is recorded, so nothing from this call is processed. Clipwise won't record meetings until you open it again."; }],
+    ['quit: recording or stalled says it is recording, and that what was recorded is still processed', () => {
+        const t = quitText('capture');
+        return !!t && t.message === 'Clipwise is recording this call'
+            && t.detail === "Quitting stops the recording now. What's been recorded so far is still processed. Clipwise won't record meetings until you open it again."; }],
+    ['quit: control: starting\'s detail has no "still processed"; the same test finds it in capture\'s', () => {
+        const s = quitText('starting'), c = quitText('capture');
+        return !!s && !!c && !s.detail.includes('still processed') && c.detail.includes('still processed'); }],
+    ['quit: the log line adds " (while starting)" or " (during a capture)", and nothing when stopped', () => {
+        const body = fnBody('confirmQuit');
+        return body.includes("const during = { stopped: '', starting: ' (while starting)', capture: ' (during a capture)' }[phase];")
+            && body.includes("console.error(`[clipwise-recorder] quit: ${response === 0 ? 'confirmed' : 'cancelled'}${during}`);"); }],
+    ['quit: a logout or restart is never held up: no before-quit listener (control: the same pattern finds will-quit)', () =>
+        !/app\.on\('before-quit'/.test(SRC) && /app\.on\('will-quit'/.test(SRC)],
+    ['quit: confirmQuit resets quitConfirmOpen in a finally around the dialog, and nowhere else', () => {
+        const body = fnBody('confirmQuit');
+        const t = body.indexOf('try {\n        ({ response } = await dialog.showMessageBox(');
+        const f = body.indexOf('} finally {');
+        return t >= 0 && f > t
+            && /\} finally \{\s*(\/\/[^\n]*\n\s*)?quitConfirmOpen = false;\s*\}/.test(body)
+            && body.split('quitConfirmOpen = false;').length - 1 === 1; }],
     ['lock: requested at load, a second launch quits, and the boot code does nothing without it', () =>
         /\nconst GOT_SINGLE_INSTANCE_LOCK = app\.requestSingleInstanceLock\(\);\nif \(!GOT_SINGLE_INSTANCE_LOCK\) \{[\s\S]{0,200}app\.quit\(\);/.test(SRC)
         && whenReadyBody.includes('if (!GOT_SINGLE_INSTANCE_LOCK) return;')
