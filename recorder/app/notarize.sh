@@ -2,7 +2,8 @@
 # Notarizes, staples and packs Clipwise.app (SAA-198, engineering call 6), after
 # build-app.sh has built and signed it. Produces dist/Clipwise.dmg: a signed,
 # notarized and stapled disk image holding the notarized and stapled app, which
-# is what is sent as a link (Jon's call 3).
+# is what is sent as a link (Jon's call 3). Then, through release-zip.sh, the
+# zip auto-update installs, dist/Clipwise-darwin-arm64-<version>.zip (SAA-253).
 #
 # Needs a notarytool keychain profile, made once on the build machine by the
 # person who holds the Apple credentials (never by this script):
@@ -88,4 +89,11 @@ FFMPEG_SOURCE="$("$APP_SRC/../ffmpeg/build.sh" --source)"
 cp "$FFMPEG_SOURCE" "$OUT_DIR/$(basename "$FFMPEG_SOURCE")"
 shasum -a 256 "$OUT_DIR/$(basename "$FFMPEG_SOURCE")"
 
-printf '\nnotarized %s\n  and %s\n  with %s beside it\n' "$APP" "$DMG" "$(basename "$FFMPEG_SOURCE")"
+# The zip auto-update installs (SAA-253): the stapled app, named for its
+# version. release-zip.sh refuses a build from a dirty tree, so a dirty build
+# still gets its .dmg above but this step, and the script, fail.
+step "release zip"
+RELEASE_ZIP="$("$APP_SRC/release-zip.sh" "$APP" "$OUT_DIR")"
+
+printf '\nnotarized %s\n  and %s\n  with %s beside it\n  release zip %s\n' \
+    "$APP" "$DMG" "$(basename "$FFMPEG_SOURCE")" "$(basename "$RELEASE_ZIP")"
