@@ -321,7 +321,11 @@ JSON
 
 COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
 DIRTY=false
-git -C "$REPO_DIR" diff --quiet HEAD -- || DIRTY=true
+# Dirty is anything git status lists: a modified tracked file or an untracked
+# one, since this script copies named source files into the bundle and an
+# untracked one would ship without being in COMMIT (SAA-253: release-zip.sh
+# refuses a dirty build). Gitignored build inputs are not listed.
+[ -z "$(git -C "$REPO_DIR" status --porcelain)" ] || DIRTY=true
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # This file is two things at once: the flag that tells main.js it is running
