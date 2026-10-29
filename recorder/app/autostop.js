@@ -14,8 +14,9 @@
 // already the person's own per-app "record" decision; there is no second table
 // here.
 //
-// The rule, biased toward staying on because a capture cut short is not
-// recoverable and one that runs long is:
+// The rule, biased toward staying on because an early stop loses a few seconds
+// and splits the call, which costs more than a capture that runs a few seconds
+// long:
 //
 //   - Only the application that started the capture counts. A manually
 //     started capture has no trigger and never auto-stops.
@@ -25,18 +26,24 @@
 //   - The last release opens a GRACE_MS window. A reacquire, a stop of any
 //     kind, a new capture, or micwatch exiting or restarting cancels it.
 //     The first release never stops anything: it opens the window, and the
-//     stop can only come at expiry. GRACE_MS is 5s (Jon, 2026-10-07; it was
-//     120s). Muting and switching mic or headphones do not release the mic
-//     (tested), so the window only has to clear the timing floor, which is
-//     micwatch's poll: POLL_SECONDS = 1.0 (micwatch.swift:41; the daily log
-//     reads "poll 1000ms"). micwatch emits in_start/in_stop only when two
-//     consecutive polls differ, so a release or reacquire is stamped to within
-//     a second, and one shorter than a poll is never seen. 5s is five polls.
+//     stop can only come at expiry. GRACE_MS is 3s (SAA-253 decision 8,
+//     2026-10-28; 5s from 2026-10-07, 120s before that). Muting and switching
+//     mic or headphones do not release the mic (tested). Live captures 10-07
+//     to 10-28 showed a mid-call release and reacquire 9 times in 78
+//     captures, 8 within about 1-2s and one at 4.998s (dc0fd254); 3s clears
+//     all but that one. A stop that does fire early is recoverable: a
+//     reacquire by an app set to record starts a new capture (main.js
+//     handleDetectEvent), so the call splits rather than losing its
+//     remainder, minus a few seconds at the split (SAA-184, 2026-10-28).
+//     The timing floor is micwatch's poll: POLL_SECONDS = 1.0
+//     (micwatch.swift:41; the daily log reads "poll 1000ms"). micwatch emits
+//     in_start/in_stop only when two consecutive polls differ, so a release
+//     or reacquire is stamped to within a second, and one shorter than a poll
+//     is never seen. 3s is three polls.
 //     The fresh micwatch --once read at expiry looks at the mic as it is then,
 //     so a reacquire the stream has not delivered yet is still caught.
-//     To be adjusted from what the logs show.
 //     722508a2 released at 14:16:50 and, under the old 120s window, the
-//     decision fell at 14:18:50; at 5s it would have fallen at 14:16:55.
+//     decision fell at 14:18:50; at 3s it would have fallen at 14:16:53.
 //   - At expiry a fresh holder check (micwatch --once) runs. Only if it shows
 //     the trigger no longer holding the microphone does step() ask for a stop.
 //     A failed check is not a pass.
@@ -49,7 +56,7 @@
 
 'use strict';
 
-const GRACE_MS = 5 * 1000;
+const GRACE_MS = 3 * 1000;
 
 function iso(ms) {
     return typeof ms === 'number' && Number.isFinite(ms) ? new Date(ms).toISOString() : null;
