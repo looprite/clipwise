@@ -207,6 +207,9 @@ cp "$APP_SRC/filevault.js" "$C/Resources/app/filevault.js"
 # main.js requires both by relative path; a bundle without them fails to launch.
 cp "$APP_SRC/start-gate.js" "$C/Resources/app/start-gate.js"
 cp "$APP_SRC/prompt-child.js" "$C/Resources/app/prompt-child.js"
+# When a downloaded update may be applied (SAA-253). main.js requires it by
+# relative path; a bundle without it fails to launch.
+cp "$APP_SRC/update-gate.js" "$C/Resources/app/update-gate.js"
 install -m 755 "$SYSTEMTAP_BIN" "$C/Resources/bin/systemtap"
 install -m 755 "$MICCAP_BIN"    "$C/Resources/bin/miccap"
 install -m 755 "$AUDIODEVS_BIN" "$C/Resources/bin/audiodevs"
@@ -290,7 +293,17 @@ for f in pipeline/capture-cli.js pipeline/capture-recover.js pipeline/classify-c
     [ -f "$PIPELINE_OUT/$f" ] || { echo "build-app: missing $PIPELINE_OUT/$f after tsc" >&2; exit 1; }
 done
 
-VERSION="$(/usr/bin/sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$APP_SRC/package.json" | head -1)"
+# The build number goes up with every build (SAA-198 engineering call 11): the
+# build's UTC time to the minute, YYYYMMDDHHMM. No counter file to keep, and a
+# replaced app is always newer by this number than the one it replaced.
+BUILD_NUMBER="$(date -u +%Y%m%d%H%M)"
+# The version is the source's major.minor with the build number as its patch
+# (SAA-253 decision 2): 0.1.202610291200. app.getVersion() reads it from the
+# trimmed package.json below, and the update feed compares it as SemVer, so
+# every build is newer than the one before. The source package.json keeps
+# x.y.0 and needs no commit per build.
+BASE_VERSION="$(/usr/bin/sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$APP_SRC/package.json" | head -1)"
+VERSION="${BASE_VERSION%.*}.$BUILD_NUMBER"
 ELECTRON_VERSION="$(cat "$APP_SRC/node_modules/electron/dist/version")"
 
 # A trimmed manifest rather than a copy. The source package.json carries the
@@ -322,7 +335,8 @@ cat > "$C/Resources/app/build-info.json" <<JSON
   "built_at": "$BUILT_AT",
   "commit": "$COMMIT",
   "dirty": $DIRTY,
-  "electron_version": "$ELECTRON_VERSION"
+  "electron_version": "$ELECTRON_VERSION",
+  "version": "$VERSION"
 }
 JSON
 
@@ -342,10 +356,8 @@ set_key CFBundleDisplayName     string "$APP_NAME"
 set_key CFBundleExecutable      string "$APP_NAME"
 set_key CFBundleIdentifier      string "$BUNDLE_ID"
 set_key CFBundleShortVersionString string "$VERSION"
-# The build number goes up with every build (SAA-198 engineering call 11): the
-# build's UTC time to the minute, YYYYMMDDHHMM. No counter file to keep, and a
-# replaced app is always newer by this number than the one it replaced.
-set_key CFBundleVersion         string "$(date -u +%Y%m%d%H%M)"
+# The build number (BUILD_NUMBER above), also the version's patch.
+set_key CFBundleVersion         string "$BUILD_NUMBER"
 # Menu bar only, no Dock icon (SAA-198, Jon's call 6). The paired
 # app.dock.hide() in main.js runs after the app is up, so without this key a
 # login launch flashes a Dock icon and steals focus from whatever the user is
@@ -470,5 +482,5 @@ echo "no compiled files written"
 step "codesign -dvvv $APP"
 codesign -dvvv "$APP" 2>&1 | grep -E "^(Identifier|Format|CodeDirectory|CDHash|Signature|Authority|TeamIdentifier|Info\.plist|Sealed Resources|Timestamp)"
 
-printf '\nbuilt %s\n  commit %s%s\n  built_at %s\n' \
-    "$APP" "$COMMIT" "$([ "$DIRTY" = true ] && echo ' (dirty)')" "$BUILT_AT"
+printf '\nbuilt %s\n  version %s\n  commit %s%s\n  built_at %s\n' \
+    "$APP" "$VERSION" "$COMMIT" "$([ "$DIRTY" = true ] && echo ' (dirty)')" "$BUILT_AT"
