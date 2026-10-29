@@ -7,11 +7,13 @@
 // Live mode (2026-10-07): the rule now stops the capture, so a case is judged
 // on the stop effect decide() collects, not on a log field alone.
 //
-// The grace window is 5s (GRACE_MS; it was 120s until 2026-10-07), so every
-// timing below is bracketed against it: a reacquire at 4s must not stop, one at
-// exactly 5s is settled by the fresh check (the mic is held again, no stop), a
-// release with no reacquire stops at release+5s, and a reacquire at 6s is too
-// late. micwatch polls once a second, so nothing here is finer than that.
+// The grace window is 3s (GRACE_MS; 120s until 2026-10-07, 5s until SAA-253),
+// so every timing below is bracketed against it: a reacquire at 2s must not
+// stop, one at exactly 3s is settled by the fresh check (the mic is held again,
+// no stop), a release with no reacquire stops at release+3s, and a reacquire at
+// 4s is too late. micwatch polls once a second, so nothing here is finer than
+// that. The expected times use WINDOW_MS, written out here, not the imported
+// GRACE_MS, so a window of any other length fails them.
 //
 // MUST STOP: the call ends and the grace window expires with nobody holding
 // the mic. Exactly one stop effect, cause 'auto', at last release + GRACE_MS,
@@ -49,6 +51,8 @@ const fs = require('fs');
 const path = require('path');
 const { decide, GRACE_MS, parseHoldersOnce } = require('./autostop.js');
 
+const WINDOW_MS = 3000;
+
 const CHROME = 'com.google.Chrome.helper';
 const FACETIME = 'com.apple.avconferenced';
 const FATHOM = 'com.fathom.video.helper';
@@ -67,42 +71,45 @@ const D0909 = Date.parse('2026-09-09T17:46:00Z');
 const m0909 = (min, sec = 0) => D0909 + (min * 60 + sec) * 1000;
 
 const CASES = [
-    { name: 'call ends (Meet): release, window expires, nobody holds', expect: 'stop', at: m(30) + GRACE_MS,
+    { name: 'call ends (Meet): release, window expires, nobody holds', expect: 'stop', at: m(30) + WINDOW_MS,
       events: [start(CHROME, [1337]), off(CHROME, 1337, m(30)), stop(m(35))] },
-    { name: 'call ends (FaceTime key): same shape, avconferenced', expect: 'stop', at: m(20) + GRACE_MS,
+    { name: 'call ends (FaceTime key): same shape, avconferenced', expect: 'stop', at: m(20) + WINDOW_MS,
       events: [start(FACETIME, [412]), off(FACETIME, 412, m(20)), stop(m(24))] },
-    { name: '722508a2 shape: release 14:16:50, stop 5s later (was 14:18:50 at 120s)', expect: 'stop',
-      at: Date.parse('2026-10-06T14:16:50.792Z') + GRACE_MS,
+    { name: '722508a2 shape: release 14:16:50, stop 3s later (was 14:18:50 at 120s)', expect: 'stop',
+      at: Date.parse('2026-10-06T14:16:50.792Z') + WINDOW_MS,
       events: [start(FACETIME, [804], Date.parse('2026-10-06T13:50:26.895Z')),
                off(FACETIME, 804, Date.parse('2026-10-06T14:16:50.792Z')),
                stop(Date.parse('2026-10-06T17:16:21.635Z'))],
-      detail: b => b.pending_since === '2026-10-06T14:16:50.792Z' && b.stopped_at === '2026-10-06T14:16:55.792Z' },
-    { name: 'two Chrome helpers, both release: window starts at the last', expect: 'stop', at: m(25) + GRACE_MS,
+      detail: b => b.pending_since === '2026-10-06T14:16:50.792Z' && b.stopped_at === '2026-10-06T14:16:53.792Z' },
+    { name: 'two Chrome helpers, both release: window starts at the last', expect: 'stop', at: m(25) + WINDOW_MS,
       events: [start(CHROME, [1337, 1338]), off(CHROME, 1338, m(20)), off(CHROME, 1337, m(25)), stop(m(40))] },
-    { name: 'leave and rejoin within 5s, then end: only the final release stops', expect: 'stop', at: m(30) + GRACE_MS,
-      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1400, m(10, 3)),
+    { name: 'leave and rejoin within 3s, then end: only the final release stops', expect: 'stop', at: m(30) + WINDOW_MS,
+      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1400, m(10, 2)),
                off(CHROME, 1400, m(30)), stop(m(35))] },
     { name: 'auto-stop, then the trigger reacquires: ignored, capture is over (detector territory)',
-      expect: 'stop', at: m(10) + GRACE_MS,
+      expect: 'stop', at: m(10) + WINDOW_MS,
       detail: b => b.events_after_would_stop.in_start === 0 && b.stop_cause === 'auto',
       events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1400, m(15)), stop(m(40))] },
-    { name: 'reacquire at 6s: too late, stopped at 5s (the cut-short detector\'s case)', expect: 'stop', at: m(10) + GRACE_MS,
+    { name: 'reacquire at 4s: too late, stopped at 3s (the cut-short detector\'s case)', expect: 'stop', at: m(10) + WINDOW_MS,
       detail: b => b.events_after_would_stop.in_start === 0,
-      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1337, m(10, 6)), stop(m(40))] },
-    { name: 'manual Stop at the very instant of expiry: one stop, auto first', expect: 'stop', at: m(30) + GRACE_MS,
-      events: [start(CHROME, [1337]), off(CHROME, 1337, m(30)), stop(m(30) + GRACE_MS)] },
+      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1337, m(10, 4)), stop(m(40))] },
+    { name: 'dc0fd254 shape: reacquire 4.998s after release, stopped at 3s', expect: 'stop', at: m(10) + WINDOW_MS,
+      detail: b => b.events_after_would_stop.in_start === 0,
+      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1337, m(10) + 4998), stop(m(40))] },
+    { name: 'manual Stop at the very instant of expiry: one stop, auto first', expect: 'stop', at: m(30) + WINDOW_MS,
+      events: [start(CHROME, [1337]), off(CHROME, 1337, m(30)), stop(m(30) + WINDOW_MS)] },
 
     { name: 'reacquire inside the window (a drop that came back), stopped by hand later', expect: 'none',
       detail: b => { const c = b.cancellations && b.cancellations[0];
-          return !!c && c.opened_at === iso(m(10)) && c.cancelled_at === iso(m(10, 3)) && c.reason === 'reacquire'; },
-      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1400, m(10, 3)), stop(m(40))] },
+          return !!c && c.opened_at === iso(m(10)) && c.cancelled_at === iso(m(10, 2)) && c.reason === 'reacquire'; },
+      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1400, m(10, 2)), stop(m(40))] },
     { name: 'FaceTime key: brief release, reacquired in 2s (not a mute: mute never releases)', expect: 'none',
       events: [start(FACETIME, [412]), off(FACETIME, 412, m(5)), on(FACETIME, 412, m(5, 2)), stop(m(30))] },
-    { name: 'reacquire at 4s, one second before expiry', expect: 'none',
-      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1337, m(10, 4)), stop(m(40))] },
-    { name: 'reacquire at exactly 5s: the fresh check sees the mic held, no stop', expect: 'none',
+    { name: 'reacquire at 2s, one second before expiry', expect: 'none',
+      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1337, m(10, 2)), stop(m(40))] },
+    { name: 'reacquire at exactly 3s: the fresh check sees the mic held, no stop', expect: 'none',
       detail: b => b.would_stop_null_reason === 'cancelled: holder_check_found_trigger',
-      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1337, m(10, 5)), stop(m(40))] },
+      events: [start(CHROME, [1337]), off(CHROME, 1337, m(10)), on(CHROME, 1337, m(10, 3)), stop(m(40))] },
     { name: 'two Chrome helper pids, one releases', expect: 'none',
       events: [start(CHROME, [1337, 1338]), off(CHROME, 1338, m(10)), stop(m(30))] },
     { name: 'micwatch restarts inside the window', expect: 'none',
@@ -117,14 +124,14 @@ const CASES = [
     { name: '09-09 17:46 (a): mic held, 14 min of silence, no events', expect: 'none',
       detail: b => b.would_stop_null_reason === 'trigger_still_holding',
       events: [start(CHROME, [1337], D0909), stop(m0909(14))] },
-    { name: '09-09 17:46 (b): brief release at 4 min, reacquired inside 5s', expect: 'none',
+    { name: '09-09 17:46 (b): brief release at 4 min, reacquired inside 3s', expect: 'none',
       detail: b => b.cancellations.length === 1 && b.cancellations[0].reason === 'reacquire',
-      events: [start(CHROME, [1337], D0909), off(CHROME, 1337, m0909(4)), on(CHROME, 1337, m0909(4, 3)),
+      events: [start(CHROME, [1337], D0909), off(CHROME, 1337, m0909(4)), on(CHROME, 1337, m0909(4, 2)),
                stop(m0909(14))] },
     { name: 'stopped by hand inside the window: cause manual, no auto stop', expect: 'none',
       detail: b => b.stop_cause === 'manual' && !!b.window_open_at_stop,
-      events: [start(CHROME, [1337]), off(CHROME, 1337, m(29)), stop(m(29, 3))] },
-    { name: 'Meet: release, manual stop 2s later (09-28 shape was 4.5s: now inside the window)', expect: 'none',
+      events: [start(CHROME, [1337]), off(CHROME, 1337, m(29)), stop(m(29, 2))] },
+    { name: 'Meet: release, manual stop 2s later (09-28 shape was 4.5s: now after the window, would auto-stop)', expect: 'none',
       detail: b => !!b.window_open_at_stop && b.window_open_at_stop.opened_at === iso(m(30))
           && b.window_open_at_stop.stopped_after_ms === 2000 && b.stop_cause === 'manual',
       events: [start(CHROME, [1337]), off(CHROME, 1337, m(30)), stop(m(30, 2))] },
@@ -160,6 +167,11 @@ const rel = (isoStr, t0) => {
 
 console.log(`rule: ${useNaive ? 'NAIVE (first release, no window, no pid set, no holder check)' : `autostop.js, live, grace ${GRACE_MS / 1000}s`}`);
 let fails = 0;
+if (!useNaive) {
+    const ok = GRACE_MS === WINDOW_MS;
+    if (!ok) fails++;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  GRACE_MS is ${WINDOW_MS}ms  (got ${GRACE_MS}ms)`);
+}
 for (const c of CASES) {
     const r = useNaive ? naive(c.events) : decide(c.events, c.holdersAt ? { holdersAt: c.holdersAt } : {});
     const b = r.block;
@@ -179,7 +191,8 @@ for (const c of CASES) {
     const got = b.would_stop_at ? `auto stop ${rel(b.would_stop_at, t0)} x${r.stopEffects.length}` : `no stop (${b.would_stop_null_reason})`;
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${exp.padEnd(19)}  ${got.padEnd(44)}  ${c.name}`);
 }
-console.log(`\nrule cases: ${CASES.length - fails}/${CASES.length} as expected`);
+const ruleTotal = CASES.length + (useNaive ? 0 : 1);
+console.log(`\nrule cases: ${ruleTotal - fails}/${ruleTotal} as expected`);
 
 // --- parseHoldersOnce: the reader of `micwatch --once` ---------------------
 // detectKey is read out of main.js and evaluated, so these cases exercise the
@@ -227,6 +240,6 @@ for (const c of PARSE) {
 }
 console.log(`parse cases: ${PARSE.length - parseFails}/${PARSE.length} as expected${detectKey ? '' : '  (detectKey NOT found in main.js)'}`);
 
-const total = CASES.length + PARSE.length;
+const total = ruleTotal + PARSE.length;
 console.log(`\n${total - fails - parseFails}/${total} as expected`);
 process.exit(fails || parseFails ? 1 : 0);
