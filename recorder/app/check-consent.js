@@ -532,8 +532,11 @@ const CASES = [
         && HTML.includes("primary.style.display = v.screen === 'permissions' ? 'none' : '';")],
     ['Dock: no icon — LSUIElement true in build-app.sh and app.dock.hide() at boot', () =>
         /set_key LSUIElement\s+bool\s+true/.test(BUILD) && whenReadyBody.includes('if (app.dock) app.dock.hide();')],
-    ['build number: CFBundleVersion is the build\'s UTC time, not the version string', () =>
-        /set_key CFBundleVersion\s+string "\$\(date -u \+%Y%m%d%H%M\)"/.test(BUILD) && !/set_key CFBundleVersion\s+string "\$VERSION"/.test(BUILD)],
+    ['build number: CFBundleVersion is the build\'s UTC time, not the version string; the version\'s patch is that same number (SAA-253)', () =>
+        BUILD.includes('BUILD_NUMBER="$(date -u +%Y%m%d%H%M)"')
+        && /set_key CFBundleVersion\s+string "\$BUILD_NUMBER"/.test(BUILD) && !/set_key CFBundleVersion\s+string "\$VERSION"/.test(BUILD)
+        && BUILD.includes('VERSION="${BASE_VERSION%.*}.$BUILD_NUMBER"')
+        && BUILD.split('date -u +%Y%m%d%H%M').length - 1 === 1],
     ['Info.plist: Electron\'s camera and both Bluetooth texts are deleted', () =>
         ['NSCameraUsageDescription', 'NSBluetoothPeripheralUsageDescription', 'NSBluetoothAlwaysUsageDescription'].every(k => BUILD.includes(k))
         && /\$PB -c "Delete :\$key" "\$PLIST"/.test(BUILD)],
