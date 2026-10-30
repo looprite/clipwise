@@ -205,16 +205,39 @@ function installedIsSameOrNewer(running, installed) {
     return Number.isFinite(a) && Number.isFinite(b) && a > b;
 }
 
+// Why a built app can't update itself where it runs, or null when it can
+// (SAA-253 decision 6). Squirrel replaces the bundle in place, so it needs the
+// installed copy in Applications and a folder this account can write to. A
+// translocated app runs from a read-only copy, whatever Applications says. A run
+// from a checkout is development and is not asked.
+function updateBlocker({ bundled, inApplications, appPath, parentWritable }) {
+    if (!bundled) return null;
+    if (appPath.includes('/AppTranslocation/')) return 'translocated';
+    if (!inApplications) return 'outside-applications';
+    if (!parentWritable) return 'not-writable';
+    return null;
+}
+
 // What a built app running from outside Applications says about it: a tray line
-// and a notification, both naming the path (~ for the home folder). Null in
-// Applications, and for a run from a checkout.
-function locationWarning({ bundled, inApplications, appPath, home }) {
-    if (!bundled || inApplications) return null;
+// and a notification, both naming the path (~ for the home folder), and that it
+// can't update itself there. In Applications but in a folder this account can't
+// write to, a warning that it stays on this build. Null otherwise, and for a run
+// from a checkout.
+function locationWarning({ bundled, inApplications, appPath, home, parentWritable = true }) {
+    const blocker = updateBlocker({ bundled, inApplications, appPath, parentWritable });
+    if (!blocker) return null;
     const shown = home && appPath.startsWith(home + '/') ? '~' + appPath.slice(home.length) : appPath;
+    if (blocker === 'not-writable') {
+        return {
+            tray: `Can't update itself: this account can't replace ${shown}`,
+            title: "Clipwise can't update itself",
+            body: `${shown}\nIt keeps recording, but this account can't replace it, so it stays on this build.`,
+        };
+    }
     return {
         tray: `Not the installed app: running from ${shown}`,
         title: 'Clipwise is running from outside Applications',
-        body: `${shown}\nIt keeps recording, but it may be an old build.`,
+        body: `${shown}\nIt keeps recording, but it may be an old build, and it can't update itself here.`,
     };
 }
 
@@ -225,5 +248,5 @@ module.exports = {
     normalizeTeamAddress, isClipwiseDiscovery, claudeAddress,
     trayAccountItems, formatElapsed,
     loginItemPath, loginDefaultApplied, recordLoginDefaultApplied, shouldApplyLoginDefault,
-    shouldOfferMove, locationWarning,
+    shouldOfferMove, updateBlocker, locationWarning,
 };
