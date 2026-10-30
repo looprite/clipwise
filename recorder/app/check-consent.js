@@ -418,12 +418,43 @@ const CASES = [
             && /locationNote = setup\.locationWarning\(\{\s*bundled: !!BUILD_INFO, inApplications: app\.isInApplicationsFolder\(\),/.test(whenReadyBody)
             && whenReadyBody.includes("if (locationNote) notify('not-in-applications', locationNote.title, locationNote.body);")
             && /\{ label: `Status: \$\{label\}`, enabled: false \},\n    \];\n    if \(locationNote\) items\.push\(\{ label: locationNote\.tray, enabled: false \}\);/.test(fnBody('renderTray')); }],
-    ['quit: the tray\'s Quit… asks first, and only Quit (response 0) reaches quitApp', () => {
+    ['location: can it update itself here: in Applications and writable yes; translocated, outside Applications or not writable no; a checkout is not asked (SAA-253 decision 6)', () =>
+        setup.updateBlocker({ bundled: true, inApplications: true, appPath: '/Applications/Clipwise.app', parentWritable: true }) === null
+        && setup.updateBlocker({ bundled: true, inApplications: true, appPath: '/private/var/folders/x/T/AppTranslocation/ABC/d/Clipwise.app', parentWritable: true }) === 'translocated'
+        && setup.updateBlocker({ bundled: true, inApplications: false, appPath: '/Users/jd/Downloads/Clipwise.app', parentWritable: true }) === 'outside-applications'
+        && setup.updateBlocker({ bundled: true, inApplications: true, appPath: '/Applications/Clipwise.app', parentWritable: false }) === 'not-writable'
+        && setup.updateBlocker({ bundled: false, inApplications: false, appPath: '/x/Electron.app', parentWritable: false }) === null],
+    ['location: outside Applications or translocated, the notification says it can\'t update itself there; the tray line is unchanged', () => {
+        const out = noteAt({});
+        const tl = noteAt({ inApplications: true, appPath: '/private/var/folders/x/T/AppTranslocation/ABC/d/Clipwise.app' });
+        return out.body === "~/code/x/Clipwise.app\nIt keeps recording, but it may be an old build, and it can't update itself here."
+            && out.tray === 'Not the installed app: running from ~/code/x/Clipwise.app'
+            && !!tl && tl.body.endsWith("it can't update itself here."); }],
+    ['location: in Applications but not writable by this account, a warning that it can\'t update; writable, none (the control)', () => {
+        const nw = noteAt({ inApplications: true, appPath: '/Applications/Clipwise.app', parentWritable: false });
+        return !!nw && nw.tray === "Can't update itself: this account can't replace /Applications/Clipwise.app"
+            && nw.title === "Clipwise can't update itself"
+            && nw.body === "/Applications/Clipwise.app\nIt keeps recording, but this account can't replace it, so it stays on this build."
+            && noteAt({ inApplications: true, appPath: '/Applications/Clipwise.app', parentWritable: true }) === null; }],
+    ['location: launch reads whether the app\'s folder is writable once, and passes the same answer to the warning and to the updater', () =>
+        whenReadyBody.includes('const parentWritable = folderWritable(path.dirname(APP_BUNDLE_PATH));')
+        && /locationNote = setup\.locationWarning\(\{[\s\S]{0,200}parentWritable,\s*\}\);/.test(whenReadyBody)
+        && whenReadyBody.includes('startUpdates(parentWritable);')],
+    ['quit: the tray\'s Quit… asks first, and only Quit or Restart (response 0) reaches quitApp', () => {
         const body = fnBody('confirmQuit');
         return SRC.includes("{ label: 'Quit…', click: confirmQuit },") && !SRC.includes('click: quitApp')
-            && body.includes("buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1,")
-            && body.includes('if (response === 0) quitApp();')
-            && SRC.split('quitApp();').length - 1 === 1; }],
+            && body.includes("buttons: [install ? 'Restart' : 'Quit', 'Cancel'], defaultId: 1, cancelId: 1,")
+            && body.includes('if (response === 0) quitApp({ install });'); }],
+    ['quit: quitApp is called from confirmQuit (asked) and applyUpdateNow (the idle gate passed), and nowhere else (SAA-253)', () =>
+        SRC.split(/\bquitApp\(/).length - 1 === 3
+        && SRC.includes('\nfunction quitApp(opts = {}) {')
+        && fnBody('confirmQuit').includes('quitApp({ install });')
+        && fnBody('applyUpdateNow').includes('quitApp({ install: true });')],
+    ['quit: asked to update, the question says Restart, and that Clipwise opens again once it has updated', () => {
+        const body = fnBody('confirmQuit');
+        return body.includes('const install = !!opts.install && !!updateReady;')
+            && body.includes("starting: { message: 'Clipwise is about to record this call',\n                    detail: 'Restarting now stops it before anything is recorded, so nothing from this call is processed. Clipwise opens again once it has updated.' },")
+            && body.includes("capture:  { message: 'Clipwise is recording this call',\n                    detail: \"Restarting stops the recording now. What's been recorded so far is still processed. Clipwise opens again once it has updated.\" },"); }],
     ['quit: three phases: stopped, starting, and capture for both recording and stalled', () =>
         fnBody('confirmQuit').includes("const phase = state === 'stopped' ? 'stopped' : state === 'starting' ? 'starting' : 'capture';")],
     ['quit: stopped says Clipwise won\'t record until opened again, with no detail', () => {
@@ -443,7 +474,7 @@ const CASES = [
     ['quit: the log line adds " (while starting)" or " (during a capture)", and nothing when stopped', () => {
         const body = fnBody('confirmQuit');
         return body.includes("const during = { stopped: '', starting: ' (while starting)', capture: ' (during a capture)' }[phase];")
-            && body.includes("console.error(`[clipwise-recorder] quit: ${response === 0 ? 'confirmed' : 'cancelled'}${during}`);"); }],
+            && body.includes("console.error(`[clipwise-recorder] quit: ${response === 0 ? 'confirmed' : 'cancelled'}${during}${install ? ' to update' : ''}`);"); }],
     ['quit: a logout or restart is never held up: no before-quit listener (control: the same pattern finds will-quit)', () =>
         !/app\.on\('before-quit'/.test(SRC) && /app\.on\('will-quit'/.test(SRC)],
     ['quit: confirmQuit resets quitConfirmOpen in a finally around the dialog, and nowhere else', () => {
@@ -605,6 +636,78 @@ const CASES = [
         README.includes('## Installing the app\n\nClipwise needs an Apple silicon Mac with macOS 14.2 or later. It doesn\'t open on an Intel Mac.')
         && README.includes('`brew install ffmpeg`, for running from a checkout only.')
         && !README.includes('`brew install ffmpeg`. Not optional')],
+
+    // 9. Auto-update (SAA-253): main.js's wiring around update-gate.js, which
+    //    check-update-gate.js covers on its own.
+    ['update: the feed is update.electronjs.org, looprite/clipwise, darwin-arm64, at this build\'s version', () =>
+        SRC.includes("const UPDATE_FEED_BASE = 'https://update.electronjs.org/looprite/clipwise/darwin-arm64';")
+        && fnBody('startUpdates').includes('const url = `${UPDATE_FEED_BASE}/${app.getVersion()}`;')
+        && fnBody('startUpdates').includes('autoUpdater.setFeedURL({ url });')],
+    ['update: no feed from a checkout or from anywhere it can\'t update itself, and the log says why', () => {
+        const body = fnBody('startUpdates');
+        const g = body.indexOf('const blocker = setup.updateBlocker({');
+        const s = body.indexOf('autoUpdater.setFeedURL(');
+        return g >= 0 && s > g
+            && body.includes("if (!BUILD_INFO) { updateLog('not checked — not a built app'); return; }")
+            && body.includes('if (blocker) { updateLog(`not checked — ${blocker}: ${APP_BUNDLE_PATH}`); return; }'); }],
+    ['update: started last at launch, after the detector', () => {
+        const d = whenReadyBody.indexOf('startDetector();');
+        const u = whenReadyBody.indexOf('startUpdates(parentWritable);');
+        return d >= 0 && u > d; }],
+    ['update: every updater event goes to the day log as "update: …"', () => {
+        const body = fnBody('startUpdates');
+        return SRC.includes('function updateLog(msg) { console.error(`[clipwise-recorder] update: ${msg}`); }')
+            && ['checking-for-update', 'update-available', 'update-not-available', 'update-downloaded', 'error', 'before-quit-for-update']
+                .every((ev) => new RegExp(`autoUpdater\\.on\\('${ev}', [^\\n]*updateLog\\(`).test(body)); }],
+    ['update: a check runs only while idle; one that comes due while busy is logged once and waits', () => {
+        const body = fnBody('requestUpdateCheck');
+        const g = body.indexOf('const g = updateIdle();');
+        const c = body.indexOf('autoUpdater.checkForUpdates();');
+        return g >= 0 && c > g
+            && body.includes('if (!g.idle) {')
+            && body.includes('updateCheckDue = true;')
+            && body.includes('if (!updateCheckDue) updateLog(`check deferred (${reason}) — ${g.reason}`);'); }],
+    ['update: idle is update-gate.js given every visible window, this run\'s pipeline, recovery, each pipeline record, ps, and the upload drain', () => {
+        const body = fnBody('updateIdle');
+        return SRC.includes("const updateGate = require('./update-gate.js');")
+            && body.includes('updateGate.idleState({')
+            && body.includes('anyWindowOpen: BrowserWindow.getAllWindows().some((w) => !w.isDestroyed() && w.isVisible()),')
+            && body.includes("pipelineRunning: !!(pipeline && pipeline.state === 'running'),")
+            && body.includes('recoveryRunning: !!recoveryProc,')
+            && body.includes("execFileSync('ps', ['-A', '-ww', '-o', 'pid=,args='], { encoding: 'utf8' })")
+            && body.includes('entries: [CAPTURE_PIPELINE_ENTRY, CAPTURE_RECOVER_ENTRY],')
+            && body.includes('uploadDraining: !!uploadDraining,')
+            && !body.includes('listUploadQueue'); }],
+    ['update: applied only after the idle gate, in the same tick, through quitApp', () => {
+        const body = fnBody('maybeApplyUpdate');
+        const g = body.indexOf('const g = updateIdle();');
+        const a = body.indexOf('applyUpdateNow();');
+        return g >= 0 && a > g && !/await|setTimeout|setImmediate|\.then\(/.test(body); }],
+    ['update: applyUpdateNow has one caller, maybeApplyUpdate, after the gate', () =>
+        SRC.split(/\bapplyUpdateNow\(/).length - 1 === 2
+        && SRC.includes('\nfunction applyUpdateNow() {')
+        && fnBody('maybeApplyUpdate').includes('applyUpdateNow();')],
+    ['update: a deferral is logged when its reason changes, and every time the tray asked', () =>
+        fnBody('maybeApplyUpdate').includes("if (g.reason !== updateDeferredReason || trigger === 'tray') updateLog(`apply deferred (${trigger}) — ${g.reason}`);")],
+    ['update: tried when the download lands, after every upload drain (which follows each pipeline and recovery exit), and on the minute tick', () =>
+        /autoUpdater\.on\('update-downloaded',[\s\S]{0,400}maybeApplyUpdate\('update-downloaded'\)/.test(fnBody('startUpdates'))
+        && /\.finally\(\(\) => \{\s*uploadDraining = null;[\s\S]{0,200}maybeApplyUpdate\('upload queue drained'\);/.test(fnBody('drainUploadQueue'))
+        && fnBody('updateTick').includes("if (updateReady) { maybeApplyUpdate('minute tick'); return; }")],
+    ['update: the install is in teardown\'s callback, after the pipeline is handed off; any other quit still exits', () => {
+        const body = fnBody('quitApp');
+        const p = body.indexOf('startPipeline(stem);');
+        const i = body.indexOf('autoUpdater.quitAndInstall();');
+        return p >= 0 && i > p
+            && body.includes('if (opts.install && updateReady) {')
+            && body.includes('app.exit(0);'); }],
+    ['update: once downloaded the tray offers Restart to update; during a capture that asks first, otherwise it goes through the idle gate like any other try', () => {
+        const body = fnBody('restartToUpdate');
+        return fnBody('renderTray').includes('if (updateReady) items.push({ label: `Restart to update to ${updateReady}`, click: restartToUpdate });')
+            && /if \(state !== 'stopped' \|\| session\) \{ confirmQuit\(\{ install: true \}\); return; \}/.test(body)
+            && body.includes("maybeApplyUpdate('tray');")
+            && !body.includes('applyUpdateNow('); }],
+    ['update: build-app.sh copies update-gate.js into the bundle', () =>
+        BUILD.includes('cp "$APP_SRC/update-gate.js" "$C/Resources/app/update-gate.js"')],
 ];
 
 console.log(`rule: ${useNaive ? 'NAIVE (any existing file counts as agreed to)' : 'consent.js'}`);
