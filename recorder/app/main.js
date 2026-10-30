@@ -9,7 +9,7 @@
 // is a human. The recorder is the trigger; the manifest it wrote at capture
 // start is the record the pipeline keys on.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage, systemPreferences, powerMonitor } = require('electron');
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage, systemPreferences, powerMonitor, autoUpdater } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID, randomBytes, createHash } = require('crypto');
 const zlib = require('zlib');
@@ -49,6 +49,9 @@ const { loadAppScope, scopeForKey } = require('./app-scope.js');
 // The auto-stop decision (SAA-184). Pure: it returns what should happen, and
 // autostopFeed carries out the one effect that stops a capture.
 const autostop = require('./autostop.js');
+// Whether a downloaded update may be applied now (SAA-253). Pure, like
+// autostop.js; updateIdle below gathers its inputs.
+const updateGate = require('./update-gate.js');
 // The "Still recording?" reminder: the decision only. This file reads the tap,
 // shows the notification and carries out the one effect, a stop.
 const silenceReminder = require('./silence-reminder.js');
@@ -1587,7 +1590,8 @@ function syncTrayClock() {
 }
 
 // Set once at launch (whenReady) from setup.locationWarning: the tray's line for
-// a built app running from outside Applications, null otherwise.
+// a built app running from outside Applications, or from a copy this account
+// can't replace, null otherwise.
 let locationNote = null;
 
 function renderTray() {
@@ -1605,6 +1609,7 @@ function renderTray() {
         { label: `Status: ${label}`, enabled: false },
     ];
     if (locationNote) items.push({ label: locationNote.tray, enabled: false });
+    if (updateReady) items.push({ label: `Restart to update to ${updateReady}`, click: restartToUpdate });
     if (pipelineNote) items.push({ label: pipelineNote, enabled: false });
     if (permNote) items.push({ label: permNote, enabled: false });
     // The three most recent uploads, while a server is set.
@@ -3371,6 +3376,8 @@ function drainUploadQueue(reason) {
             scheduleUploadTimer();
             scheduleJobPoll(0);
             renderTray();
+            // Each pipeline and recovery exit ends here (SAA-253).
+            maybeApplyUpdate('upload queue drained');
         });
     return uploadDraining;
 }
@@ -5115,25 +5122,39 @@ function installAppMenu() {
 // through here; a logout or restart still quits through Electron's own quit
 // events and never comes through here, though macOS refuses that quit while
 // this dialog is open (errn -128, live check 2026-10-28).
+//
+// The tray's Restart to update comes through here too while a capture is on
+// (restartToUpdate, SAA-253), with opts.install: the same question, worded as a
+// restart, and a yes installs the downloaded update as the app quits. A menu
+// click passes its menu item as opts, which has no install.
 let quitConfirmOpen = false;
-async function confirmQuit() {
+async function confirmQuit(opts = {}) {
     if (quitConfirmOpen) return;
     quitConfirmOpen = true;
+    const install = !!opts.install && !!updateReady;
     // starting: the capture children are up but no track has written yet, so a
     // quit now hands nothing to the pipeline (quitApp passes it no stem).
     const phase = state === 'stopped' ? 'stopped' : state === 'starting' ? 'starting' : 'capture';
-    const text = {
+    const quitTexts = {
         stopped:  { message: "Clipwise won't record meetings until you open it again", detail: '' },
         starting: { message: 'Clipwise is about to record this call',
                     detail: "Quitting now stops it before anything is recorded, so nothing from this call is processed. Clipwise won't record meetings until you open it again." },
         capture:  { message: 'Clipwise is recording this call',
                     detail: "Quitting stops the recording now. What's been recorded so far is still processed. Clipwise won't record meetings until you open it again." },
-    }[phase];
+    };
+    const restartTexts = {
+        stopped:  { message: 'Clipwise restarts to update', detail: 'Clipwise opens again once it has updated.' },
+        starting: { message: 'Clipwise is about to record this call',
+                    detail: 'Restarting now stops it before anything is recorded, so nothing from this call is processed. Clipwise opens again once it has updated.' },
+        capture:  { message: 'Clipwise is recording this call',
+                    detail: "Restarting stops the recording now. What's been recorded so far is still processed. Clipwise opens again once it has updated." },
+    };
+    const text = (install ? restartTexts : quitTexts)[phase];
     try { app.focus({ steal: true }); } catch {}
     let response;
     try {
         ({ response } = await dialog.showMessageBox({
-            type: 'warning', buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1,
+            type: 'warning', buttons: [install ? 'Restart' : 'Quit', 'Cancel'], defaultId: 1, cancelId: 1,
             message: text.message, detail: text.detail,
         }));
     } finally {
@@ -5141,11 +5162,15 @@ async function confirmQuit() {
         quitConfirmOpen = false;
     }
     const during = { stopped: '', starting: ' (while starting)', capture: ' (during a capture)' }[phase];
-    console.error(`[clipwise-recorder] quit: ${response === 0 ? 'confirmed' : 'cancelled'}${during}`);
-    if (response === 0) quitApp();
+    console.error(`[clipwise-recorder] quit: ${response === 0 ? 'confirmed' : 'cancelled'}${during}${install ? ' to update' : ''}`);
+    if (response === 0) quitApp({ install });
 }
 
-function quitApp() {
+// opts.install (SAA-253): install the downloaded update as the app quits, and
+// relaunch on it. Only from a Restart answered yes, or from applyUpdateNow once
+// the idle gate has passed. Any other quit exits; Squirrel still installs a
+// downloaded update on that exit, without relaunching.
+function quitApp(opts = {}) {
     // A capture that already happened should still become moments, so quitting
     // mid-recording hands off rather than discards. The child is detached, so
     // it outlives this process.
@@ -5162,6 +5187,19 @@ function quitApp() {
     if (state !== 'stopped') setState('stopped');
     teardown(() => {
         startPipeline(stem);
+        // After the handoff, so a capture stopped by Restart is still handed
+        // on. The pipeline is detached and runs from this bundle, which the
+        // install replaces under it; whether it or the relaunch's recovery
+        // finishes the capture is what the Restart-mid-capture run reads.
+        if (opts.install && updateReady) {
+            updateLog(`installing ${updateReady} and relaunching`);
+            try {
+                autoUpdater.quitAndInstall();
+                return;
+            } catch (err) {
+                updateLog(`install failed — ${err.message}; quitting instead`);
+            }
+        }
         app.exit(0);
     });
 }
@@ -5223,6 +5261,163 @@ function sweepStrayChildren() {
     }
 }
 
+// --- auto-update (SAA-253) ------------------------------------------------
+//
+// Squirrel.Mac, through Electron's autoUpdater, against update.electronjs.org,
+// which serves the newest GitHub Release of looprite/clipwise whose zip is
+// newer than this build's version. Only a built app in Applications that this
+// account can replace asks (setup.updateBlocker); anything else logs why not.
+//
+// Checks run only while idle (update-gate.js), every 4 hours, and a check
+// that comes due while busy waits for the minute tick to find it idle. Once a
+// download has landed it is applied at the first idle moment: when the
+// download lands, after each upload drain, and on the minute tick. The tray
+// then offers Restart to update; during a capture that asks first, and
+// otherwise it is one more try through the same gate.
+const UPDATE_FEED_BASE = 'https://update.electronjs.org/looprite/clipwise/darwin-arm64';
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+const UPDATE_TICK_MS = 60 * 1000;
+
+// The downloaded release's name, once Squirrel has it staged; null before.
+let updateReady = null;
+let updateChecking = false;
+let updateCheckDue = false;
+let updateLastCheckAt = 0;
+// The last deferral logged, so a busy minute tick logs a reason once.
+let updateDeferredReason = null;
+
+function updateLog(msg) { console.error(`[clipwise-recorder] update: ${msg}`); }
+
+function folderWritable(dir) {
+    try {
+        fs.accessSync(dir, fs.constants.W_OK);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// EPERM is a process that exists under another user: alive.
+function isAlive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        return err.code === 'EPERM';
+    }
+}
+
+// Every pipeline record in OUTDIR, doc null when it can't be read or parsed.
+function readPipelineRecords() {
+    let names;
+    try { names = fs.readdirSync(OUTDIR); } catch { return []; }
+    const out = [];
+    for (const name of names) {
+        const m = name.match(/^pipeline-(.+)\.json$/);
+        if (!m) continue;
+        let doc = null;
+        try { doc = JSON.parse(fs.readFileSync(path.join(OUTDIR, name), 'utf8')); } catch {}
+        out.push({ stem: m[1], doc });
+    }
+    return out;
+}
+
+// Gathered and decided in one synchronous tick, so nothing can start between
+// the answer and what is done with it. A ps that fails passes null: busy.
+function updateIdle() {
+    let psOut = null;
+    try { psOut = execFileSync('ps', ['-A', '-ww', '-o', 'pid=,args='], { encoding: 'utf8' }); } catch {}
+    return updateGate.idleState({
+        state, session, teardownInFlight,
+        anyWindowOpen: BrowserWindow.getAllWindows().some((w) => !w.isDestroyed() && w.isVisible()),
+        pipelineRunning: !!(pipeline && pipeline.state === 'running'),
+        recoveryRunning: !!recoveryProc,
+        pipelineRecords: readPipelineRecords(),
+        isAlive,
+        psOut,
+        entries: [CAPTURE_PIPELINE_ENTRY, CAPTURE_RECOVER_ENTRY],
+        uploadDraining: !!uploadDraining,
+    });
+}
+
+function requestUpdateCheck(reason) {
+    if (updateReady || updateChecking) return;
+    const g = updateIdle();
+    if (!g.idle) {
+        if (!updateCheckDue) updateLog(`check deferred (${reason}) — ${g.reason}`);
+        updateCheckDue = true;
+        return;
+    }
+    updateCheckDue = false;
+    updateChecking = true;
+    updateLastCheckAt = Date.now();
+    try {
+        autoUpdater.checkForUpdates();
+    } catch (err) {
+        updateChecking = false;
+        updateLog(`check failed — ${err.message}`);
+    }
+}
+
+function maybeApplyUpdate(trigger) {
+    if (!updateReady || isQuitting) return;
+    const g = updateIdle();
+    if (!g.idle) {
+        if (g.reason !== updateDeferredReason || trigger === 'tray') updateLog(`apply deferred (${trigger}) — ${g.reason}`);
+        updateDeferredReason = g.reason;
+        return;
+    }
+    updateLog(`idle (${trigger}), applying ${updateReady}`);
+    applyUpdateNow();
+}
+
+// The one place an update is applied, and only maybeApplyUpdate calls it.
+function applyUpdateNow() {
+    quitApp({ install: true });
+}
+
+function updateTick() {
+    if (updateReady) { maybeApplyUpdate('minute tick'); return; }
+    if (updateCheckDue) requestUpdateCheck('due');
+    else if (Date.now() - updateLastCheckAt >= UPDATE_CHECK_INTERVAL_MS) requestUpdateCheck('every 4 hours');
+}
+
+// The tray's Restart to update. During a capture it asks, as Quit… does;
+// otherwise it waits for idle like any other try, and the log says what for.
+function restartToUpdate() {
+    if (state !== 'stopped' || session) { confirmQuit({ install: true }); return; }
+    maybeApplyUpdate('tray');
+}
+
+function startUpdates(parentWritable) {
+    if (!BUILD_INFO) { updateLog('not checked — not a built app'); return; }
+    const blocker = setup.updateBlocker({
+        bundled: true, inApplications: app.isInApplicationsFolder(),
+        appPath: APP_BUNDLE_PATH, parentWritable,
+    });
+    if (blocker) { updateLog(`not checked — ${blocker}: ${APP_BUNDLE_PATH}`); return; }
+    const url = `${UPDATE_FEED_BASE}/${app.getVersion()}`;
+    autoUpdater.on('checking-for-update', () => updateLog(`checking ${url}`));
+    autoUpdater.on('update-available', () => updateLog('newer version found, downloading'));
+    autoUpdater.on('update-not-available', () => { updateChecking = false; updateLog(`up to date at ${app.getVersion()}`); });
+    autoUpdater.on('update-downloaded', (_event, _notes, releaseName) => { updateLog(`downloaded ${releaseName}`);
+        updateChecking = false;
+        updateReady = releaseName || 'a new version';
+        renderTray();
+        maybeApplyUpdate('update-downloaded');
+    });
+    autoUpdater.on('error', (err) => { updateChecking = false; updateLog(`error — ${err.message}`); });
+    autoUpdater.on('before-quit-for-update', () => updateLog('quitting to install'));
+    try {
+        autoUpdater.setFeedURL({ url });
+    } catch (err) {
+        updateLog(`not checked — feed refused: ${err.message}`);
+        return;
+    }
+    requestUpdateCheck('launch');
+    setInterval(updateTick, UPDATE_TICK_MS);
+}
+
 // --- app boot -------------------------------------------------------------
 
 // The standard macOS About window, opened by the tray's "About Clipwise"
@@ -5279,9 +5474,12 @@ app.whenReady().then(async () => {
     if (await offerMoveToApplications()) return;
     // Outside Applications, a copy still records (a stale build beats none) and
     // says where it runs from: a line in the tray, and once in a notification.
+    // So does one in Applications that this account can't replace, since it
+    // can't update itself (SAA-253). Read once; the updater gets the same answer.
+    const parentWritable = folderWritable(path.dirname(APP_BUNDLE_PATH));
     locationNote = setup.locationWarning({
         bundled: !!BUILD_INFO, inApplications: app.isInApplicationsFolder(),
-        appPath: APP_BUNDLE_PATH, home: os.homedir(),
+        appPath: APP_BUNDLE_PATH, home: os.homedir(), parentWritable,
     });
     if (locationNote) notify('not-in-applications', locationNote.title, locationNote.body);
     tray = new Tray(iconFor('stopped'));
@@ -5341,6 +5539,9 @@ app.whenReady().then(async () => {
     // to cost someone their menu bar icon. A missing or crashing micwatch
     // disables detection and changes nothing else.
     startDetector();
+    // Last of all: its idle gate reads the capture state, the pipeline,
+    // recovery and the upload drain, all set up above (SAA-253).
+    startUpdates(parentWritable);
 });
 
 // A second launch was turned away by the lock: an unfinished setup is the one
