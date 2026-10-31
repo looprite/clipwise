@@ -200,9 +200,13 @@ cp "$APP_SRC/log-lines.js" "$C/Resources/app/log-lines.js"
 # Day logs kept for 30 days (SAA-243 item 7). main.js requires it by relative
 # path; a bundle without it fails to launch.
 cp "$APP_SRC/day-logs.js" "$C/Resources/app/day-logs.js"
-# The capture body (SAA-260 step 3). main.js requires it by relative path; a
-# bundle without it fails to launch.
+# The capture body, and the voice prints kept on this Mac (SAA-260 step 3).
+# main.js requires the three modules by relative path and loads the opt-in
+# screen by path relative to itself; a bundle without a module fails to launch.
 cp "$APP_SRC/capture-payload.js" "$C/Resources/app/capture-payload.js"
+cp "$APP_SRC/voice-prints.js" "$C/Resources/app/voice-prints.js"
+cp "$APP_SRC/voice-match.js" "$C/Resources/app/voice-match.js"
+cp "$APP_SRC/voice-prints.html" "$C/Resources/app/voice-prints.html"
 # Setup's FileVault warning (SAA-243 item 7). main.js requires it by relative
 # path; a bundle without it fails to launch.
 cp "$APP_SRC/filevault.js" "$C/Resources/app/filevault.js"

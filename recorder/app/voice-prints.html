@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- The voice prints opt-in screen (SAA-260 step 3, SAA-196's 10-08 decision):
+     what is stored and about whom, that some places require consent from the
+     people on the call, and that it can be turned off with the prints deleted.
+     Off by default; opened only from the tray's "Recognise voices…".
+
+     Turning off deletes the prints kept for recognising people
+     (voice-prints/), not the per-voice measurements each recording's diarize
+     file keeps until that recording is deleted; the statement says so.
+
+     The statement below is version 1 (voice-prints.js STATEMENT_VERSION): change
+     its words and bump both together. Turning on sends the version shown here,
+     and main.js refuses any other.
+
+     Loaded from file:// with nodeIntegration, like the other windows: it ships
+     inside the bundle and loads no remote content. Every name from the data is
+     put on the page with textContent. -->
+<title>Recognise voices</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1d1d1f;
+    --muted: #6e6e73;
+    --bg: #ececee;
+    --card: #ffffff;
+    --border: #d8d8dc;
+    --accent: #0a68d8;
+    --danger: #c4281c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #f5f5f7;
+      --muted: #98989d;
+      --bg: #2a2a2c;
+      --card: #1e1e20;
+      --border: #3a3a3c;
+      --accent: #4a9dff;
+      --danger: #ff6b5e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    user-select: none;
+    display: flex;
+    flex-direction: column;
+  }
+  main { flex: 1 1 auto; overflow-y: auto; padding: 18px 22px 8px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
+  h1 .state { color: var(--muted); font-weight: 400; }
+  p { margin: 0 0 10px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+  h2 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 4px 0 8px; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 0; border-top: 1px solid var(--border); }
+  .row:first-child { border-top: none; }
+  .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .count { color: var(--muted); font-size: 12px; margin-left: 6px; }
+  .empty { color: var(--muted); }
+  footer { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 8px; padding: 10px 22px 16px; }
+  button { font: inherit; padding: 4px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--fg); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--danger); }
+  button.small { padding: 2px 10px; font-size: 12px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Recognise voices <span class="state" id="state">(off)</span></h1>
+  <div id="statement">
+    <p>When this is on, Clipwise keeps a voice print (a set of numbers made from a person's voice) for each person you name on a call, and one for you from your microphone. Prints stay on this Mac. They are never sent to the Clipwise server or your team. For now Clipwise only measures how well it would recognise people; it doesn't name anyone yet.</p>
+    <p>A voice print is a biometric identifier. Some states and countries, Illinois for one, require each person's written consent before their voice print is kept. You're responsible for knowing the recording and biometric laws where you record, and for getting consent where it's needed.</p>
+    <p>You can delete one person's print here at any time. Turn this off to delete every voice print Clipwise has kept for recognising people. Each recording also keeps its own voice measurements until you delete that recording.</p>
+  </div>
+  <div id="prints" hidden>
+    <h2>Voice prints on this Mac</h2>
+    <div class="card" id="list"></div>
+  </div>
+</main>
+<footer>
+  <button id="later">Not now</button>
+  <button id="on" class="primary">Turn on</button>
+  <button id="off" class="danger" hidden>Turn off and delete prints</button>
+  <button id="done" hidden>Done</button>
+</footer>
+<script>
+  const { ipcRenderer } = require('electron');
+  // The statement on this page (see the comment at the top).
+  const STATEMENT_VERSION = 1;
+  const $ = (id) => document.getElementById(id);
+
+  function render(data) {
+    const on = !!(data && data.enabled);
+    $('state').textContent = on ? '(on)' : '(off)';
+    $('prints').hidden = !on;
+    $('on').hidden = on;
+    $('later').hidden = on;
+    $('off').hidden = !on;
+    $('done').hidden = !on;
+    const list = $('list');
+    list.textContent = '';
+    if (!on) return;
+    const people = (data.profiles && data.profiles.people) || [];
+    const self = data.profiles && data.profiles.self;
+    const row = (label, count, personId) => {
+      const r = document.createElement('div');
+      r.className = 'row';
+      const who = document.createElement('div');
+      who.className = 'who';
+      who.textContent = label;
+      const c = document.createElement('span');
+      c.className = 'count';
+      c.textContent = `${count} ${count === 1 ? 'call' : 'calls'}`;
+      who.appendChild(c);
+      r.appendChild(who);
+      if (personId) {
+        const del = document.createElement('button');
+        del.className = 'small danger';
+        del.textContent = 'Delete';
+        del.addEventListener('click', () => ipcRenderer.send('voice-prints:delete', { personId }));
+        r.appendChild(del);
+      }
+      list.appendChild(r);
+    };
+    if (self) row('You', self.count, null);
+    for (const p of people) row(p.name || 'Someone (no name kept)', p.count, p.personId);
+    if (!self && people.length === 0) {
+      const e = document.createElement('div');
+      e.className = 'empty';
+      e.textContent = 'None yet. A print is kept once you name someone on a call.';
+      list.appendChild(e);
+    }
+  }
+
+  $('on').addEventListener('click', () => ipcRenderer.send('voice-prints:enable', { statementVersion: STATEMENT_VERSION }));
+  $('off').addEventListener('click', () => ipcRenderer.send('voice-prints:disable'));
+  $('later').addEventListener('click', () => window.close());
+  $('done').addEventListener('click', () => window.close());
+  ipcRenderer.on('voice-prints:data', (_e, data) => render(data));
+  ipcRenderer.send('voice-prints:ready');
+</script>
+</body>
+</html>

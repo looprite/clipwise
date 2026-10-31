@@ -37,6 +37,10 @@ const { listMeetings, listTrashed } = require('./meetings.js');
 const { removeCaptureFiles } = require('./capture-files.js');
 // The body of POST /captures (SAA-260 step 3 moved it out for its check).
 const { buildCapturePayload: buildCapturePayloadIn } = require('./capture-payload.js');
+// Voice prints on this Mac, watch only (SAA-260 step 3): the store, enrolment,
+// deletion and the matcher's score log. Never uploaded.
+const voicePrintsModule = require('./voice-prints.js');
+const { matchCapture } = require('./voice-match.js');
 // The day log's lines where call content is at hand: counts and kinds only.
 const logLines = require('./log-lines.js');
 // Day logs kept for 30 days (SAA-243 item 7).
@@ -322,6 +326,7 @@ const VOICE_NAMING_STOP_MESSAGE_MS = 5000;
 const IDENTITY_HTML = path.join(__dirname, 'identity.html');
 const SETUP_HTML = path.join(__dirname, 'setup.html');
 const MEETINGS_HTML = path.join(__dirname, 'meetings.html');
+const VOICE_PRINTS_HTML = path.join(__dirname, 'voice-prints.html');
 // How long the prompt waits for the page to report its height before showing
 // itself anyway. Short enough not to be noticed after a capture, long enough
 // for a local file: the measurement is sent from the page's first script run.
@@ -366,10 +371,19 @@ function pipelineSpawn(entry, args) {
             cmd: process.execPath,
             args: [entry, ...args],
             cwd: RESOURCES_DIR,
-            env: { ...process.env, PATH: PIPELINE_PATH, ELECTRON_RUN_AS_NODE: '1', ...PIPELINE_TOOLS_ENV },
+            env: withHostPrintFlag({ ...process.env, PATH: PIPELINE_PATH, ELECTRON_RUN_AS_NODE: '1', ...PIPELINE_TOOLS_ENV }),
         };
     }
-    return { cmd: TSX_BIN, args: [entry, ...args], cwd: SERVER_DIR, env: { ...process.env, PATH: PIPELINE_PATH } };
+    return { cmd: TSX_BIN, args: [entry, ...args], cwd: SERVER_DIR, env: withHostPrintFlag({ ...process.env, PATH: PIPELINE_PATH }) };
+}
+
+// diarize writes the member's own print (host-print-<stem>.json) only with
+// this set, and it is set only while voice prints are on (SAA-260 step 3). A
+// value inherited from this process's own environment is never passed on.
+function withHostPrintFlag(env) {
+    delete env.CLIPWISE_SAVE_HOST_PRINT;
+    if (voicePrintsOn()) env.CLIPWISE_SAVE_HOST_PRINT = '1';
+    return env;
 }
 
 // --- state ----------------------------------------------------------------
@@ -1256,6 +1270,172 @@ function registerMeetingsIpc() {
     });
 }
 
+// --- voice prints, watch only (SAA-260 step 3) ------------------------------
+//
+// Off by default; the tray's "Recognise voices…" opens the opt-in screen. While
+// on: after a capture's pipeline, the member's own print diarize wrote is taken
+// into the store and every voice is scored against the prints (voice-match.js,
+// logged only, nobody named); after each send, the server's person ids enrol
+// the confirmed voices (voice-prints.js). The store is encrypted with
+// safeStorage, as the capture token is. Nothing in it is ever uploaded. The
+// day log gets counts and words only.
+let voicePrintsStore = null;
+let voicePrintsWindow = null;
+
+function voicePrints() {
+    if (!voicePrintsStore) {
+        voicePrintsStore = voicePrintsModule.createVoicePrints({
+            supportDir: SUPPORT_DIR,
+            outdir: OUTDIR,
+            encrypt: (s) => safeStorage.encryptString(s),
+            decrypt: (b) => safeStorage.decryptString(b),
+        });
+    }
+    return voicePrintsStore;
+}
+
+function voicePrintsOn() {
+    try { return voicePrints().isEnabled(); } catch { return false; }
+}
+
+// After a capture's pipeline (or a recovery pass) finished it.
+function voicePrintsAfterPipeline(stem) {
+    try {
+        const vp = voicePrints();
+        const host = vp.ingestHostPrint(stem);
+        const m = matchCapture(vp, OUTDIR, stem);
+        if (host !== 'none' || !m.skipped) {
+            console.error(`[clipwise-recorder] voice prints ${stem}: host print ${host}, ${m.skipped ? `match skipped (${m.skipped})` : `matched ${m.voices} voice(s) against ${m.profiles} print(s)`}`);
+        }
+    } catch (err) {
+        console.error(`[clipwise-recorder] voice prints ${stem}: after pipeline failed (${err.code || err.name})`);
+    }
+}
+
+// After a send the server answered 200 or 201: its person ids for the voices.
+function voicePrintsAfterSend(stem, people) {
+    try {
+        const r = voicePrints().enrolFromMapping(stem, people);
+        if (!r.skipped) console.error(`[clipwise-recorder] voice prints ${stem}: enrolled ${r.enrolled}, refused ${r.refused}, replaced ${r.removed}`);
+        sendVoicePrintsData();
+    } catch (err) {
+        console.error(`[clipwise-recorder] voice prints ${stem}: enrolment failed (${err.code || err.name})`);
+    }
+}
+
+// Before a capture's files are deleted from the trash.
+function voicePrintsRemoveRecording(stem) {
+    try {
+        const r = voicePrints().removeRecording(stem);
+        if (r.contributions || r.scoreLines) console.error(`[clipwise-recorder] voice prints ${stem}: removed ${r.contributions} contribution(s), ${r.scoreLines} score line(s)`);
+        sendVoicePrintsData();
+    } catch (err) {
+        console.error(`[clipwise-recorder] voice prints ${stem}: removal failed (${err.code || err.name})`);
+    }
+}
+
+function sendVoicePrintsData() {
+    if (!voicePrintsWindow || voicePrintsWindow.isDestroyed()) return;
+    let data = { enabled: false, profiles: null };
+    try {
+        const vp = voicePrints();
+        data = { enabled: vp.isEnabled(), profiles: vp.isEnabled() ? vp.listProfiles() : null };
+    } catch (err) {
+        console.error(`[clipwise-recorder] voice prints: could not read the store (${err.code || err.name})`);
+    }
+    voicePrintsWindow.webContents.send('voice-prints:data', data);
+}
+
+function openVoicePrintsWindow() {
+    if (voicePrintsWindow && !voicePrintsWindow.isDestroyed()) {
+        voicePrintsWindow.show();
+        try { app.focus({ steal: true }); } catch {}
+        return;
+    }
+    voicePrintsWindow = new BrowserWindow({
+        width: 520,
+        height: 470,
+        minWidth: 440,
+        minHeight: 360,
+        title: 'Recognise voices',
+        show: false,
+        webPreferences: { nodeIntegration: true, contextIsolation: false },
+    });
+    const win = voicePrintsWindow;
+    win.once('ready-to-show', () => {
+        win.show();
+        try { app.focus({ steal: true }); } catch {}
+    });
+    win.on('closed', () => {
+        if (voicePrintsWindow === win) voicePrintsWindow = null;
+    });
+    win.loadFile(VOICE_PRINTS_HTML).catch((err) => {
+        console.error(`voice prints: window failed to load: ${String(err)}`);
+        try { win.close(); } catch {}
+    });
+}
+
+function registerVoicePrintsIpc() {
+    const parent = () => (voicePrintsWindow && !voicePrintsWindow.isDestroyed() ? voicePrintsWindow : undefined);
+    ipcMain.on('voice-prints:ready', () => sendVoicePrintsData());
+    ipcMain.on('voice-prints:enable', async (_event, payload) => {
+        const version = payload && payload.statementVersion;
+        if (!safeStorage.isEncryptionAvailable()) {
+            await dialog.showMessageBox(parent(), {
+                type: 'warning', buttons: ['OK'],
+                message: 'Voice recognition can’t be turned on',
+                detail: 'This Mac can’t encrypt the prints right now, so none will be kept.',
+            });
+            return;
+        }
+        try {
+            voicePrints().enable(version);
+            console.error(`[clipwise-recorder] voice prints: turned on (statement ${version})`);
+        } catch (err) {
+            console.error(`[clipwise-recorder] voice prints: not turned on (${err.code || err.name})`);
+        }
+        sendVoicePrintsData();
+    });
+    ipcMain.on('voice-prints:delete', async (_event, payload) => {
+        const personId = payload && typeof payload.personId === 'string' ? payload.personId : null;
+        if (!personId) return;
+        let shown = null;
+        try {
+            const p = voicePrints().listProfiles().people.find((x) => x.personId === personId);
+            if (!p) { sendVoicePrintsData(); return; }
+            shown = p.name;
+        } catch { return; }
+        const { response } = await dialog.showMessageBox(parent(), {
+            type: 'warning', buttons: ['Cancel', 'Delete'], defaultId: 0, cancelId: 0,
+            message: shown ? `Delete ${shown}’s voice print?` : 'Delete this voice print?',
+            detail: 'Clipwise stops comparing new calls against it. A new print is kept the next time you name this person on a call.',
+        });
+        if (response !== 1) return;
+        try {
+            voicePrints().deleteProfile(personId);
+            console.error('[clipwise-recorder] voice prints: one print deleted');
+        } catch (err) {
+            console.error(`[clipwise-recorder] voice prints: delete failed (${err.code || err.name})`);
+        }
+        sendVoicePrintsData();
+    });
+    ipcMain.on('voice-prints:disable', async () => {
+        const { response } = await dialog.showMessageBox(parent(), {
+            type: 'warning', buttons: ['Cancel', 'Turn off and delete prints'], defaultId: 0, cancelId: 0,
+            message: 'Turn off voice recognition?',
+            detail: 'Every voice print Clipwise has kept for recognising people is deleted. Each recording keeps its own voice measurements until you delete that recording.',
+        });
+        if (response !== 1) return;
+        try {
+            const gone = voicePrints().disable();
+            console.error(`[clipwise-recorder] voice prints: turned off (prints ${gone.profiles ? 'deleted' : 'none'}, scores ${gone.scores ? 'deleted' : 'none'}, host prints ${gone.hostPrints})`);
+        } catch (err) {
+            console.error(`[clipwise-recorder] voice prints: turn off failed (${err.code || err.name})`);
+        }
+        sendVoicePrintsData();
+    });
+}
+
 // "Change attendees…" in Recent meetings (SAA-258): the identity
 // window again, filled from the saved answer: its own name, its guests checked,
 // its scope. Saving writes a correction (identity:submit, capture.correcting)
@@ -1749,6 +1929,7 @@ function renderTray() {
     const meeting = lastMeeting(OUTDIR, undefined, captureStateOpts());
     items.push({ type: 'separator' });
     items.push({ label: 'Recent meetings…', click: openMeetingsWindow });
+    items.push({ label: 'Recognise voices…', click: openVoicePrintsWindow });
     if (meeting) {
         items.push({
             label: saveTranscriptLabel(meeting),
@@ -2711,6 +2892,9 @@ function startPipeline(stem) {
         if (!pipeline || pipeline.proc !== proc) return;
         if (code === 0) {
             pipeline = null;
+            // Before the drain above runs (setImmediate), so a capture is
+            // matched before its first send can enrol it (SAA-260 step 3).
+            voicePrintsAfterPipeline(stem);
         } else {
             try {
                 fs.appendFileSync(
@@ -2813,7 +2997,8 @@ function startRecovery(reason, opts = {}) {
         // pipeline ever queued them: only those whose record says "recovered"
         // at or after this pass began, never every capture recovery looked at
         // ("complete" is written for each one already done, on every pass).
-        queueRecoveredCaptures(triggeredAtMs);
+        // Matched before the drain sends them, as at a pipeline exit (SAA-260 step 3).
+        for (const recovered of queueRecoveredCaptures(triggeredAtMs)) voicePrintsAfterPipeline(recovered);
         drainUploadQueue('recovery exit');
         // Read after the process is gone, not during — recovery.ts writes
         // recovery-<stem>.json and the capture's record before this exits, so
@@ -3061,9 +3246,12 @@ async function postCapture(server, body) {
             body,
         });
         const reply = await res.json().catch(() => ({}));
-        return { status: res.status, error: reply.error || null, recordingId: reply.recordingId || null };
+        // people: each voice's person id, for the voice prints on this Mac
+        // (SAA-260 step 3). Ids only; absent from a server before step 3.
+        const people = reply.people && typeof reply.people === 'object' ? reply.people : null;
+        return { status: res.status, error: reply.error || null, recordingId: reply.recordingId || null, people };
     } catch (err) {
-        return { status: null, error: err.cause?.code || err.name, recordingId: null };
+        return { status: null, error: err.cause?.code || err.name, recordingId: null, people: null };
     }
 }
 
@@ -3205,6 +3393,7 @@ async function sendQueuedCapture(server, entry) {
     const jobStateReset = { jobState: null, jobAnsweredMs: 0, jobPolledAt: null, jobUnanswered: 0, nextJobPollAt: null };
     if (reply.status === 200 || reply.status === 201) {
         console.error(`[clipwise-recorder] upload ${stem}: ${reply.status}`);
+        if (reply.people) voicePrintsAfterSend(stem, reply.people);
         return {
             ...entry, state: 'sent', lastStatus: reply.status, lastError: null, recordingId: reply.recordingId || entry.recordingId, sentAt: new Date().toISOString(),
             identityAcceptedAt: sentAnsweredAt || entry.identityAcceptedAt || null,
@@ -3426,16 +3615,22 @@ function sendUploadsWaitingOnSignIn() {
 
 // Queues the captures one recovery pass ran to the end (capture-recover.ts writes
 // last_action "recovered" in recovery-<stem>.json when it does).
+// -> the stems queued.
 function queueRecoveredCaptures(passStartedAtMs) {
+    const queued = [];
     let names = [];
-    try { names = fs.readdirSync(OUTDIR); } catch { return; }
+    try { names = fs.readdirSync(OUTDIR); } catch { return queued; }
     for (const name of names) {
         const m = /^recovery-(.+)\.json$/.exec(name);
         if (!m) continue;
         let record;
         try { record = JSON.parse(fs.readFileSync(path.join(OUTDIR, name), 'utf8')); } catch { continue; }
-        if (record.last_action === 'recovered' && Date.parse(record.last_action_at) >= passStartedAtMs) enqueueUpload(m[1]);
+        if (record.last_action === 'recovered' && Date.parse(record.last_action_at) >= passStartedAtMs) {
+            enqueueUpload(m[1]);
+            queued.push(m[1]);
+        }
     }
+    return queued;
 }
 
 // --- the capture-scope routes (SAA-227) --------------------------------------
@@ -3520,6 +3715,9 @@ async function runTrashOnServer(action, stems) {
                 fs.rmSync(trashMarkerPath(stem), { force: true });
                 results.push({ action, stem, ok: true });
             } else {
+                // Its voice prints' contributions and score lines go first, while
+                // nothing else is gone (SAA-260 step 3).
+                voicePrintsRemoveRecording(stem);
                 const files = removeCaptureFiles(OUTDIR, UPLOAD_QUEUE_DIR, stem);
                 results.push({ action, stem, ok: true, files });
             }
@@ -5408,6 +5606,7 @@ app.whenReady().then(async () => {
     setInterval(pruneDayLogsNow, DAY_LOG_PRUNE_INTERVAL_MS);
     registerIdentityIpc();
     registerMeetingsIpc();
+    registerVoicePrintsIpc();
     registerSetupIpc();
     // Before any call can start a capture, so that a new person has read the
     // notice by the time their first one is turned away (SAA-216). Opens setup
