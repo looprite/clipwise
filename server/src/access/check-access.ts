@@ -45,6 +45,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { Pool } from "pg";
+import { eq } from "drizzle-orm";
 import { buildApp } from "../app.js";
 import { authConfigFromEnv, createAuth } from "../auth/auth.js";
 import { addMember, createPasswordLogin, removeMember, requireAccount } from "../auth/members.js";
@@ -267,6 +268,8 @@ async function cleanup(accountId: string | null): Promise<void> {
     // Captures made through POST /captures: slug is clipwise-capture-<stem>-<id>, and the stems start with the tag.
     await run(`delete from recordings where account_id = $1 and slug like $2`, [accountId, `clipwise-capture-check-access-${tag}-%`]);
     await run(`delete from people where account_id = $1 and email like $2`, [accountId, like]);
+    // People with no email (the capture people fixtures), by the tag in their name.
+    await run(`delete from people where account_id = $1 and email is null and name like $2`, [accountId, `%${tag}%`]);
   }
   for (const t of ["oauthRefreshToken", "oauthAccessToken", "oauthConsent"]) {
     await run(`delete from "${t}" where "userId" in (select id from auth_user where email like $1)`, [like]);
@@ -1243,6 +1246,180 @@ async function main(): Promise<void> {
     record(!emailsB.includes(people.hidden.email) && emailsB.includes(people.shared.email) && emailsB.includes(people.free.email), "people: someone seen only on another member's private call is not listed; people on shared calls and unattached people are", `${emailsB.filter((e: string) => e.endsWith(`-${tag}@clipwise.test`)).length} listed`);
     record(emailsA.includes(people.hidden.email), "people: the owner of that call does see them");
     record((await http("GET", `/accounts/${acc}/people/${people.hidden.id}`, { token: B.token })).status === 404, "people by id: the hidden person is 404");
+
+    // ---- the recorder's people questions (SAA-260 step 1) ------------------
+    // GET /captures/me and GET /captures/people, with capture tokens. The
+    // generic loops above and below cover them once they are classified; the
+    // token lines here are stated again so code without the routes fails them.
+    // Fixture recordings carry no moments and are not titled with WORD, so the
+    // search and list assertions elsewhere do not see them.
+    {
+      const capOf = (who: Who): string => capToken(who);
+      const seenOn = async (
+        key: string,
+        o: { owner: Who; visibility: "private" | "shared"; at: string; trashed?: boolean; attendee?: { id: string }; invitee?: { id: string } },
+      ): Promise<void> => {
+        const [r] = await db
+          .insert(schema.recordings)
+          .values({
+            accountId: acc,
+            ownerMemberId: o.owner.memberId,
+            visibility: o.visibility,
+            scope: "work",
+            trashedAt: o.trashed ? new Date() : null,
+            slug: `check-access-${tag}-seen-${key}`,
+            title: `seen ${tag} ${key}`,
+            source: "check-access",
+            sourceId: `${tag}-seen-${key}`,
+            startedAt: new Date(o.at),
+          })
+          .returning({ id: schema.recordings.id });
+        if (o.attendee) await db.insert(schema.attendees).values({ recordingId: r.id, personId: o.attendee.id, name: "Guest" });
+        if (o.invitee) await db.insert(schema.invitees).values({ recordingId: r.id, personId: o.invitee.id, email: `inv-${key}-${tag}@clipwise.test`, name: "Guest" });
+      };
+      // Fixture people have no email, as people made from a typed name will
+      // (cleanup removes them by the tag in their name).
+      const person = async (name: string) =>
+        (await db.insert(schema.people).values({ accountId: acc, email: null, name }).returning({ id: schema.people.id, name: schema.people.name }))[0];
+      const search = async (who: Who, q?: string) =>
+        http("GET", `/captures/people${q === undefined ? "" : `?q=${encodeURIComponent(q)}`}`, { token: capOf(who) });
+      const names = (r: Reply): string[] => (r.json?.people ?? []).map((p: any) => p.name);
+      const ids = (r: Reply): string[] => (r.json?.people ?? []).map((p: any) => p.id);
+
+      // -- who may call them --
+      for (const path of ["/captures/me", "/captures/people"]) {
+        const none = await http("GET", path);
+        const junk = await http("GET", path, { token: "junk.junk.junk" });
+        const mcp = await http("GET", path, { token: A.token });
+        record(
+          none.status === 401 && junk.status === 401 && mcp.status === 403 && mcp.json?.error === "insufficient_scope",
+          `capture people: GET ${path} gives no token and a junk token 401, and an MCP token 403 insufficient_scope`,
+          `got ${none.status} / ${junk.status} / ${mcp.status} ${mcp.json?.error ?? ""}`,
+        );
+      }
+
+      // -- GET /captures/me --
+      const meA = await http("GET", "/captures/me", { token: capOf(A) });
+      record(
+        meA.status === 200 && meA.json?.displayName === "Check alice" && sameSet(Object.keys(meA.json ?? {}), ["displayName"]),
+        "capture me: the caller's own display name, and nothing else",
+        `got ${meA.status} ${JSON.stringify(meA.json)}`,
+      );
+      const setBName = (v: string | null) =>
+        db.update(schema.accountMembers).set({ displayName: v }).where(eq(schema.accountMembers.id, B.memberId));
+      await setBName(null);
+      const meNull = await http("GET", "/captures/me", { token: capOf(B) });
+      await setBName("   ");
+      const meBlank = await http("GET", "/captures/me", { token: capOf(B) });
+      await setBName(`bob-${tag}@clipwise.test`);
+      const meAt = await http("GET", "/captures/me", { token: capOf(B) });
+      await setBName("Check bob");
+      record(
+        meNull.status === 200 && meNull.json?.displayName === null && meBlank.json?.displayName === null && meAt.json?.displayName === null,
+        "capture me: a null, blank or address-shaped display name is null",
+        `null → ${JSON.stringify(meNull.json)}, blank → ${JSON.stringify(meBlank.json)}, address → ${JSON.stringify(meAt.json)}`,
+      );
+
+      // -- visibility --
+      const hiddenNew = await person(`Hidnew ${tag}`);
+      const newest = await person(`Newest ${tag}`);
+      await seenOn("hidnew", { owner: A, visibility: "private", at: "2099-06-01T00:00:00Z", attendee: hiddenNew });
+      await seenOn("newest", { owner: A, visibility: "shared", at: "2099-01-01T00:00:00Z", attendee: newest });
+      const hidB = await search(B, `Hidden ${tag}`);
+      const hidA = await search(A, `Hidden ${tag}`);
+      record(
+        hidB.status === 200 && names(hidB).length === 0 && names(hidA).includes(`Hidden ${tag}`),
+        "capture people: someone seen only on another member's private call is not found by name; the call's owner finds them",
+        `B ${hidB.status} ${JSON.stringify(names(hidB))}; A ${JSON.stringify(names(hidA))}`,
+      );
+      const emptyB = await search(B);
+      const emptyA = await search(A);
+      record(
+        emptyB.status === 200 && ids(emptyB)[0] === newest.id && !ids(emptyB).includes(hiddenNew.id) && ids(emptyA)[0] === hiddenNew.id,
+        "capture people: no q is the most recently seen first; another member's private call, newer still, neither shows its person nor moves anyone up",
+        `B first ${JSON.stringify(names(emptyB).slice(0, 2))}, hidden listed ${ids(emptyB).includes(hiddenNew.id)}; A first ${JSON.stringify(names(emptyA).slice(0, 2))}`,
+      );
+
+      // -- order: most recently seen first, through attendees or invitees --
+      const oA = await person(`Order${tag} A`);
+      const oB = await person(`Order${tag} B`);
+      const oC = await person(`Order${tag} C`);
+      await person(`Order${tag} D`); // on no call
+      // Seen in the reverse of name order, so a list sorted by name fails this.
+      await seenOn("o-a", { owner: A, visibility: "shared", at: "2026-01-01T00:00:00Z", attendee: oA });
+      await seenOn("o-b", { owner: A, visibility: "shared", at: "2026-01-02T00:00:00Z", invitee: oB });
+      await seenOn("o-c", { owner: A, visibility: "shared", at: "2026-01-03T00:00:00Z", attendee: oC });
+      const order = await search(B, `Order${tag}`);
+      record(
+        JSON.stringify(names(order)) === JSON.stringify([`Order${tag} C`, `Order${tag} B`, `Order${tag} A`, `Order${tag} D`]),
+        "capture people: most recently seen first (an invitee row counts), a person on no call last",
+        JSON.stringify(names(order)),
+      );
+
+      // -- order counts only the caller's visible recordings --
+      // A: on a shared call 02-01 and on A's private call 02-03. B: a shared call 02-02.
+      const vA = await person(`Vis${tag} A`);
+      const vB = await person(`Vis${tag} B`);
+      await seenOn("v-a-shared", { owner: A, visibility: "shared", at: "2026-02-01T00:00:00Z", attendee: vA });
+      await seenOn("v-a-private", { owner: A, visibility: "private", at: "2026-02-03T00:00:00Z", attendee: vA });
+      await seenOn("v-b", { owner: A, visibility: "shared", at: "2026-02-02T00:00:00Z", attendee: vB });
+      const visB = await search(B, `Vis${tag}`);
+      const visA = await search(A, `Vis${tag}`);
+      record(
+        JSON.stringify(names(visB)) === JSON.stringify([`Vis${tag} B`, `Vis${tag} A`]) &&
+          JSON.stringify(names(visA)) === JSON.stringify([`Vis${tag} A`, `Vis${tag} B`]),
+        "capture people: a private call counts as seen only for its owner (member B gets B, A; the owner gets A, B)",
+        `B ${JSON.stringify(names(visB))}; A ${JSON.stringify(names(visA))}`,
+      );
+
+      // -- a trashed call does not count as seen --
+      const tA = await person(`Trash${tag} A`);
+      const tB = await person(`Trash${tag} B`);
+      await seenOn("t-a", { owner: A, visibility: "shared", at: "2099-12-01T00:00:00Z", trashed: true, attendee: tA });
+      await seenOn("t-b", { owner: A, visibility: "shared", at: "2026-03-01T00:00:00Z", attendee: tB });
+      const trash = await search(B, `Trash${tag}`);
+      record(
+        JSON.stringify(names(trash)) === JSON.stringify([`Trash${tag} B`, `Trash${tag} A`]),
+        "capture people: a call in the trash does not count as seen",
+        JSON.stringify(names(trash)),
+      );
+
+      // -- at most 10 --
+      for (let i = 0; i < 12; i++) await person(`Cap${tag} ${String(i).padStart(2, "0")}`);
+      const cap = await search(B, `Cap${tag}`);
+      record(names(cap).length === 10, "capture people: at most 10", `${names(cap).length} returned`);
+
+      // -- matching: case and spacing ignored; %, _ match only themselves --
+      const spaced = await search(B, `order${tag}    c`);
+      record(
+        JSON.stringify(names(spaced)) === JSON.stringify([`Order${tag} C`]),
+        "capture people: q ignores case and runs of spaces",
+        JSON.stringify(names(spaced)),
+      );
+      await person(`Pct${tag} 100% real`);
+      await person(`Pct${tag} 100x real`);
+      await person(`Und${tag} a_b`);
+      await person(`Und${tag} axb`);
+      const pct = await search(B, `Pct${tag} 100%`);
+      const und = await search(B, `Und${tag} a_b`);
+      record(
+        JSON.stringify(names(pct)) === JSON.stringify([`Pct${tag} 100% real`]) && JSON.stringify(names(und)) === JSON.stringify([`Und${tag} a_b`]),
+        "capture people: % and _ in q match only themselves",
+        `% → ${JSON.stringify(names(pct))}; _ → ${JSON.stringify(names(und))}`,
+      );
+
+      // -- what comes back --
+      await person(`At${tag} someone@clipwise.test`);
+      const at = await search(B, `At${tag}`);
+      const all = [order, visB, emptyB, cap, at];
+      record(
+        names(at).length === 0 && all.every((r) => sameSet(Object.keys(r.json ?? {}), ["people"]) && (r.json?.people ?? []).every((p: any) => sameSet(Object.keys(p), ["id", "name"]))) && all.every((r) => !JSON.stringify(r.json).includes("@")),
+        "capture people: id and name only, never an @ (a person whose name holds one is not listed)",
+        `@-named listed ${names(at).length}; keys ${JSON.stringify((order.json?.people ?? [])[0] ? Object.keys(order.json.people[0]) : [])}`,
+      );
+      const extra = await http("GET", `/captures/people?q=x&email=y`, { token: capOf(B) });
+      record(extra.status === 400, "capture people: a query parameter other than q is 400", `got ${extra.status}`);
+    }
 
     // ---- account in the URL is not trusted ---------------------------------
     record((await http("GET", `/accounts/${randomUUID()}/moments?q=${WORD}`, { token: A.token })).status === 404, "a URL naming a different account is 404");
