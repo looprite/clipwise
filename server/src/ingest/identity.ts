@@ -45,6 +45,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { describeErrorLine } from "../lib/safe-error.js";
 import { isVoiceLabel } from "../pipeline/diarize.js";
+import { nameKey } from "../routes/capture-people.js";
 
 // Bumped 1 -> 2 for `scope` (SAA-153/SAA-169): the shape the recorder writes
 // changed, so per the header note in identity-answer.js this and that
@@ -62,7 +63,10 @@ export type IdentityAnswer = {
   stem?: string;
   answered_at?: string;
   self?: { name?: string | null; source?: string } | null;
-  guests?: Array<{ name?: string | null }> | null;
+  // personId (SAA-260 step 2): the person the window's chip stands for. The
+  // recorder sends none until step 4; the server uses one only when the caller
+  // may see that person.
+  guests?: Array<{ name?: string | null; personId?: string }> | null;
   // Personal-vs-work classification (SAA-153), answered on the same prompt.
   // Null/absent means the answer predates this field, or scope was never
   // asked — recordings.scope stays NULL in that case, which search_moments
@@ -193,10 +197,16 @@ export async function storeIdentityMetadata(
 // what it is: the two writers here are ingest and the late-answer apply step,
 // and they are seconds to minutes apart in every ordering that actually
 // happens.
+//
+// `chosen` (SAA-260 step 2): guest nameKey -> a person the caller may see,
+// from the answer's guests[].personId (attendee-people.ts chosenPeople). Absent
+// for a caller with no access context (the on-Mac CLI ingest), which writes
+// names only, as before.
 export async function applyIdentity(
   executor: typeof db | Tx,
   recordingId: string,
   answer: IdentityAnswer,
+  chosen: Map<string, string> = new Map(),
 ): Promise<IdentityApplication> {
   const wanted = attendeeRowsFrom(answer);
   const application: IdentityApplication = { inserted: [], skipped: [] };
@@ -230,8 +240,9 @@ export async function applyIdentity(
     await executor.insert(schema.attendees).values({
       recordingId,
       name: row.name,
-      // email, domainKind, personId and role are all left unset — see the
-      // header. The columns are nullable and null is the honest value.
+      // email, domainKind and role are left unset — see the header. personId
+      // only from `chosen`; the same-name rule links the rest afterwards.
+      personId: row.isHost ? null : (chosen.get(nameKey(row.name) ?? "") ?? null),
       isHost: row.isHost,
     });
     if (key) takenNames.add(key);
@@ -490,6 +501,10 @@ export type CorrectionApplication = {
   attendees: number;
   // Voice N rows whose name was a guest the correction removed, now unnamed.
   voicesUnnamed: number;
+  // People the previous rows pointed at that no new row does (SAA-260 step 2):
+  // candidates for attendee-people.ts dropReleasedPeople, once the same-name
+  // rule has run.
+  releasedPersonIds: string[];
 };
 
 // Applies a correction in place of the stored answer. Where applyIdentity,
@@ -500,16 +515,24 @@ export type CorrectionApplication = {
 //   them       the one guest's name; with none or two or more guests, unnamed
 //              (a mixed track, as in applySpeakerNames). Voice N rows are merged
 //              into it first when there is one guest
-//   Voice N    a voice named after a guest the correction removed is unnamed;
-//              the others keep their names
+//   Voice N    a voice named after a guest the correction removed is unnamed,
+//              and its person_id cleared in the same update (SAA-260 step 2);
+//              the others keep their names and people
 //   scope      the answer's, when it gives one; an answer without one leaves the
 //              recording's as it is
+//   person     (SAA-260 step 2) a guest row gets the person from `chosen`, else
+//              the person the previous row with the same nameKey had, else none
+//              (the caller then runs the same-name rule). `me` and `them` are
+//              never given a person here. releasedPersonIds: the people a
+//              previous attendee row or an unnamed Voice row pointed at that no
+//              new row does
 // Then the answer is stored. Whether extraction runs again is the caller's: it
 // compares the speaker fingerprint before and after.
 export async function applyIdentityCorrection(
   executor: typeof db | Tx,
   recordingId: string,
   answer: IdentityAnswer,
+  chosen: Map<string, string> = new Map(),
 ): Promise<CorrectionApplication> {
   const seen = new Set<string>();
   const wanted = attendeeRowsFrom(answer).filter((row) => {
@@ -522,13 +545,29 @@ export async function applyIdentityCorrection(
   const host = wanted.find((r) => r.isHost) ?? null;
 
   const previous = await executor
-    .select({ name: schema.attendees.name, isHost: schema.attendees.isHost })
+    .select({ name: schema.attendees.name, isHost: schema.attendees.isHost, personId: schema.attendees.personId })
     .from(schema.attendees)
     .where(eq(schema.attendees.recordingId, recordingId));
+  // A name the correction keeps keeps its person, including one linked by
+  // address (invitee-names).
+  const carried = new Map<string, string>();
+  for (const row of previous) {
+    const key = nameKey(row.name);
+    if (!row.isHost && row.personId && key && !carried.has(key)) carried.set(key, row.personId);
+  }
+  const personFor = (row: AttendeeRow): string | null => {
+    if (row.isHost) return null;
+    const key = nameKey(row.name) ?? "";
+    return chosen.get(key) ?? carried.get(key) ?? null;
+  };
   await executor.delete(schema.attendees).where(eq(schema.attendees.recordingId, recordingId));
   if (wanted.length > 0) {
-    await executor.insert(schema.attendees).values(wanted.map((row) => ({ recordingId, name: row.name, isHost: row.isHost })));
+    await executor
+      .insert(schema.attendees)
+      .values(wanted.map((row) => ({ recordingId, name: row.name, isHost: row.isHost, personId: personFor(row) })));
   }
+  const kept = new Set(wanted.map(personFor).filter((id): id is string => id !== null));
+  const released = new Set(previous.map((r) => r.personId).filter((id): id is string => id !== null && !kept.has(id)));
 
   let speakers: SpeakerRow[] = await executor
     .select({ id: schema.speakers.id, label: schema.speakers.label, displayName: schema.speakers.displayName })
@@ -546,23 +585,30 @@ export async function applyIdentityCorrection(
     }
   }
 
-  const kept = new Set(guests.map((g) => (g.name ?? "").trim().toLowerCase()));
+  const keptNames = new Set(guests.map((g) => (g.name ?? "").trim().toLowerCase()));
   const removed = new Set(
     previous
       .filter((r) => !r.isHost && r.name)
       .map((r) => (r.name ?? "").trim().toLowerCase())
-      .filter((key) => !kept.has(key)),
+      .filter((key) => !keptNames.has(key)),
   );
   const unname = speakers.filter((s) => isVoiceLabel(s.label) && s.displayName && removed.has(s.displayName.trim().toLowerCase()));
   if (unname.length > 0) {
-    await executor.update(schema.speakers).set({ displayName: null }).where(inArray(schema.speakers.id, unname.map((s) => s.id)));
+    const unnameIds = unname.map((s) => s.id);
+    const voicePeople = await executor
+      .select({ personId: schema.speakers.personId })
+      .from(schema.speakers)
+      .where(inArray(schema.speakers.id, unnameIds));
+    for (const v of voicePeople) if (v.personId && !kept.has(v.personId)) released.add(v.personId);
+    await executor.update(schema.speakers).set({ displayName: null, personId: null }).where(inArray(schema.speakers.id, unnameIds));
   }
+  const releasedPersonIds = [...released];
 
   if (answer.scope === "work" || answer.scope === "personal") {
     await executor.update(schema.recordings).set({ scope: answer.scope }).where(eq(schema.recordings.id, recordingId));
   }
   await storeIdentityMetadata(executor, recordingId, answer);
-  return { attendees: wanted.length, voicesUnnamed: unname.length };
+  return { attendees: wanted.length, voicesUnnamed: unname.length, releasedPersonIds };
 }
 
 // The two describe functions below go into logs, so they print counts and
