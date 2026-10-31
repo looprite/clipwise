@@ -1,8 +1,9 @@
 // DB-less check of the people rules in routes/capture-people.ts (SAA-260 step 1):
 // normalizeName and nameKey (what two names are compared by), escapeLike (the
 // search's LIKE pattern), decideCreate (step 2's same-name rule) and
-// displayNameFor (the host's name). Every rule has its control: an input one
-// change away that comes out the other way.
+// displayNameFor (the host's name); and (SAA-260 step 2) the host-line rule in
+// ingest/attendee-people.ts, hostKeysFor and isLinkableGuest. Every rule has its
+// control: an input one change away that comes out the other way.
 //
 // No database: DATABASE_URL is set to a loopback port nothing listens on before
 // anything is imported (db/index.ts requires one at import and connects only on
@@ -95,6 +96,49 @@ const cases: Array<[string, (m: Mod) => [boolean, string]]> = [
   ["host: control: the same text without the @ is the name", (m) => [m.displayNameFor("jd example.test") === "jd example.test", String(m.displayNameFor("jd example.test"))]],
 ];
 
+// --- the host line (SAA-260 step 2, ingest/attendee-people.ts) ---------------
+// A guest under the host's own name is never linked to a person: the host keys
+// are the answer's self name and the member's display name, compared by
+// nameKey. Each with its control.
+type LinkMod = typeof import("../ingest/attendee-people.js");
+const guest = (name: string | null, extra: { isHost?: boolean; personId?: string | null } = {}) =>
+  ({ name, isHost: extra.isHost ?? false, personId: extra.personId ?? null });
+const linkCases: Array<[string, (m: LinkMod) => [boolean, string]]> = [
+  ["host line: a guest named as the answer's self name is not linkable, in any case or spacing", (m) => {
+    const keys = m.hostKeysFor("Check Host", null);
+    return [!m.isLinkableGuest(guest("  check   HOST "), keys), JSON.stringify([...keys])];
+  }],
+  ["host line: a guest named as the member's display name is not linkable", (m) => {
+    const keys = m.hostKeysFor(null, "Jon Example");
+    return [!m.isLinkableGuest(guest("Jon Example"), keys), JSON.stringify([...keys])];
+  }],
+  ["host line: the display name compares NFC (decomposed display name, composed guest)", (m) => {
+    const decomposed: string = "Jose\u0301 Example", composed: string = "Jos\u00e9 Example";
+    // Guard: the two raw strings must differ, or this case proves nothing.
+    if (decomposed === composed) return [false, "the decomposed and composed literals are equal before normalizing"];
+    const keys = m.hostKeysFor(null, decomposed);
+    return [!m.isLinkableGuest(guest(composed), keys), `raw lengths ${decomposed.length} / ${composed.length}; keys ${JSON.stringify([...keys])}`];
+  }],
+  ["host line: control: another guest name is linkable", (m) => {
+    const keys = m.hostKeysFor("Check Host", "Jon Example");
+    return [m.isLinkableGuest(guest("Ann Example"), keys), JSON.stringify([...keys])];
+  }],
+  ["host line: the host row itself is never linkable, whatever its name", (m) => {
+    const keys = m.hostKeysFor(null, null);
+    return [!m.isLinkableGuest(guest("Ann Example", { isHost: true }), keys), `keys ${keys.size}`];
+  }],
+  ["host line: an address or an empty value adds no host key", (m) => {
+    const keys = m.hostKeysFor("jd@example.test", "   ");
+    return [keys.size === 0, JSON.stringify([...keys])];
+  }],
+  ["link: a row already linked, or with no name, is not linked again", (m) => {
+    const keys = m.hostKeysFor(null, null);
+    const linked = m.isLinkableGuest(guest("Ann Example", { personId: "p1" }), keys);
+    const unnamed = m.isLinkableGuest(guest(null), keys);
+    return [!linked && !unnamed, `linked=${linked} unnamed=${unnamed}`];
+  }],
+];
+
 async function main(): Promise<void> {
   let mod: Mod | null = null;
   let why = "";
@@ -116,7 +160,28 @@ async function main(): Promise<void> {
     }
     check(name, result[0], result[1]);
   }
-  console.log(`\n${cases.length - failures}/${cases.length} passed`);
+  let linkMod: LinkMod | null = null;
+  let linkWhy = "";
+  try {
+    linkMod = await import("../ingest/attendee-people.js");
+  } catch (err) {
+    linkWhy = `module not present (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`;
+  }
+  for (const [name, run] of linkCases) {
+    if (!linkMod) {
+      check(name, false, linkWhy);
+      continue;
+    }
+    let result: [boolean, string];
+    try {
+      result = run(linkMod);
+    } catch (err) {
+      result = [false, `threw ${err instanceof Error ? err.message : String(err)}`];
+    }
+    check(name, result[0], result[1]);
+  }
+  const total = cases.length + linkCases.length;
+  console.log(`\n${total - failures}/${total} passed`);
   process.exit(failures === 0 ? 0 : 1);
 }
 
