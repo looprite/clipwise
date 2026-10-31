@@ -34,6 +34,7 @@ import { accountsRouter } from "./routes/accounts.js";
 import { momentsRouter } from "./routes/moments.js";
 import { capturesPost } from "./routes/captures.js";
 import { calendarPreviewPost } from "./routes/calendar-preview.js";
+import { captureMeGet, capturePeopleGet } from "./routes/capture-people.js";
 import { captureScopeRouter } from "./routes/capture-scope.js";
 import { oauthRouter } from "./routes/oauth.js";
 import { demoRouter } from "./routes/demo.js";
@@ -121,6 +122,10 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   // prompt (SAA-221; routes/calendar-preview.ts). Ahead of /captures/:captureId,
   // whose routes take a capture id this path is not.
   app.post("/captures/calendar-preview", requireCapture, calendarPreviewPost);
+  // The caller's own name, and people search, for the identity window (SAA-260
+  // step 1; routes/capture-people.ts). Here for the same reason.
+  app.get("/captures/me", requireCapture, captureMeGet);
+  app.get("/captures/people", requireCapture, capturePeopleGet);
   // What the recorder does with a stored capture of its owner's: the transcript,
   // trash, restore, delete permanently and job status (routes/capture-scope.ts).
   app.use("/captures/:captureId", requireCapture);
