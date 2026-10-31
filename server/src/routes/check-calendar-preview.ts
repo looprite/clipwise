@@ -34,8 +34,9 @@
 //       scan finds both planted in a copy
 //   a   a guest name with an @ in the identity answer never becomes an attendee.
 //       Control: the answer sent did carry it
-//   l   the route's log lines carry no @, no title and no name. Control: the
-//       same scan finds each planted in a copy
+//   l   the route's log lines (calendar-preview, invitee-names and, since
+//       SAA-260 step 2, attendee-people, at least one of each) carry no @, no
+//       title and no name. Control: the same scan finds each planted in a copy
 //
 //   scripts/scratch-db.sh run check-calendar-preview
 
@@ -61,7 +62,7 @@ const serverLines: string[] = [];
 const realLog = console.log.bind(console);
 console.log = (...args: unknown[]) => {
   const line = args.map(String).join(" ");
-  if (line.startsWith("calendar-preview:") || line.startsWith("invitee-names:")) serverLines.push(line);
+  if (line.startsWith("calendar-preview:") || line.startsWith("invitee-names:") || line.startsWith("attendee-people:")) serverLines.push(line);
   realLog(...args);
 };
 
@@ -388,6 +389,8 @@ async function main(): Promise<void> {
     };
     const haveBoth = serverLines.some((l) => l.startsWith("calendar-preview: ")) && serverLines.some((l) => l.startsWith("invitee-names: "));
     check(`l: the route's lines were captured (${serverLines.length}, both kinds)`, haveBoth, serverLines.join(" | "));
+    const peopleLines = serverLines.filter((l) => l.startsWith("attendee-people: ")).length;
+    check(`l: attendee-people lines were captured too (${peopleLines}; SAA-260 step 2)`, peopleLines > 0, serverLines.join(" | "));
     const l = leaks(serverLines);
     check("l: no @, no title, no name in them", !l.at && !l.title && !l.names, JSON.stringify(l));
     const lc = leaks([...serverLines, `planted ${MIKE}`, `planted ${TITLE}`, "planted Guest Example"]);
