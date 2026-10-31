@@ -21,8 +21,8 @@
 // recording (SAA-260 step 2, at ingest), because one created before that is
 // unattached, and an unattached person is visible to every member
 // (access/visibility.ts). normalizeName and decideCreate below are the rule step
-// 2 uses there; they are pure, with their DB-less check in
-// check-capture-people.ts, and no route calls them yet.
+// 2 uses there (ingest/attendee-people.ts, ingest/invitee-names.ts); they are
+// pure, with their DB-less check in check-capture-people.ts.
 
 import type { RequestHandler } from "express";
 import { and, eq, isNotNull, sql } from "drizzle-orm";
@@ -94,7 +94,9 @@ export const capturePeopleGet: RequestHandler = asyncHandler(async (req, res) =>
   // The typed text compared as names are: whitespace collapsed, lower case. An
   // empty q (or only spaces) matches every name.
   const typed = (query.q ?? "").normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
-  const comparable = sql`lower(regexp_replace(btrim(${p.name}), '\\s+', ' ', 'g'))`;
+  // The stored name NFC too, so a decomposed stored name matches a composed
+  // typed one (SAA-260 step 2).
+  const comparable = sql`lower(regexp_replace(btrim(normalize(${p.name}, NFC)), '\\s+', ' ', 'g'))`;
   // Correlated on the outer people row. recordingVisibleTo names the recordings
   // table by its own name, so the join uses it unaliased.
   const seen = sql`(
