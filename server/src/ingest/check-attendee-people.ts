@@ -23,6 +23,9 @@
 //       member's private call, is ignored and the name resolved instead
 //   w   a group call: a voice named after a linked guest carries that guest's
 //       person (voice-names.ts copies it)
+//   m   (SAA-260 step 3) the reply's `people`: each Voice N's person, ids only;
+//       `them` the one guest's person on a call with no Voice rows, and no one
+//       with two guests or an unlinked guest; the same on a repeat (200)
 //   k   two captures sent at once naming the same new person: one person
 //   h   the host line: the host row is never linked; a guest named as the
 //       member's display name stays unlinked even though a person with that
@@ -249,6 +252,29 @@ async function main(): Promise<void> {
     const voice = async (label: string) => (await pool.query(`select display_name, person_id from speakers where recording_id = $1 and label = $2`, [recW, label])).rows[0];
     check("w: Voice 1, named Kim Example, carries Kim's person", !!kim && (await voice("Voice 1"))?.person_id === kim, `${JSON.stringify(await voice("Voice 1"))} vs ${kim}`);
     check("w: control: Voice 2, not named, has no person", (await voice("Voice 2"))?.person_id === null, JSON.stringify(await voice("Voice 2")));
+
+    // m. the reply's `people` (SAA-260 step 3): each voice's person, ids only.
+    type People = { voices: Array<{ voiceIndex: number; personId: string }>; them: string | null };
+    const peopleOf = (r: { json: Record<string, unknown> }): People | null => (r.json.people as People | undefined) ?? null;
+    const pw1 = peopleOf(rw);
+    check("m: the 201 reply maps Voice 1 to Kim's person, and only Voice 1 (Voice 2 is \"Not sure\")", !!kim && JSON.stringify(pw1?.voices) === JSON.stringify([{ voiceIndex: 1, personId: kim }]), JSON.stringify(pw1));
+    check("m: on a call split into voices, `them` is null", pw1?.them === null, JSON.stringify(pw1));
+    check("m: the reply carries `people`, ids only: no name anywhere in it", pw1 !== null && !JSON.stringify(rw.json).includes("Kim Example") && !JSON.stringify(rw.json).includes("Lee Example"), JSON.stringify(rw.json));
+    const rw2 = await post(pw);
+    check("m: a repeat (200) carries `people` too, the same as the 201's", rw2.status === 200 && pw1 !== null && JSON.stringify(peopleOf(rw2)) === JSON.stringify(pw1), `${rw2.status} ${JSON.stringify(rw2.json)}`);
+    const r11 = await post(payload(ONE_TO_ONE, { identity: answer(["Mo Map"]) }));
+    const mo = (await guestRow(String(r11.json.recordingId), "Mo Map"))?.person_id ?? null;
+    check("m: a 1:1 call maps `them` to its one guest's person, and no voices", !!mo && peopleOf(r11)?.them === mo && peopleOf(r11)?.voices.length === 0, JSON.stringify(r11.json.people));
+    const r12 = await post(payload(ONE_TO_ONE, { identity: answer(["Mo Map", "Pip Map"]) }));
+    check("m: control: a call with two guests and no voice rows maps `them` to no one", r12.status === 201 && peopleOf(r12)?.them === null, JSON.stringify(r12.json.people));
+    await plantPerson(fx.accountId, "Nia Twin");
+    await plantPerson(fx.accountId, "Nia Twin");
+    const r13 = await post(payload(ONE_TO_ONE, { identity: answer(["Nia Twin"]) }));
+    check("m: a guest the server left unlinked (two Nia Twins) maps `them` to no one", r13.status === 201 && peopleOf(r13)?.them === null, JSON.stringify(r13.json.people));
+    const pmerge = payload(GROUP, { voices: VOICES, identity: answer(["Ola Merge"]) });
+    const r14 = await post(pmerge);
+    const ola = (await guestRow(String(r14.json.recordingId), "Ola Merge"))?.person_id ?? null;
+    check("m: a call whose voices were never split (one guest named) maps `them` to that guest; the Mac refuses it (check-voice-prints 7)", !!ola && peopleOf(r14)?.them === ola && peopleOf(r14)?.voices.length === 0, JSON.stringify(r14.json.people));
 
     // k. two captures at once naming the same new person.
     const [k1, k2] = await Promise.all([post(payload(ONE_TO_ONE, { identity: answer(["Kit Example"]) })), post(payload(ONE_TO_ONE, { identity: answer(["Kit Example"]) }))]);
