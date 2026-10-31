@@ -55,11 +55,11 @@ export async function applyCalendarMatch(
 
   for (const invitee of match.invitees) {
     // People-row linking is a lookup only, never a create. An invitee who
-    // declined or never responded must not become a resolvable identity in
-    // the known-names picker (SAA-180), which already degrades with every
-    // person added — that signal comes from actual attendance, not an
-    // invite. personId stays null unless a person already exists for this
-    // email via the attendees/identity-prompt path.
+    // declined or never responded must not become a resolvable identity;
+    // that signal comes from attendance, not an invite. personId stays null
+    // unless a person already exists for this email: one the member named
+    // (ingest/invitee-names.ts) or one given this address there
+    // (SAA-260 step 2).
     const [person] = await executor
       .select({ id: schema.people.id })
       .from(schema.people)

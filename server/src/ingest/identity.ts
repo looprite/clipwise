@@ -25,13 +25,15 @@
 // wrong about Tyler, who is external. Unknown is a value this column can hold;
 // a guess is not.
 //
-// `person_id` is null, and that one is a constraint rather than a preference.
-// Linking to `people` means creating a person, and `people_account_email_idx`
-// is UNIQUE(account_id, email) — where NULLs are distinct in Postgres, so a
-// name-only person row would be created afresh on every capture and the same
-// human would fragment into a row per meeting. Name-only attendee rows are
-// reachable regardless: SAA-127's filter matches attendees.name OR the linked
-// people.name, and takes the first when there is no second.
+// `person_id` is written here only when the answer carries a guest's personId
+// and the caller may see that person (`chosen`, from attendee-people.ts
+// chosenPeople). Every other guest row is linked after this, in the same
+// transaction, by the same-name rule (SAA-260 step 2, ingest/attendee-people.ts
+// linkAttendeePeople): a person is reused when exactly one the caller may see
+// has the name, created when none does, and left unlinked when two or more do.
+// `people_account_email_idx` is UNIQUE(account_id, email) with NULLs distinct,
+// so it is the rule, not the index, that keeps a name-only person from being
+// created afresh on every capture. The host row is never linked.
 //
 // `is_host` is the one field the answer does not come from the typed names.
 // The prompt asks who the call was *with*; the person answering it was on the
@@ -335,18 +337,14 @@ export async function findRecordingForCapture(
 // half a mapping, where one track is named and the other is still `them`, is a
 // worse artifact than an honest pair of labels.
 //
-// **display_name, not person_id.** `speakers.person_id` exists and stays null,
-// because nothing here can produce a person to point it at safely. Creating
-// one is what the SAA-114 note warns about: `people_account_email_idx` is
-// UNIQUE(account_id, email) with no NULLS NOT DISTINCT, verified against the
-// live index definition, so a name-only person row is unique every time and
-// the same human forks into a row per meeting. Matching an existing person by
-// name instead is not a safer version of that — `people` has no uniqueness on
-// name, two people can share one, and the only rows in it came from the
-// backfill whose fabricated emails SAA-109 records. A typed name is a label
-// for one recording until something supplies a real key; a calendar address
-// (SAA-115) is that key, and person_id can be filled from it later without
-// redoing this.
+// **display_name, not person_id.** This writes `speakers.display_name` only.
+// The attendee rows carry the person (SAA-260 step 2, attendee-people.ts), but
+// `me` and `them` stay without one by decision (SAA-260 step 2, Jon, 10-31):
+// `me` is the member, never a guest person, and `them` can hold more than the
+// one guest named (someone unlisted, or voices merged back by
+// mergeVoicesIntoThem). speakers.person_id is set only by the voice-names copy
+// from the attendee row (voice-names.ts), and cleared by a correction on a
+// Voice row it unnames (applyIdentityCorrection).
 export type SpeakerMapping = {
   applied: Array<{ label: string; displayName: string }>;
   // Named but not written, with the reason — an already-named speaker, or a

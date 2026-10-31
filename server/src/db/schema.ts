@@ -469,11 +469,13 @@ export const invitees = pgTable(
     recordingId: uuid("recording_id")
       .notNull()
       .references(() => recordings.id, { onDelete: "cascade" }),
-    // Linked only to a person row that already exists (by email) — never
-    // created from an invitee. An invited-but-declined/never-joined person
-    // must not become a resolvable identity in the known-names picker
-    // (SAA-180), which already degrades with every person added; that
-    // signal should keep coming from actual attendance, not an invite.
+    // A person is never created from a calendar invitee alone: the calendar
+    // match (ingest/calendar-match.ts) links only to a person that already
+    // exists, by email. An invited-but-declined/never-joined person must not
+    // become a resolvable identity; that signal comes from attendance. People
+    // are created when the member names them: an invitee's address with a
+    // typed name (ingest/invitee-names.ts, SAA-221), or a guest name at ingest
+    // (ingest/attendee-people.ts, SAA-260 step 2).
     personId: uuid("person_id").references(() => people.id, {
       onDelete: "set null",
     }),
