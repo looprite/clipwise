@@ -11,6 +11,13 @@
 // clip of the host talking alone, diarized the same way, to find the
 // dropped voice on the tap track that's really the host's own leakage.
 //
+// With CLIPWISE_SAVE_HOST_PRINT=1 in the environment (SAA-260 step 3: the
+// recorder sets it only while voice prints are on), that host reference is
+// also written to host-print-<stem>.json beside the output, mode 600: the
+// member's own print, for the recorder's store on this Mac. Without it, or
+// when no reference could be built, no such file is written. The sidecar is
+// unchanged either way.
+//
 // No network, ever. `ModelHub.offlineMode = true` is set before the models
 // are loaded — with it on, a missing or revision-mismatched cache throws a
 // typed error instead of FluidAudio silently reaching HuggingFace (or, worse,
@@ -73,6 +80,27 @@ if arguments.count == 2, arguments[1] == "--check-clip-exclusion" {
         let ok = got.count == c.expected.count
             && zip(got, c.expected).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
         print("\(ok ? "PASS" : "FAIL") \(c.name): got \(got)")
+        if !ok { failures += 1 }
+    }
+    print("\n\(cases.count - failures)/\(cases.count) passed")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// Regression check for hostPrintPath (SAA-260 step 3): no models, no audio.
+//
+// Usage: diarize --check-host-print-path
+if arguments.count == 2, arguments[1] == "--check-host-print-path" {
+    let cases: [(name: String, output: String, expected: String?)] = [
+        ("the sidecar's own name", "/d/diarize-2026-10-31T10-00-00Z.json", "/d/host-print-2026-10-31T10-00-00Z.json"),
+        ("the early run's name (.json.early)", "/d/diarize-2026-10-31T10-00-00Z.json.early", "/d/host-print-2026-10-31T10-00-00Z.json"),
+        ("control: a name not starting diarize- gets no host print", "/d/other-2026-10-31T10-00-00Z.json", nil),
+        ("control: a name not ending .json gets no host print", "/d/diarize-2026-10-31T10-00-00Z.txt", nil),
+    ]
+    var failures = 0
+    for c in cases {
+        let got = hostPrintPath(forOutput: c.output)
+        let ok = got == c.expected
+        print("\(ok ? "PASS" : "FAIL") \(c.name)\(ok ? "" : " — got \(got ?? "nil"), expected \(c.expected ?? "nil")")")
         if !ok { failures += 1 }
     }
     print("\n\(cases.count - failures)/\(cases.count) passed")
@@ -212,6 +240,46 @@ func writeSidecar(_ sidecar: DiarizeSidecar) {
         return
     }
     try? data.write(to: URL(fileURLWithPath: outputPath))
+}
+
+// Where the member's own print goes for a given sidecar path (SAA-260 step
+// 3): diarize-<stem>.json or diarize-<stem>.json.early ->
+// host-print-<stem>.json in the same folder. Anything else -> nil, and no
+// print is written.
+func hostPrintPath(forOutput output: String) -> String? {
+    let url = URL(fileURLWithPath: output)
+    var name = url.lastPathComponent
+    if name.hasSuffix(".early") { name = String(name.dropLast(".early".count)) }
+    guard name.hasPrefix("diarize-"), name.hasSuffix(".json") else { return nil }
+    let stem = name.dropFirst("diarize-".count).dropLast(".json".count)
+    guard !stem.isEmpty else { return nil }
+    return url.deletingLastPathComponent().appendingPathComponent("host-print-\(stem).json").path
+}
+
+struct HostPrintOut: Codable {
+    let model: String
+    let modelRevision: String
+    let seconds: Double
+    let embedding: [Float]
+}
+
+// Written only when CLIPWISE_SAVE_HOST_PRINT=1, mode 600. A failure is logged
+// and changes nothing else: the sidecar is still written.
+func writeHostPrint(_ hostPrint: HostPrintOut) {
+    guard ProcessInfo.processInfo.environment["CLIPWISE_SAVE_HOST_PRINT"] == "1" else { return }
+    guard let path = hostPrintPath(forOutput: outputPath) else {
+        FileHandle.standardError.write("diarize: host print — output name not diarize-<stem>.json, not written\n".data(using: .utf8)!)
+        return
+    }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    guard let data = try? encoder.encode(hostPrint),
+          FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600])
+    else {
+        FileHandle.standardError.write("diarize: host print — could not write it\n".data(using: .utf8)!)
+        return
+    }
+    FileHandle.standardError.write("diarize: host print written (\(String(format: "%.1f", hostPrint.seconds))s of mic audio)\n".data(using: .utf8)!)
 }
 
 func fail(_ message: String) -> Never {
@@ -518,6 +586,12 @@ do {
                 // Combined, not "take the longest" (see combinedEmbedding's
                 // own comment) — the fix this whole block exists for.
                 hostEmbedding = combinedEmbedding(restrictedVoices)
+                // The member's own print (SAA-260 step 3), only with the flag.
+                if let hostEmbedding {
+                    writeHostPrint(HostPrintOut(
+                        model: "fluidaudio-community-1", modelRevision: modelRevision,
+                        seconds: restrictedSeconds, embedding: hostEmbedding))
+                }
             } else {
                 FileHandle.standardError.write(
                     "diarize: host reference — too little tap-silent mic audio, skipping host-echo check\n"
