@@ -248,8 +248,12 @@ const CASES = [
         const m = startBody.indexOf('buildManifest(');
         const w = startBody.indexOf('fs.writeFileSync(paths.manifest');
         return g >= 0 && r > g && m > r && w > m; }],
-    ['builder: the capture body sends the manifest\'s stamp as notice', () =>
-        /notice: manifest\.notice\s*\?\s*\{ version: manifest\.notice\.version, acknowledgedAt: manifest\.notice\.acknowledged_at \}/.test(SRC)],
+    // The builder lives in capture-payload.js since SAA-260 step 3; before that,
+    // in main.js.
+    ['builder: the capture body sends the manifest\'s stamp as notice', () => {
+        const payloadPath = path.join(__dirname, 'capture-payload.js');
+        const builder = fs.existsSync(payloadPath) ? fs.readFileSync(payloadPath, 'utf8') : SRC;
+        return /notice: manifest\.notice\s*\?\s*\{ version: manifest\.notice\.version, acknowledgedAt: manifest\.notice\.acknowledged_at \}/.test(builder); }],
 
     // 6. first-run setup and the rest of SAA-198 step 4
     ['setup: the five screens, in order: notice, address, sign-in, permissions, Use Clipwise in Claude', () =>
