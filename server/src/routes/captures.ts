@@ -38,6 +38,10 @@
 // request that applies an answer, a correction or inviteeNames links anything,
 // so a plain retry creates no person. A correction then deletes a person step 2
 // made that nothing points at any more.
+// Both replies, 201 and 200, carry `people`: each Voice N's person and, with no
+// Voice rows, the one guest's for `them` (ingest/attendee-people.ts
+// voicePeopleFor). Ids only. The recorder's voice-print store on the Mac
+// enrols from it (SAA-260 step 3); nothing about a voice comes back.
 // "Same content" is a SHA-256 of the segments as sent, without their voice indexes
 // (metadata.capture.content_hash).
 //
@@ -74,6 +78,8 @@ import {
   hostKeysForCapture,
   linkAttendeePeople,
   lockNames,
+  voicePeopleFor,
+  type VoicePeople,
 } from "../ingest/attendee-people.js";
 import { applyVoiceNames, storeVoiceNamesMetadata, voiceNamesAlreadyApplied, type VoiceNamesAnswer } from "../ingest/voice-names.js";
 import { countObservedFidelity, sourceFidelitySchema } from "../lib/fidelity.js";
@@ -258,8 +264,8 @@ type Stored = {
 
 // What happens once a capture is stored and its job committed: the recorder is
 // told, then the worker is woken in this process. Ids only in the log.
-function afterStore(res: Response, stored: Stored, jobId: string | null, matchJobId: string | null): void {
-  res.status(201).json({ created: true, ...stored });
+function afterStore(res: Response, stored: Stored, people: VoicePeople, jobId: string | null, matchJobId: string | null): void {
+  res.status(201).json({ created: true, ...stored, people });
   logQueued(jobId, stored.recordingId, "extract");
   logQueued(matchJobId, stored.recordingId, "match");
   wakeWorker();
@@ -532,7 +538,8 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       const dropped = await dropReleasedPeople(tx, ctx.accountId, released);
       const peopleLog = linked ? describeLinking(linked, dropped) : null;
       const reextractJobId = namesWritten ? await enqueueReextractForLateNames(tx, existing) : null;
-      return { kind: "repeat" as const, recordingId: existing.id, identityApplied, voiceNamesApplied, reextractJobId, inviteeNamesLog, peopleLog };
+      const people = await voicePeopleFor(tx, existing.id);
+      return { kind: "repeat" as const, recordingId: existing.id, identityApplied, voiceNamesApplied, reextractJobId, inviteeNamesLog, peopleLog, people };
     }
 
     const [transcript] = await tx
@@ -643,6 +650,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       matchJobId,
       inviteeNamesLog,
       peopleLog,
+      people: await voicePeopleFor(tx, recording.id),
       stored: {
         recordingId: recording.id,
         transcriptId: transcript.id,
@@ -658,10 +666,10 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
   if (outcome.inviteeNamesLog) console.log(`invitee-names: recording=${outcome.kind === "created" ? outcome.stored.recordingId : outcome.recordingId} ${outcome.inviteeNamesLog}`);
   if (outcome.peopleLog) console.log(`attendee-people: recording=${outcome.kind === "created" ? outcome.stored.recordingId : outcome.recordingId} ${outcome.peopleLog}`);
   if (outcome.kind === "created") {
-    afterStore(res, outcome.stored, outcome.jobId, outcome.matchJobId);
+    afterStore(res, outcome.stored, outcome.people, outcome.jobId, outcome.matchJobId);
     return;
   }
-  res.status(200).json({ created: false, recordingId: outcome.recordingId, identityApplied: outcome.identityApplied, voiceNamesApplied: outcome.voiceNamesApplied });
+  res.status(200).json({ created: false, recordingId: outcome.recordingId, identityApplied: outcome.identityApplied, voiceNamesApplied: outcome.voiceNamesApplied, people: outcome.people });
   logQueued(outcome.reextractJobId, outcome.recordingId, "re_extract");
   if (outcome.reextractJobId) wakeWorker();
 });
