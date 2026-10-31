@@ -70,6 +70,18 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
     note: "the caller's own calendar event at a capture's start time (SAA-221): its title, the names of invitees a person record visible to the caller names, and the other invitees' addresses; never the owner's own addresses; writes nothing",
   },
 
+  // The identity window's questions (SAA-260 step 1, routes/capture-people.ts).
+  "GET /captures/me": {
+    access: "member",
+    requires: "capture",
+    note: "the caller's own account_members.display_name, trimmed, or null when it is empty or holds an @; nothing else",
+  },
+  "GET /captures/people": {
+    access: "member",
+    requires: "capture",
+    note: "people personVisibleTo allows whose name holds ?q=, most recently seen on a recording the caller can see first, at most 10; id and name only, never an address; writes nothing",
+  },
+
   // The recorder's own captures (SAA-227, 10-11): a capture token for reads too,
   // and only the caller's own capture; anyone else's is the same 404 as one that
   // is not there.
