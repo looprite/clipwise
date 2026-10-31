@@ -5,11 +5,11 @@
 <!-- The voice prints opt-in screen (SAA-260 step 3, SAA-196's 10-08 decision):
      what is stored and about whom, that some places require consent from the
      people on the call, and that it can be turned off with the prints deleted.
-     Off by default; opened only from the tray's "Recognise voices…".
+     Off by default; opened only from the tray's "Recognize voices…".
 
-     Turning off deletes the prints kept for recognising people
-     (voice-prints/), not the per-voice measurements each recording's diarize
-     file keeps until that recording is deleted; the statement says so.
+     Turning off deletes the voice prints (voice-prints/). Recordings are not
+     affected: each keeps its own files, the diarize file's per-voice
+     measurements included, until that recording is deleted.
 
      The statement below is version 1 (voice-prints.js STATEMENT_VERSION): change
      its words and bump both together. Turning on sends the version shown here,
@@ -18,7 +18,7 @@
      Loaded from file:// with nodeIntegration, like the other windows: it ships
      inside the bundle and loads no remote content. Every name from the data is
      put on the page with textContent. -->
-<title>Recognise voices</title>
+<title>Recognize voices</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -53,9 +53,9 @@
     flex-direction: column;
   }
   main { flex: 1 1 auto; overflow-y: auto; padding: 18px 22px 8px; }
-  h1 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
-  h1 .state { color: var(--muted); font-weight: 400; }
   p { margin: 0 0 10px; }
+  ul { margin: 0 0 14px; padding-left: 20px; }
+  li { margin: 0 0 6px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
   h2 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 4px 0 8px; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 0; border-top: 1px solid var(--border); }
@@ -73,11 +73,13 @@
 </head>
 <body>
 <main>
-  <h1>Recognise voices <span class="state" id="state">(off)</span></h1>
   <div id="statement">
-    <p>When this is on, Clipwise keeps a voice print (a set of numbers made from a person's voice) for each person you name on a call, and one for you from your microphone. Prints stay on this Mac. They are never sent to the Clipwise server or your team. For now Clipwise only measures how well it would recognise people; it doesn't name anyone yet.</p>
-    <p>A voice print is a biometric identifier. Some states and countries, Illinois for one, require each person's written consent before their voice print is kept. You're responsible for knowing the recording and biometric laws where you record, and for getting consent where it's needed.</p>
-    <p>You can delete one person's print here at any time. Turn this off to delete every voice print Clipwise has kept for recognising people. Each recording also keeps its own voice measurements until you delete that recording.</p>
+    <p>Clipwise learns the voices of people you talk to, so it can tell you who was on a call. It starts naming people once it's reliable.</p>
+    <ul>
+      <li>Keeps a voice print for you and each person you name, on this Mac only. Never uploaded.</li>
+      <li>Some places require the other person's consent. That's up to you.</li>
+      <li>Turn it off anytime to delete all voice prints. Your recordings aren't affected.</li>
+    </ul>
   </div>
   <div id="prints" hidden>
     <h2>Voice prints on this Mac</h2>
@@ -98,7 +100,6 @@
 
   function render(data) {
     const on = !!(data && data.enabled);
-    $('state').textContent = on ? '(on)' : '(off)';
     $('prints').hidden = !on;
     $('on').hidden = on;
     $('later').hidden = on;

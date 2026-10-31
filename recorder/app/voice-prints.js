@@ -5,7 +5,8 @@
 // here enrols, matches or logs. Turning it off deletes every print kept here
 // for recognising people (the store, the score log and any waiting host
 // print). It does not touch the per-voice embeddings each recording's diarize
-// file keeps until that recording is deleted; the screen says so.
+// file keeps until that recording is deleted; the screen says recordings
+// aren't affected.
 //
 // Everything lives in SUPPORT_DIR/voice-prints/ (folder mode 700, files 600):
 //   setting.json   { enabled, statementVersion, consentedAt | turnedOffAt },
