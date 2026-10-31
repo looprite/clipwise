@@ -219,6 +219,42 @@ export async function dropReleasedPeople(tx: Tx, accountId: string, personIds: s
   return deleted.length;
 }
 
+// The recording's voices and the people they are (SAA-260 step 3), for the
+// recorder's voice-print store on the Mac: ids only, never a name.
+//   voices  each Voice N speaker row with a person (the voice-names copy from
+//           the attendee row, voice-names.ts), by its index
+//   them    when the recording has no Voice N rows: the person of its one
+//           guest attendee, when there is exactly one guest and that guest is
+//           linked; otherwise null. Whether `them` is one voice is the Mac's
+//           to judge from its diarize file (it refuses a merged `them`).
+export type VoicePeople = { voices: Array<{ voiceIndex: number; personId: string }>; them: string | null };
+const VOICE_INDEX = /^Voice (\d+)$/;
+export async function voicePeopleFor(executor: typeof db | Tx, recordingId: string): Promise<VoicePeople> {
+  const speakers = await executor
+    .select({ label: schema.speakers.label, personId: schema.speakers.personId })
+    .from(schema.speakers)
+    .where(eq(schema.speakers.recordingId, recordingId));
+  const voices: VoicePeople["voices"] = [];
+  let anyVoiceRow = false;
+  for (const s of speakers) {
+    const m = VOICE_INDEX.exec(s.label ?? "");
+    if (!m) continue;
+    anyVoiceRow = true;
+    if (s.personId) voices.push({ voiceIndex: Number(m[1]), personId: s.personId });
+  }
+  voices.sort((a, b) => a.voiceIndex - b.voiceIndex);
+  let them: string | null = null;
+  if (!anyVoiceRow && speakers.some((s) => s.label === "them")) {
+    const guests = await executor
+      .select({ name: schema.attendees.name, personId: schema.attendees.personId })
+      .from(schema.attendees)
+      .where(and(eq(schema.attendees.recordingId, recordingId), eq(schema.attendees.isHost, false)));
+    const named = guests.filter((g) => nameKey(g.name) !== null);
+    if (named.length === 1 && named[0].personId) them = named[0].personId;
+  }
+  return { voices, them };
+}
+
 // Counts only: a name never goes in a log.
 export function describeLinking(l: AttendeeLinking, dropped = 0): string {
   return `created=${l.created} reused=${l.reused} left_unlinked=${l.leftUnlinked} host_named=${l.hostNamed}${dropped ? ` dropped=${dropped}` : ""}`;
