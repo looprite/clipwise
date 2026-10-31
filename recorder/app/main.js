@@ -1272,7 +1272,7 @@ function registerMeetingsIpc() {
 
 // --- voice prints, watch only (SAA-260 step 3) ------------------------------
 //
-// Off by default; the tray's "Recognise voices…" opens the opt-in screen. While
+// Off by default; the tray's "Recognize voices…" opens the opt-in screen. While
 // on: after a capture's pipeline, the member's own print diarize wrote is taken
 // into the store and every voice is scored against the prints (voice-match.js,
 // logged only, nobody named); after each send, the server's person ids enrol
@@ -1357,7 +1357,7 @@ function openVoicePrintsWindow() {
         height: 470,
         minWidth: 440,
         minHeight: 360,
-        title: 'Recognise voices',
+        title: 'Recognize voices',
         show: false,
         webPreferences: { nodeIntegration: true, contextIsolation: false },
     });
@@ -1423,7 +1423,7 @@ function registerVoicePrintsIpc() {
         const { response } = await dialog.showMessageBox(parent(), {
             type: 'warning', buttons: ['Cancel', 'Turn off and delete prints'], defaultId: 0, cancelId: 0,
             message: 'Turn off voice recognition?',
-            detail: 'Every voice print Clipwise has kept for recognising people is deleted. Each recording keeps its own voice measurements until you delete that recording.',
+            detail: 'All voice prints are deleted. Your recordings aren’t affected.',
         });
         if (response !== 1) return;
         try {
@@ -1929,7 +1929,7 @@ function renderTray() {
     const meeting = lastMeeting(OUTDIR, undefined, captureStateOpts());
     items.push({ type: 'separator' });
     items.push({ label: 'Recent meetings…', click: openMeetingsWindow });
-    items.push({ label: 'Recognise voices…', click: openVoicePrintsWindow });
+    items.push({ label: 'Recognize voices…', click: openVoicePrintsWindow });
     if (meeting) {
         items.push({
             label: saveTranscriptLabel(meeting),
