@@ -12,9 +12,12 @@
 // Also here: the addresses that are the owner's own, which neither the preview
 // nor this ever names.
 
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import type { AccessContext } from "../access/context.js";
 import { normalizeEmail } from "../auth/membership.js";
 import { db, schema } from "../db/index.js";
+import { decideCreate, nameKey, normalizeName } from "../routes/capture-people.js";
+import { sameNamePeople } from "./attendee-people.js";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -49,6 +52,9 @@ export async function ownerAddressesFor(executor: typeof db | Tx, memberId: stri
 
 export type InviteeNamesApplication = {
   created: number;
+  // A person with no address and the typed name, the only one the caller may
+  // see, now given this address (SAA-260 step 2).
+  adopted: number;
   // A person that existed with no name, now named.
   named: number;
   // A person that existed with a name already: left as it is.
@@ -59,35 +65,59 @@ export type InviteeNamesApplication = {
   attendeesLinked: number;
 };
 
-// For each pair: the person with that address in the account, created when
-// there is none, named when it has no name, never renamed. Then this
-// recording's invitee row for the address points at it, and so does the guest
-// attendee row carrying the same name, the one the prompt added when the name
-// was typed. That link also puts the person on this (private) recording at
-// once, so it is not shown to other members as an unattached person
+// For each pair: the person with that address in the account. When there is
+// none, the same-name rule over the people the caller may see that have no
+// address (SAA-260 step 2): exactly one, and that person gets the address and
+// is used (`adopted`); none or two or more, a person is created, as before.
+// A person found by address is named when it has no name, never renamed. Then
+// this recording's invitee row for the address points at it, and so does the
+// guest attendee row carrying the same name, the one the prompt added when the
+// name was typed. That link also puts the person on this (private) recording
+// at once, so it is not shown to other members as an unattached person
 // (access/visibility.ts personVisibleTo).
+//
+// Names are written through normalizeName and compared through nameKey
+// (routes/capture-people.ts). The caller holds attendee-people.ts lockNames
+// for these names and addresses.
 //
 // Idempotent: the same pairs again write nothing new.
 export async function applyInviteeNames(
   executor: typeof db | Tx,
-  accountId: string,
+  ctx: AccessContext,
   recordingId: string,
   owner: Set<string>,
   pairs: InviteeName[],
 ): Promise<InviteeNamesApplication> {
-  const app: InviteeNamesApplication = { created: 0, named: 0, kept: 0, refused: 0, inviteesLinked: 0, attendeesLinked: 0 };
+  const accountId = ctx.accountId;
+  const app: InviteeNamesApplication = { created: 0, adopted: 0, named: 0, kept: 0, refused: 0, inviteesLinked: 0, attendeesLinked: 0 };
   for (const pair of pairs) {
     const email = normalizeEmail(pair.email);
-    const name = pair.name.trim();
-    if (!name || name.includes("@") || !email.includes("@") || owner.has(email)) {
+    const name = normalizeName(pair.name);
+    // A name with an @ is refused, as before; normalizeName refuses one too.
+    if (!name || pair.name.includes("@") || !email.includes("@") || owner.has(email)) {
       app.refused += 1;
       continue;
     }
+    const key = nameKey(name) as string;
     const lowerEmail = sql`lower(${schema.people.email})`;
     let [person] = await executor
       .select({ id: schema.people.id, name: schema.people.name })
       .from(schema.people)
       .where(and(eq(schema.people.accountId, accountId), eq(lowerEmail, email)));
+    if (!person) {
+      const decision = decideCreate(await sameNamePeople(executor, ctx, name, { noEmailOnly: true }));
+      if (decision.kind === "reuse") {
+        const [adopted] = await executor
+          .update(schema.people)
+          .set({ email, updatedAt: new Date() })
+          .where(and(eq(schema.people.id, decision.personId), isNull(schema.people.email)))
+          .returning({ id: schema.people.id, name: schema.people.name });
+        if (adopted) {
+          person = adopted;
+          app.adopted += 1;
+        }
+      }
+    }
     if (!person) {
       const [inserted] = await executor
         .insert(schema.people)
@@ -107,7 +137,7 @@ export async function applyInviteeNames(
       await executor.update(schema.people).set({ name, updatedAt: new Date() }).where(eq(schema.people.id, person.id));
       person = { ...person, name };
       app.named += 1;
-    } else if (person.name.trim().toLowerCase() !== name.toLowerCase()) {
+    } else if (nameKey(person.name) !== key) {
       app.kept += 1;
     }
     if (!person) continue;
@@ -121,20 +151,16 @@ export async function applyInviteeNames(
 
     // Only the attendee the member named: the person's name and the typed one
     // agree. A person kept under another name is linked by address only.
-    if ((person.name ?? "").trim().toLowerCase() === name.toLowerCase()) {
-      const attendees = await executor
-        .update(schema.attendees)
-        .set({ personId: person.id })
-        .where(
-          and(
-            eq(schema.attendees.recordingId, recordingId),
-            eq(schema.attendees.isHost, false),
-            isNull(schema.attendees.personId),
-            eq(sql`lower(trim(${schema.attendees.name}))`, name.toLowerCase()),
-          ),
-        )
-        .returning({ id: schema.attendees.id });
-      app.attendeesLinked += attendees.length;
+    if (nameKey(person.name) === key) {
+      const unlinked = await executor
+        .select({ id: schema.attendees.id, name: schema.attendees.name })
+        .from(schema.attendees)
+        .where(and(eq(schema.attendees.recordingId, recordingId), eq(schema.attendees.isHost, false), isNull(schema.attendees.personId)));
+      const ids = unlinked.filter((a) => nameKey(a.name) === key).map((a) => a.id);
+      if (ids.length > 0) {
+        await executor.update(schema.attendees).set({ personId: person.id }).where(inArray(schema.attendees.id, ids));
+        app.attendeesLinked += ids.length;
+      }
     }
   }
   return app;
@@ -143,7 +169,7 @@ export async function applyInviteeNames(
 // Counts only: an address or a name never goes in a log.
 export function describeInviteeNames(app: InviteeNamesApplication): string {
   return (
-    `created=${app.created} named=${app.named} kept=${app.kept} refused=${app.refused} ` +
+    `created=${app.created} adopted=${app.adopted} named=${app.named} kept=${app.kept} refused=${app.refused} ` +
     `invitees_linked=${app.inviteesLinked} attendees_linked=${app.attendeesLinked}`
   );
 }

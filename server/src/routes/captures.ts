@@ -31,6 +31,13 @@
 // (ingest/invitee-names.ts; idempotent). They are never stored in the
 // recording's metadata, and only their counts are logged: they pair an address
 // with a name.
+// Guest attendee rows are linked to people (SAA-260 step 2,
+// ingest/attendee-people.ts) in the same transaction, in this order: the
+// answer's own personIds, then inviteeNames by address, then the same-name rule
+// for the rest; then voice names, which copy the attendee's person. Only a
+// request that applies an answer, a correction or inviteeNames links anything,
+// so a plain retry creates no person. A correction then deletes a person step 2
+// made that nothing points at any more.
 // "Same content" is a SHA-256 of the segments as sent, without their voice indexes
 // (metadata.capture.content_hash).
 //
@@ -60,6 +67,14 @@ import {
 } from "../ingest/identity.js";
 import { speakerFingerprintHash } from "../extract/extract.js";
 import { applyInviteeNames, describeInviteeNames, ownerAddressesFor } from "../ingest/invitee-names.js";
+import {
+  chosenPeople,
+  describeLinking,
+  dropReleasedPeople,
+  hostKeysForCapture,
+  linkAttendeePeople,
+  lockNames,
+} from "../ingest/attendee-people.js";
 import { applyVoiceNames, storeVoiceNamesMetadata, voiceNamesAlreadyApplied, type VoiceNamesAnswer } from "../ingest/voice-names.js";
 import { countObservedFidelity, sourceFidelitySchema } from "../lib/fidelity.js";
 import { asyncHandler, HttpError, parseBody } from "../lib/http.js";
@@ -99,7 +114,13 @@ const identitySchema = z.object({
     .object({ name: z.string().max(256).nullable().optional(), source: z.string().max(64).optional() })
     .nullable()
     .optional(),
-  guests: z.array(z.object({ name: z.string().max(256).nullable().optional() })).max(50).nullable().optional(),
+  // personId (SAA-260 step 2): used only when the caller may see that person
+  // (ingest/attendee-people.ts chosenPeople); otherwise the name is resolved.
+  guests: z
+    .array(z.object({ name: z.string().max(256).nullable().optional(), personId: z.string().uuid().optional() }))
+    .max(50)
+    .nullable()
+    .optional(),
   scope: z.enum(["work", "personal"]).nullable().optional(),
   corrects: z.string().max(64).optional(),
 });
@@ -366,8 +387,17 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
   const nameInvitees = async (tx: Tx, recordingId: string): Promise<string | null> => {
     if (inviteeNames.length === 0) return null;
     const owner = await ownerAddressesFor(tx, ctx.memberId, ctx.email);
-    return describeInviteeNames(await applyInviteeNames(tx, ctx.accountId, recordingId, owner, inviteeNames));
+    return describeInviteeNames(await applyInviteeNames(tx, ctx, recordingId, owner, inviteeNames));
   };
+  // The advisory locks for every name and address this request may create or
+  // reuse a person for, before any of it is looked up (attendee-people.ts).
+  const lockPeople = async (tx: Tx, extraNames: unknown[] = []): Promise<void> =>
+    lockNames(
+      tx,
+      ctx.accountId,
+      [...(identity?.guests ?? []).map((g) => g?.name), ...inviteeNames.map((p) => p.name), ...extraNames],
+      inviteeNames.map((p) => p.email),
+    );
   const slug = captureSlug(body.stem, body.captureId);
   const labelSet = new Set(kept.map((s) => s.track));
   const engine = body.engine;
@@ -448,19 +478,35 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       // request, and a repeat with the same segments writes nothing for it.
       let identityApplied = false;
       let namesWritten = false;
-      if (identity && identity.corrects !== undefined && !identityAlreadyApplied(existing.metadata, identity)) {
-        // A correction (SAA-258). Stale when the recording holds a different
-        // answer than the one it corrects: refused, and since this throws inside
-        // the transaction, nothing in this request is written.
-        if (identityCorrectionStale(existing.metadata, identity)) throw new HttpError(409, "identity_correction_stale");
+      const correcting = Boolean(identity && identity.corrects !== undefined && !identityAlreadyApplied(existing.metadata, identity));
+      const answering = Boolean(identity && !correcting && !identityAlreadyApplied(existing.metadata, identity));
+      // A correction (SAA-258). Stale when the recording holds a different
+      // answer than the one it corrects: refused, and since this throws inside
+      // the transaction, nothing in this request is written.
+      if (correcting && identity && identityCorrectionStale(existing.metadata, identity)) throw new HttpError(409, "identity_correction_stale");
+      const linking = correcting || answering || inviteeNames.length > 0;
+      let hostKeys = new Set<string>();
+      if (linking) {
+        // A correction can release the people its previous rows named, so those
+        // names are locked too.
+        const previousNames = correcting
+          ? (await tx.select({ name: schema.attendees.name }).from(schema.attendees).where(eq(schema.attendees.recordingId, existing.id))).map((r) => r.name)
+          : [];
+        await lockPeople(tx, previousNames);
+        const stored = (existing.metadata as { identity?: IdentityAnswer } | null)?.identity ?? null;
+        hostKeys = await hostKeysForCapture(tx, ctx.memberId, correcting || answering ? identity : stored);
+      }
+      let released: string[] = [];
+      if (correcting && identity) {
         const before = await speakerFingerprintHash(existing.id, tx);
-        await applyIdentityCorrection(tx, existing.id, identity);
+        const correction = await applyIdentityCorrection(tx, existing.id, identity, await chosenPeople(tx, ctx, identity, hostKeys));
+        released = correction.releasedPersonIds;
         identityApplied = true;
         // Extraction runs again only if what it reads changed: an unchanged
         // answer, saved again, queues nothing.
         namesWritten ||= (await speakerFingerprintHash(existing.id, tx)) !== before;
-      } else if (identity && !identityAlreadyApplied(existing.metadata, identity)) {
-        await applyIdentity(tx, existing.id, identity);
+      } else if (answering && identity) {
+        await applyIdentity(tx, existing.id, identity, await chosenPeople(tx, ctx, identity, hostKeys));
         const mapping = await applySpeakerNames(tx, existing.id, identity);
         await applyScope(tx, existing.id, identity);
         await storeIdentityMetadata(tx, existing.id, identity);
@@ -468,6 +514,10 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
         // Only a speaker name actually written changes what extraction would see.
         namesWritten ||= mapping.applied.length > 0;
       }
+      // Before voice names, so a voice named after a guest copies that guest's
+      // person (voice-names.ts).
+      const inviteeNamesLog = await nameInvitees(tx, existing.id);
+      const linked = linking ? await linkAttendeePeople(tx, ctx, existing.id, hostKeys) : null;
       // After identity, so a one-guest answer that merged the Voice rows back
       // leaves these names nothing to land on, as on the Mac. applyVoiceNames
       // keeps apply-voice-names' rules: an already-named voice is skipped unless
@@ -479,9 +529,10 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
         voiceNamesApplied = true;
         namesWritten ||= naming.applied.length > 0;
       }
-      const inviteeNamesLog = await nameInvitees(tx, existing.id);
+      const dropped = await dropReleasedPeople(tx, ctx.accountId, released);
+      const peopleLog = linked ? describeLinking(linked, dropped) : null;
       const reextractJobId = namesWritten ? await enqueueReextractForLateNames(tx, existing) : null;
-      return { kind: "repeat" as const, recordingId: existing.id, identityApplied, voiceNamesApplied, reextractJobId, inviteeNamesLog };
+      return { kind: "repeat" as const, recordingId: existing.id, identityApplied, voiceNamesApplied, reextractJobId, inviteeNamesLog, peopleLog };
     }
 
     const [transcript] = await tx
@@ -521,12 +572,21 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       );
     }
 
+    const linking = identity !== null || inviteeNames.length > 0;
+    let hostKeys = new Set<string>();
+    if (linking) {
+      await lockPeople(tx);
+      hostKeys = await hostKeysForCapture(tx, ctx.memberId, identity);
+    }
     if (identity) {
-      await applyIdentity(tx, recording.id, identity);
+      await applyIdentity(tx, recording.id, identity, await chosenPeople(tx, ctx, identity, hostKeys));
       await applySpeakerNames(tx, recording.id, identity);
       await applyScope(tx, recording.id, identity);
     }
     const inviteeNamesLog = await nameInvitees(tx, recording.id);
+    // After inviteeNames, so a guest named by address is not also given a
+    // name-only person; before voice names, which copy the attendee's person.
+    const peopleLog = linking ? describeLinking(await linkAttendeePeople(tx, ctx, recording.id, hostKeys)) : null;
 
     // The member's acknowledgement of that notice version, recorded the first time
     // a capture carries it. A later capture with the same version adds nothing,
@@ -582,6 +642,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       jobId,
       matchJobId,
       inviteeNamesLog,
+      peopleLog,
       stored: {
         recordingId: recording.id,
         transcriptId: transcript.id,
@@ -595,6 +656,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
 
   // After the commit, so a rolled-back request logs nothing. Counts only.
   if (outcome.inviteeNamesLog) console.log(`invitee-names: recording=${outcome.kind === "created" ? outcome.stored.recordingId : outcome.recordingId} ${outcome.inviteeNamesLog}`);
+  if (outcome.peopleLog) console.log(`attendee-people: recording=${outcome.kind === "created" ? outcome.stored.recordingId : outcome.recordingId} ${outcome.peopleLog}`);
   if (outcome.kind === "created") {
     afterStore(res, outcome.stored, outcome.jobId, outcome.matchJobId);
     return;
