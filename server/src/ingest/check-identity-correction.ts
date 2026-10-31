@@ -20,7 +20,16 @@
 //       first answer
 //   v   a group call with named voices: a correction that removes a guest
 //       unnames that guest's voice and keeps the others' names, including one
-//       whose name the answer sends with stray spaces
+//       whose name the answer sends with stray spaces. The unnamed voice's
+//       person_id is null afterwards; the others keep theirs (SAA-260 step 2)
+// SAA-260 step 2 (people):
+//   u   (above) the unchanged correction queues nothing while its guest row
+//       carries a person
+//   t   a typo corrected: the typo's person, made at ingest and now on nothing,
+//       is deleted; the corrected name gets a person
+//   x   control: a person removed from one call but on another is kept
+//   k   a kept name keeps its person, including one linked by address; a
+//       removed person with an address is kept
 //
 //   scripts/scratch-db.sh run check-identity-correction
 
@@ -122,6 +131,15 @@ async function main(): Promise<void> {
   const clearReextracts = async (rec: string): Promise<void> => {
     await pool.query(`delete from jobs where recording_id = $1 and kind = 're_extract'`, [rec]);
   };
+  // SAA-260 step 2: the people the rows point at.
+  const guestPerson = async (rec: string, name: string): Promise<string | null> =>
+    (await pool.query(`select person_id from attendees where recording_id = $1 and not is_host and btrim(name) = $2`, [rec, name])).rows[0]?.person_id ?? null;
+  const voicePerson = async (rec: string, label: string): Promise<string | null> =>
+    (await pool.query(`select person_id from speakers where recording_id = $1 and label = $2`, [rec, label])).rows[0]?.person_id ?? null;
+  const personExists = async (id: string): Promise<boolean> =>
+    (await pool.query(`select 1 from people where id = $1`, [id])).rowCount === 1;
+  const personEmail = async (id: string): Promise<string | null> =>
+    (await pool.query(`select email from people where id = $1`, [id])).rows[0]?.email ?? null;
   const speaker = async (rec: string, label: string): Promise<string | null> =>
     (await pool.query(`select display_name from speakers where recording_id = $1 and label = $2`, [rec, label])).rows[0]?.display_name ?? null;
   const findsByAttendee = async (rec: string, attendee: string): Promise<boolean> => {
@@ -171,6 +189,7 @@ async function main(): Promise<void> {
     const ru = await post({ ...pm, identity: answer(C, ["William Example"], "personal", B) });
     check("u: an unchanged correction is applied (200, identityApplied)", ru.status === 200 && ru.json.identityApplied === true, `${ru.status} ${JSON.stringify(ru.json)}`);
     check("u: control: it queues no re_extract (m queued one when the name changed)", (await reextracts(recm)) === 0, String(await reextracts(recm)));
+    check("u: while its guest row carries a person (SAA-260 step 2)", !!(await guestPerson(recm, "William Example")));
 
     // s. control: a correction of an answer the recording no longer holds.
     const beforeS = await snapshot(recm);
@@ -206,9 +225,51 @@ async function main(): Promise<void> {
     const recv = String(rv0.json.recordingId);
     const named = async () => (await pool.query(`select label, display_name from speakers where recording_id = $1 and label ~ '^Voice [0-9]+$' order by label`, [recv])).rows.map((r) => `${r.label}=${r.display_name ?? "(unnamed)"}`).join(",");
     check("v: control: before the correction, Voice 1..3 are Ann, Bob and Cy", (await named()) === "Voice 1=Ann Example,Voice 2=Bob Example,Voice 3=Cy Example", await named());
+    check("v: control: before the correction, Bob's voice carries a person (SAA-260 step 2)", !!(await voicePerson(recv, "Voice 2")), String(await voicePerson(recv, "Voice 2")));
     const rv = await post({ ...pv, identity: answer(B, ["Ann Example", "  Cy Example  ", "Dee Example"], "work", A) });
     check("v: the correction is applied (200)", rv.status === 200 && rv.json.identityApplied === true, `${rv.status} ${JSON.stringify(rv.json)}`);
     check("v: Bob's voice is unnamed; Ann's and Cy's keep their names (Cy sent with stray spaces)", (await named()) === "Voice 1=Ann Example,Voice 2=(unnamed),Voice 3=Cy Example", await named());
+    check("v: Bob's unnamed voice has no person afterwards", (await voicePerson(recv, "Voice 2")) === null, String(await voicePerson(recv, "Voice 2")));
+    check("v: control: Ann's voice keeps Ann's person", !!(await voicePerson(recv, "Voice 1")) && (await voicePerson(recv, "Voice 1")) === (await guestPerson(recv, "Ann Example")), `${await voicePerson(recv, "Voice 1")} vs ${await guestPerson(recv, "Ann Example")}`);
+
+    // t. a typo corrected: the typo's person, made by step 2 and now on
+    // nothing, is deleted; the corrected name gets a person.
+    const pt = payload(ONE_TO_ONE, { identity: answer(A, ["Wren Typpo"], "work") });
+    const rt0 = await post(pt);
+    const rect = String(rt0.json.recordingId);
+    const typo = await guestPerson(rect, "Wren Typpo");
+    check("t: control: the typo got a person", !!typo && (await personExists(typo)), String(typo));
+    const rt = await post({ ...pt, identity: answer(B, ["Wren Typo"], "work", A) });
+    check("t: the correction is applied (200)", rt.status === 200 && rt.json.identityApplied === true, `${rt.status} ${JSON.stringify(rt.json)}`);
+    check("t: the corrected name is linked to a new person", !!(await guestPerson(rect, "Wren Typo")) && (await guestPerson(rect, "Wren Typo")) !== typo);
+    check("t: the typo's person is deleted", !(await personExists(typo as string)));
+
+    // x. control: a released person still on another call is kept.
+    const px1 = payload(ONE_TO_ONE, { identity: answer(A, ["Pat Example"], "work") });
+    const recx1 = String((await post(px1)).json.recordingId);
+    const recx2 = String((await post(payload(ONE_TO_ONE, { identity: answer(A, ["Pat Example"], "work") }))).json.recordingId);
+    const pat = await guestPerson(recx1, "Pat Example");
+    check("x: control: both calls' Pat Example are one person", !!pat && pat === (await guestPerson(recx2, "Pat Example")), `${pat} vs ${await guestPerson(recx2, "Pat Example")}`);
+    await post({ ...px1, identity: answer(B, ["Pam Example"], "work", A) });
+    check("x: Pat, removed from one call but still on the other, is kept", await personExists(pat as string));
+
+    // k. a kept name keeps its person, including one linked by address; a
+    // released person with an address is never deleted.
+    const pk = payload(ONE_TO_ONE, {
+      identity: answer(A, ["Kay Example", "Lee Example"], "work"),
+      inviteeNames: [{ email: `kay-${randomUUID().slice(0, 8)}@example.test`, name: "Kay Example" }],
+    });
+    const rk0 = await post(pk);
+    const reck = String(rk0.json.recordingId);
+    const kay = await guestPerson(reck, "Kay Example");
+    const lee = await guestPerson(reck, "Lee Example");
+    check("k: control: Kay is linked to a person with an address, Lee to one without", !!kay && !!lee && (await personEmail(kay)) !== null && (await personEmail(lee)) === null, `${kay} ${lee}`);
+    const { inviteeNames: _drop, ...pkNoInvitees } = pk;
+    await post({ ...pkNoInvitees, identity: answer(B, ["Kay Example", "Lee Example", "Mo Example"], "work", A) });
+    check("k: after a correction keeping both, Kay and Lee keep their people", (await guestPerson(reck, "Kay Example")) === kay && (await guestPerson(reck, "Lee Example")) === lee, `${await guestPerson(reck, "Kay Example")} ${await guestPerson(reck, "Lee Example")}`);
+    check("k: and the added Mo Example gets one", !!(await guestPerson(reck, "Mo Example")));
+    await post({ ...pkNoInvitees, identity: answer(C, ["Lee Example", "Mo Example"], "work", B) });
+    check("k: a correction removing Kay keeps Kay's person, which has an address", await personExists(kay as string));
   } finally {
     server.close();
     await dropAccount(fx);

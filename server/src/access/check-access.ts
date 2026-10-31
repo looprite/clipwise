@@ -1243,7 +1243,7 @@ async function main(): Promise<void> {
     const emailsB = (peopleB.json?.people ?? []).map((p: any) => p.email);
     const peopleA = await http("GET", `/accounts/${acc}/people`, { token: A.token });
     const emailsA = (peopleA.json?.people ?? []).map((p: any) => p.email);
-    record(!emailsB.includes(people.hidden.email) && emailsB.includes(people.shared.email) && emailsB.includes(people.free.email), "people: someone seen only on another member's private call is not listed; people on shared calls and unattached people are", `${emailsB.filter((e: string) => e.endsWith(`-${tag}@clipwise.test`)).length} listed`);
+    record(!emailsB.includes(people.hidden.email) && emailsB.includes(people.shared.email) && emailsB.includes(people.free.email), "people: someone seen only on another member's private call is not listed; people on shared calls and unattached people are", `${emailsB.filter((e: string | null) => (e ?? "").endsWith(`-${tag}@clipwise.test`)).length} listed`); // e ?? "": people made at ingest have no address (SAA-260 step 2)
     record(emailsA.includes(people.hidden.email), "people: the owner of that call does see them");
     record((await http("GET", `/accounts/${acc}/people/${people.hidden.id}`, { token: B.token })).status === 404, "people by id: the hidden person is 404");
 
@@ -1419,6 +1419,28 @@ async function main(): Promise<void> {
       );
       const extra = await http("GET", `/captures/people?q=x&email=y`, { token: capOf(B) });
       record(extra.status === 400, "capture people: a query parameter other than q is 400", `got ${extra.status}`);
+
+      // -- SAA-260 step 2: the stored name compared NFC --
+      const nfcDecomposed: string = `Nfc${tag} Jose\u0301`, nfcComposed: string = `Nfc${tag} Jos\u00e9`;
+      record(nfcDecomposed !== nfcComposed, "capture people: guard: the decomposed and composed raw strings differ", `${nfcDecomposed.length} / ${nfcComposed.length}`);
+      const nfcPerson = await person(nfcDecomposed);
+      const nfc = await search(B, nfcComposed);
+      record(
+        ids(nfc).includes(nfcPerson.id),
+        "capture people: a name stored decomposed is found by the same name typed composed (NFC)",
+        JSON.stringify(ids(nfc)),
+      );
+
+      // -- SAA-260 step 2: a person made at ingest on a private call --
+      const ingestName = `Ingest${tag} Private`;
+      const made = await capPost(A, capPayload({ identity: { identity_version: 2, answered_at: "2026-10-31T10:05:00.000Z", self: { name: `Alice ${tag}` }, guests: [{ name: ingestName }], scope: "work" } }));
+      const ingB = await search(B, ingestName);
+      const ingA = await search(A, ingestName);
+      record(
+        made.status === 201 && names(ingB).length === 0 && names(ingA).includes(ingestName),
+        "capture people: a person made at ingest on member A's private call is not found by member B; A finds them (control)",
+        `capture ${made.status}; B ${JSON.stringify(names(ingB))}; A ${JSON.stringify(names(ingA))}`,
+      );
     }
 
     // ---- account in the URL is not trusted ---------------------------------

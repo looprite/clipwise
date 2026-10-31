@@ -26,6 +26,9 @@
 //       person that had none; keeps a person's existing name; refuses the owner's
 //       addresses and a name with an @; a repeat writes nothing new. A later
 //       preview names the guest
+//   d   (SAA-260 step 2) no person has the invitee's address: exactly one
+//       person with no address and the typed name is given the address and
+//       reused; with two, a person is created with it, as before
 //   m   the recording's whole metadata holds neither "inviteeNames" nor an @
 //       (the capture's identity answer has none of its own). Control: the same
 //       scan finds both planted in a copy
@@ -309,7 +312,12 @@ async function main(): Promise<void> {
     const att = async () => (await pool.query(`select name, person_id from attendees where recording_id = $1 and not is_host order by name`, [rec])).rows as Array<{ name: string; person_id: string | null }>;
     const atts = await att();
     check("c: the guest attendee row named Guest Example is linked to that person", atts.find((a) => a.name === "Guest Example")?.person_id === guestRows[0]?.id, JSON.stringify(atts));
-    check("c: the Mike Example attendee is not linked (he was named once as someone else, and kept)", atts.find((a) => a.name === "Mike Example")?.person_id === null, JSON.stringify(atts));
+    // Changed in SAA-260 step 2: the pair naming Mike's address "Michael Other"
+    // still links nothing (his person keeps its name), but the guest row "Mike
+    // Example" is then linked by the same-name rule: exactly one person the
+    // caller may see has that name (Mike, unattached).
+    const mikeId = (await person(MIKE))[0]?.id;
+    check("c: the Mike Example attendee is linked by name to Mike (same-name rule), not through the pair that named his address as someone else", !!mikeId && atts.find((a) => a.name === "Mike Example")?.person_id === mikeId, JSON.stringify(atts));
     check("c: a person with no name gets the typed one", (await person(NONAME))[0]?.name === "Nora Example", JSON.stringify(await person(NONAME)));
     check("c: a person with a name keeps it", (await person(MIKE))[0]?.name === "Mike Example", JSON.stringify(await person(MIKE)));
     const ownerRows = [...(await person(SHARED)), ...(await person(CAL)), ...(await person(SIGN_IN))];
@@ -331,6 +339,29 @@ async function main(): Promise<void> {
 
     const later = await preview();
     check("c: a later preview names the guest, and no longer by address", later.p.named.includes("Guest Example") && !later.p.unnamed.includes(GUEST) && !later.raw.includes(GUEST), later.raw);
+
+    check("c: exactly one person carries the guest's typed name (SAA-260 step 2: no name-only one beside it)", (await pool.query(`select count(*)::int as n from people where account_id = $1 and lower(btrim(name)) = 'guest example'`, [fx.accountId])).rows[0].n === 1);
+
+    // d. the same-name rule in invitee-names (SAA-260 step 2): no person has
+    // the address, so the people with no address and the typed name decide.
+    const namedCount = async (name: string) =>
+      (await pool.query(`select count(*)::int as n from people where account_id = $1 and lower(btrim(name)) = lower($2)`, [fx.accountId, name])).rows[0].n as number;
+    const ADA = `ada-${t}@example.test`;
+    const BO = `bo-${t}@example.test`;
+    const [ada] = await db.insert(schema.people).values({ accountId: fx.accountId, email: null, name: "Ada Adopt" }).returning();
+    const bos = await db.insert(schema.people).values([{ accountId: fx.accountId, email: null, name: "Bo Twin" }, { accountId: fx.accountId, email: null, name: "Bo Twin" }]).returning();
+    const dIdentity = { ...identity, answered_at: "2026-10-26T15:33:00.000Z", guests: [{ name: "Ada Adopt" }, { name: "Bo Twin" }] };
+    const rd = await post("/captures", payload({ identity: dIdentity, inviteeNames: [{ email: ADA, name: "Ada Adopt" }, { email: BO, name: "Bo Twin" }] }));
+    const recD = String(rd.json.recordingId);
+    check("d: the capture is stored (201)", rd.status === 201, `${rd.status} ${JSON.stringify(rd.json)}`);
+    const adaRows = await person(ADA);
+    check("d: one person with no address has the name: it gets the address and is reused", adaRows.length === 1 && adaRows[0].id === ada.id, JSON.stringify(adaRows));
+    check("d: and no second Ada Adopt is created", (await namedCount("Ada Adopt")) === 1, String(await namedCount("Ada Adopt")));
+    const boRows = await person(BO);
+    check("d: two people with no address have the name: a new person is created with the address, as before", boRows.length === 1 && !bos.some((b) => b.id === boRows[0].id), JSON.stringify(boRows));
+    check("d: and the two keep no address", (await pool.query(`select count(*)::int as n from people where id = any($1) and email is null`, [bos.map((b) => b.id)])).rows[0].n === 2);
+    const dAtts = (await pool.query(`select name, person_id from attendees where recording_id = $1 and not is_host`, [recD])).rows as Array<{ name: string; person_id: string | null }>;
+    check("d: each guest row is linked to the person with its address", dAtts.find((a) => a.name === "Ada Adopt")?.person_id === ada.id && dAtts.find((a) => a.name === "Bo Twin")?.person_id === boRows[0]?.id, JSON.stringify(dAtts));
 
     // m. the recording's whole metadata.
     const metadata = (await pool.query(`select metadata from recordings where id = $1`, [rec])).rows[0]?.metadata;
