@@ -21,7 +21,9 @@
 //   v   a group call with named voices: a correction that removes a guest
 //       unnames that guest's voice and keeps the others' names, including one
 //       whose name the answer sends with stray spaces. The unnamed voice's
-//       person_id is null afterwards; the others keep theirs (SAA-260 step 2)
+//       person_id is null afterwards; the others keep theirs (SAA-260 step 2),
+//       and the reply's `people` maps the voices before and not Bob's after
+//       (SAA-260 step 3)
 // SAA-260 step 2 (people):
 //   u   (above) the unchanged correction queues nothing while its guest row
 //       carries a person
@@ -226,10 +228,14 @@ async function main(): Promise<void> {
     const named = async () => (await pool.query(`select label, display_name from speakers where recording_id = $1 and label ~ '^Voice [0-9]+$' order by label`, [recv])).rows.map((r) => `${r.label}=${r.display_name ?? "(unnamed)"}`).join(",");
     check("v: control: before the correction, Voice 1..3 are Ann, Bob and Cy", (await named()) === "Voice 1=Ann Example,Voice 2=Bob Example,Voice 3=Cy Example", await named());
     check("v: control: before the correction, Bob's voice carries a person (SAA-260 step 2)", !!(await voicePerson(recv, "Voice 2")), String(await voicePerson(recv, "Voice 2")));
+    const mapped = (r: { json: Record<string, unknown> }): number[] =>
+      (((r.json.people as { voices?: Array<{ voiceIndex: number }> } | undefined)?.voices) ?? []).map((x) => x.voiceIndex);
+    check("v: control: before the correction, the reply maps Voices 1, 2 and 3 (SAA-260 step 3)", JSON.stringify(mapped(rv0)) === "[1,2,3]", JSON.stringify(rv0.json.people));
     const rv = await post({ ...pv, identity: answer(B, ["Ann Example", "  Cy Example  ", "Dee Example"], "work", A) });
     check("v: the correction is applied (200)", rv.status === 200 && rv.json.identityApplied === true, `${rv.status} ${JSON.stringify(rv.json)}`);
     check("v: Bob's voice is unnamed; Ann's and Cy's keep their names (Cy sent with stray spaces)", (await named()) === "Voice 1=Ann Example,Voice 2=(unnamed),Voice 3=Cy Example", await named());
     check("v: Bob's unnamed voice has no person afterwards", (await voicePerson(recv, "Voice 2")) === null, String(await voicePerson(recv, "Voice 2")));
+    check("v: and the correction's reply no longer maps Voice 2; 1 and 3 stay (SAA-260 step 3)", JSON.stringify(mapped(rv)) === "[1,3]", JSON.stringify(rv.json.people));
     check("v: control: Ann's voice keeps Ann's person", !!(await voicePerson(recv, "Voice 1")) && (await voicePerson(recv, "Voice 1")) === (await guestPerson(recv, "Ann Example")), `${await voicePerson(recv, "Voice 1")} vs ${await guestPerson(recv, "Ann Example")}`);
 
     // t. a typo corrected: the typo's person, made by step 2 and now on
