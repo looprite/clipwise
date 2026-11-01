@@ -537,6 +537,89 @@ check('without the processing capture, the tray item is the newest ready meeting
     check('SAA-258: no saved answer, nothing to correct', ia.correctsFor(null, null) === null);
 }
 
+// SAA-260 step 4: answers carry guests[].personId, and every way back into a
+// call (Change attendees…, Name voices / Fix names, the tray's Later item)
+// opens the one window. A saved answer reopens as chips: a person kept by id,
+// one from before step 4 by name only, the host's own name never a chip.
+{
+    const ia = require('./identity-answer.js');
+    const P1 = '11111111-1111-4111-8111-111111111111';
+    const P2 = '22222222-2222-4222-8222-222222222222';
+    const c10 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-step4-meetings-check-'));
+    const q10 = path.join(c10, 'upload-queue');
+    fs.mkdirSync(q10);
+    const cw = (name, doc) => fs.writeFileSync(path.join(c10, name), JSON.stringify(doc));
+    const call = (stem, identity) => {
+        cw(`manifest-${stem}.json`, { started_at: stem, tracks: [{ duration_s: 1800 }] });
+        cw(`pipeline-${stem}.json`, { db_recording_id: `rid-${stem}`, updated_at: new Date(NOW - 3600e3).toISOString(), steps: { transcribe: { state: 'ok' }, ingest: { state: 'ok' } } });
+        cw(`transcript-${stem}.json`, { segments: [{}, {}, {}] });
+        cw(`identity-${stem}.json`, identity);
+        fs.writeFileSync(path.join(q10, `${stem}.json`), JSON.stringify({ stem, state: 'sent', lastStatus: 201 }));
+    };
+    const ONE = '2026-03-05T13-00-00Z', TWO = '2026-03-05T14-00-00Z';
+    const answer = (guests) => ({ identity_version: 2, recording_id: 'r', answered_at: 'A', self: { name: 'Jon Example', source: 'account_display_name' }, guests, scope: 'work' });
+    call(ONE, answer([{ name: 'Ann Example', personId: P1 }]));
+    call(TWO, answer([{ name: 'Ann Example', personId: P1 }, { name: 'Bob Sample', personId: P2 }]));
+    cw(`voices-${ONE}.json`, { voices: [] });
+    cw(`voices-${TWO}.json`, { voices: [] });
+    const rows = Object.fromEntries(listMeetings(c10, NOW, undefined, { uploadQueueDir: q10 }).map((r) => [r.stem, r]));
+    check('SAA-260 step 4: guests carrying a personId are listed by name, and the call offers "Change attendees…"',
+        !!rows[TWO] && JSON.stringify(rows[TWO].participants) === JSON.stringify(['Ann Example', 'Bob Sample']) && rows[TWO].canChangeIdentity === true,
+        JSON.stringify(rows[TWO] && { participants: rows[TWO].participants, canChangeIdentity: rows[TWO].canChangeIdentity }));
+    check('SAA-260 step 4: one guest carrying a personId settles the naming (SAA-255), and is not pending',
+        ia.namingSettled(c10, ONE) === true && !!rows[ONE] && rows[ONE].namingPending === false, String(ia.namingSettled(c10, ONE)));
+    check('control: two guests carrying personIds do not settle it', ia.namingSettled(c10, TWO) === false && !!rows[TWO] && rows[TWO].namingPending === true);
+    fs.rmSync(c10, { recursive: true, force: true });
+
+    const chips = (f) => JSON.stringify(f.chips.map((c) => ({ name: c.name, personId: c.personId, tag: c.tag })));
+    let f = null;
+    try {
+        f = ia.peopleFieldFromAnswer(answer([{ name: 'Ann Example', personId: P1 }, { name: 'Bob Sample', personId: 'not-a-uuid' }, { name: ' jon  example ' }]), { hostNames: ['Jon Example'] });
+    } catch (err) {
+        f = { error: err.message.split('\n')[0] };
+    }
+    check('SAA-260 step 4: Change attendees… opens the saved guests as chips, a valid personId kept and an invalid one dropped',
+        !!f && Array.isArray(f.chips) && chips(f) === JSON.stringify([{ name: 'Ann Example', personId: P1, tag: null }, { name: 'Bob Sample', personId: null, tag: null }]),
+        f && f.chips ? chips(f) : JSON.stringify(f));
+    check('SAA-260 step 4: the host\'s own name in a saved answer never becomes a chip',
+        !!f && Array.isArray(f.chips) && !f.chips.some((c) => /jon/i.test(c.name || '')), f && f.chips ? chips(f) : JSON.stringify(f));
+    let old = null;
+    try {
+        old = ia.peopleFieldFromAnswer({ answered_at: 'A', self: { name: 'Jon Example', source: 'recorder_identity_prompt' }, guests: [{ name: 'Cy Person' }], scope: 'work' }, { hostNames: ['Jon Example'] });
+    } catch (err) {
+        old = { error: err.message.split('\n')[0] };
+    }
+    check('control: an answer from before step 4 (names only) opens as chips with no personId',
+        !!old && Array.isArray(old.chips) && chips(old) === JSON.stringify([{ name: 'Cy Person', personId: null, tag: null }]), old && old.chips ? chips(old) : JSON.stringify(old));
+    check('SAA-260 step 4: a correction is sent with the same answer shape, guests with their personIds',
+        (() => {
+            try {
+                const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: ia.answerGuests(f), selfName: 'Jon Example', scope: 'work', corrects: 'A' });
+                return doc.corrects === 'A' && JSON.stringify(doc.guests) === JSON.stringify([{ name: 'Ann Example', personId: P1 }, { name: 'Bob Sample' }]);
+            } catch { return false; }
+        })());
+
+    // One window everywhere (B.4): main.js and identity.html as text.
+    const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+    const html = fs.readFileSync(path.join(__dirname, 'identity.html'), 'utf8');
+    const body = (name) => {
+        const start = main.indexOf(`function ${name}(`);
+        if (start < 0) return '';
+        const next = main.indexOf('\nfunction ', start + 1);
+        const nextAsync = main.indexOf('\nasync function ', start + 1);
+        const end = [next, nextAsync].filter((i) => i > 0).reduce((a, b) => Math.min(a, b), main.length);
+        return main.slice(start, end);
+    };
+    check('SAA-260 step 4: the startStep=2 path is gone from main.js and identity.html', !/startStep/.test(main) && !/startStep/.test(html));
+    check('control: the same scan finds startStep planted in a copy of identity.html', /startStep/.test(`${html}\nparams.get('startStep')`));
+    for (const fn of ['reopenIdentityForCorrection', 'reopenIdentityPrompt', 'reopenVoiceNaming']) {
+        const text = body(fn);
+        check(`SAA-260 step 4: ${fn} opens the one window (identity.html) with no checklist or step-2-only query`,
+            text.length > 0 && text.includes('IDENTITY_HTML') && !/checkedNames|knownNames|startNames|namingData:|currentNames:/.test(text), `${text.length} chars`);
+    }
+    check('SAA-260 step 4: "Who\'s speaking?" is no longer a window title of its own', !/title: "Who's speaking\?"/.test(main));
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);
