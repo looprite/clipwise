@@ -158,6 +158,9 @@ cp "$APP_SRC/main.js" "$C/Resources/app/main.js"
 # itself, so a bundle without it has a stop that silently identifies nothing.
 cp "$APP_SRC/identity.html" "$C/Resources/app/identity.html"
 cp "$APP_SRC/identity-answer.js" "$C/Resources/app/identity-answer.js"
+# How names are compared (SAA-260 step 4): identity-answer.js requires it by
+# relative path, so a bundle without it opens a window that cannot load.
+cp "$APP_SRC/people-name.js" "$C/Resources/app/people-name.js"
 # Step 2's stop-waiting decision (SAA-195). main.js requires this by
 # relative path; a bundle without it fails to launch, same as the others.
 cp "$APP_SRC/voice-naming-wait.js" "$C/Resources/app/voice-naming-wait.js"
