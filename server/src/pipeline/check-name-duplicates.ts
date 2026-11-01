@@ -7,71 +7,42 @@
 // grows by a one-or-two-character variant is the signal that would have
 // caught "Liillan" on the day it happened rather than a week later.
 //
+// SAA-260 step 4: names are compared by name key (near-duplicates.ts, the pure
+// half, checked without a database by check-near-duplicates.ts), and the names
+// are the account's attendee names and its people's names: a person whose name
+// was corrected keeps attendee rows under the old spelling, and a typo can now
+// live on a person as well as on a row.
+//
 // Usage:
 //   tsx src/pipeline/check-name-duplicates.ts
 //
-// Exit code 0: no near-duplicate pair found. Exit code 1: at least one
-// found, printed to stdout for a human to look at — this never merges or
-// edits anything itself. Whether to merge a real duplicate is a separate
-// decision (SAA-169's second open question), made by a person looking at
-// the specific pair, not by this script picking a winner.
+// Read-only: two SELECTs. Exit code 0: no near-duplicate pair found. Exit code
+// 1: at least one found, printed to stdout for a human to look at — this never
+// merges or edits anything itself. Whether to merge a real duplicate is a
+// separate decision (SAA-169's second open question), made by a person looking
+// at the specific pair, not by this script picking a winner.
 
 import { and, eq, isNotNull } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
+import { nearDuplicates, type NearDuplicatePair, type SameKeySpellings } from "./near-duplicates.js";
 
-// Small counts (tens of names) make the O(n^2) pair check trivial; this
-// does not need to scale further than an account's own roster.
-function levenshtein(a: string, b: string): number {
-  const al = a.length;
-  const bl = b.length;
-  if (al === 0) return bl;
-  if (bl === 0) return al;
-  const prev = new Array<number>(bl + 1);
-  const curr = new Array<number>(bl + 1);
-  for (let j = 0; j <= bl; j++) prev[j] = j;
-  for (let i = 1; i <= al; i++) {
-    curr[0] = i;
-    for (let j = 1; j <= bl; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      curr[j] = Math.min(
-        prev[j] + 1, // deletion
-        curr[j - 1] + 1, // insertion
-        prev[j - 1] + cost, // substitution
-      );
-    }
-    for (let j = 0; j <= bl; j++) prev[j] = curr[j];
-  }
-  return prev[bl];
-}
-
-// "Differs by one or two characters" (the issue's own phrasing) — distance
-// 1 or 2, not 0 (identical names are not a duplicate pair, they are the
-// same string) and not larger (unrelated names should not be flagged).
-const NEAR_DUPLICATE_MAX_DISTANCE = 2;
-
-export type NearDuplicatePair = { a: string; b: string; distance: number };
+export type { NearDuplicatePair, SameKeySpellings };
 
 export async function findNearDuplicateNames(accountId: string): Promise<{
   distinctCount: number;
   pairs: NearDuplicatePair[];
+  sameKey: SameKeySpellings[];
 }> {
-  const rows = await db
+  const attendeeNames = await db
     .selectDistinct({ name: schema.attendees.name })
     .from(schema.attendees)
     .innerJoin(schema.recordings, eq(schema.recordings.id, schema.attendees.recordingId))
     .where(and(eq(schema.recordings.accountId, accountId), isNotNull(schema.attendees.name)));
-
-  const names = rows.map((r) => r.name as string).sort();
-  const pairs: NearDuplicatePair[] = [];
-  for (let i = 0; i < names.length; i++) {
-    for (let j = i + 1; j < names.length; j++) {
-      const distance = levenshtein(names[i].toLowerCase(), names[j].toLowerCase());
-      if (distance > 0 && distance <= NEAR_DUPLICATE_MAX_DISTANCE) {
-        pairs.push({ a: names[i], b: names[j], distance });
-      }
-    }
-  }
-  return { distinctCount: names.length, pairs };
+  const peopleNames = await db
+    .selectDistinct({ name: schema.people.name })
+    .from(schema.people)
+    .where(and(eq(schema.people.accountId, accountId), isNotNull(schema.people.name)));
+  return nearDuplicates([...attendeeNames, ...peopleNames].map((r) => r.name));
 }
 
 async function main(): Promise<void> {
@@ -81,8 +52,18 @@ async function main(): Promise<void> {
       `expected exactly one account; found ${accounts.length}. Set an explicit account when this stops being the case.`,
     );
   }
-  const { distinctCount, pairs } = await findNearDuplicateNames(accounts[0].id);
-  process.stdout.write(`check-name-duplicates: ${distinctCount} distinct attendee name(s)\n`);
+  const { distinctCount, pairs, sameKey } = await findNearDuplicateNames(accounts[0].id);
+  process.stdout.write(`check-name-duplicates: ${distinctCount} distinct name(s) by key, attendees and people\n`);
+  // Information, not a failure: ingest's same-name rule already treats each of
+  // these as one person.
+  if (sameKey.length === 0) {
+    process.stdout.write("check-name-duplicates: no name stored under more than one spelling\n");
+  } else {
+    process.stdout.write(`check-name-duplicates: ${sameKey.length} name(s) stored under more than one spelling (one person each to ingest; not a failure):\n`);
+    for (const s of sameKey) {
+      process.stdout.write(`  ${s.spellings.map((x) => JSON.stringify(x)).join(" / ")}\n`);
+    }
+  }
   if (pairs.length === 0) {
     process.stdout.write("check-name-duplicates: no near-duplicate pairs found\n");
     return;

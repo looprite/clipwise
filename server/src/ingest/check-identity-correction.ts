@@ -32,6 +32,21 @@
 //   x   control: a person removed from one call but on another is kept
 //   k   a kept name keeps its person, including one linked by address; a
 //       removed person with an address is kept
+// SAA-260 step 4 (the window sends guests[].personId, ingest/attendee-people.ts
+// chosenPeople):
+//   p2  a correction where the pick beats the carried person: a guest linked
+//       to twinA by the same-name rule (only twinA existed) stays twinA when a
+//       correction names it again with no personId (the control), and becomes
+//       twinB when the correction picks twinB
+//   p   a picked person wins: two people the caller may see share a name, so
+//       the same-name rule leaves that guest unlinked (the control); sent with
+//       one of them picked, the guest is that person, and not the other
+//   i   a picked personId the caller may not see (another account's person) is
+//       ignored: the guest is resolved by name instead, to a person of the
+//       caller's own account, and the other account's person is untouched
+//   e   a correction that removes a picked chip releases its person: while
+//       another call still holds it, it is kept (the control); once the last
+//       call holding it drops it, it is deleted, as it has no address
 //
 //   scripts/scratch-db.sh run check-identity-correction
 
@@ -90,11 +105,14 @@ function payload(segments: Seg[], extra: Record<string, unknown> = {}): Record<s
   };
 }
 
-const answer = (answeredAt: string, guests: string[], scope: "work" | "personal", corrects?: string) => ({
+// A guest is a name, or (SAA-260 step 4's window) a name with the picked
+// person's id.
+type Guest = string | { name: string; personId: string };
+const answer = (answeredAt: string, guests: Guest[], scope: "work" | "personal", corrects?: string) => ({
   identity_version: 2,
   answered_at: answeredAt,
   self: { name: "Check Host", source: "recorder_identity_prompt" },
-  guests: guests.map((name) => ({ name })),
+  guests: guests.map((g) => (typeof g === "string" ? { name: g } : g)),
   scope,
   ...(corrects !== undefined ? { corrects } : {}),
 });
@@ -276,6 +294,72 @@ async function main(): Promise<void> {
     check("k: and the added Mo Example gets one", !!(await guestPerson(reck, "Mo Example")));
     await post({ ...pkNoInvitees, identity: answer(C, ["Lee Example", "Mo Example"], "work", B) });
     check("k: a correction removing Kay keeps Kay's person, which has an address", await personExists(kay as string));
+
+    const newPerson = async (accountId: string, name: string): Promise<string> =>
+      (await pool.query(`insert into people (account_id, name) values ($1, $2) returning id`, [accountId, name])).rows[0].id as string;
+
+    // p2. a correction where the pick beats the carried person. While only
+    // twinA exists, a capture naming Sam Twin is linked to twinA by the
+    // same-name rule. twinB is made after it.
+    const twinA = await newPerson(fx.accountId, "Sam Twin");
+    const pp2 = payload(ONE_TO_ONE, { identity: answer(A, ["Sam Twin"], "work") });
+    const recp2 = String((await post(pp2)).json.recordingId);
+    check("p2: control: with only twinA named Sam Twin, the first send links the guest to twinA", (await guestPerson(recp2, "Sam Twin")) === twinA, `${await guestPerson(recp2, "Sam Twin")} (twinA ${twinA})`);
+    const twinB = await newPerson(fx.accountId, "Sam Twin");
+    const rp2c = await post({ ...pp2, identity: answer(B, ["Sam Twin"], "work", A) });
+    check("p2: control: a correction naming Sam Twin with no personId keeps twinA (carried)",
+      rp2c.status === 200 && (await guestPerson(recp2, "Sam Twin")) === twinA, `${rp2c.status} ${await guestPerson(recp2, "Sam Twin")} (twinA ${twinA}, twinB ${twinB})`);
+    const rp2 = await post({ ...pp2, identity: answer(C, [{ name: "Sam Twin", personId: twinB }], "work", B) });
+    check("p2: the same correction picking twinB makes the row twinB: the pick beats the carried person",
+      rp2.status === 200 && rp2.json.identityApplied === true && (await guestPerson(recp2, "Sam Twin")) === twinB,
+      `${rp2.status} ${JSON.stringify(rp2.json)} ${await guestPerson(recp2, "Sam Twin")} (twinA ${twinA}, twinB ${twinB})`);
+
+    // p2's pick released twinA: held by nothing and with no address, it is gone.
+    check("p2: and twinA, released by the pick and held by nothing, is deleted", !(await personExists(twinA)));
+
+    // p. a picked person wins over the same-name rule. Two people the caller
+    // may see share the name: twinB (on p2's call) and a new, unattached twinC.
+    const twinC = await newPerson(fx.accountId, "Sam Twin");
+    const recp0 = String((await post(payload(ONE_TO_ONE, { identity: answer(A, ["Sam Twin"], "work") }))).json.recordingId);
+    check("p: control: two people the caller may see are named Sam Twin, so the same-name rule leaves the guest unlinked",
+      (await guestPerson(recp0, "Sam Twin")) === null, `${await guestPerson(recp0, "Sam Twin")} (twinB ${twinB}, twinC ${twinC})`);
+    const rp = await post(payload(ONE_TO_ONE, { identity: answer(A, [{ name: "Sam Twin", personId: twinC }], "work") }));
+    const recp = String(rp.json.recordingId);
+    check("p: sent with one of them picked, the guest is that person, and not the other",
+      rp.status === 201 && (await guestPerson(recp, "Sam Twin")) === twinC,
+      `${rp.status} ${await guestPerson(recp, "Sam Twin")} (picked ${twinC}, other ${twinB})`);
+
+    // i. a picked personId the caller may not see: another account's person.
+    const other = await makeAccount("check-identity-correction-other");
+    try {
+      const foreign = await newPerson(other.accountId, "Ivy Other");
+      const ri = await post(payload(ONE_TO_ONE, { identity: answer(A, [{ name: "Ivy Other", personId: foreign }], "work") }));
+      const reci = String(ri.json.recordingId);
+      const ivy = await guestPerson(reci, "Ivy Other");
+      const ivyAccount = ivy ? (await pool.query(`select account_id from people where id = $1`, [ivy])).rows[0]?.account_id : null;
+      check("i: another account's person, picked, is ignored: the guest is resolved by name, to a person of the caller's own account",
+        ri.status === 201 && !!ivy && ivy !== foreign && ivyAccount === fx.accountId,
+        `${ri.status} ${ivy} (foreign ${foreign}) account ${ivyAccount}`);
+      const f = (await pool.query(`select name, account_id from people where id = $1`, [foreign])).rows[0];
+      check("i: control: the other account's person is still there, as it was", !!f && f.name === "Ivy Other" && f.account_id === other.accountId, JSON.stringify(f));
+    } finally {
+      await dropAccount(other);
+    }
+
+    // e. a removed picked chip releases its person. Rae's person is made by a
+    // first call; a second call picks it; the first drops Rae, then the second.
+    const pq = payload(ONE_TO_ONE, { identity: answer(A, ["Rae Pick"], "work") });
+    const recq = String((await post(pq)).json.recordingId);
+    const rae = await guestPerson(recq, "Rae Pick");
+    const pe = payload(ONE_TO_ONE, { identity: answer(A, [{ name: "Rae Pick", personId: rae as string }, "Uma Stay"], "work") });
+    const rece = String((await post(pe)).json.recordingId);
+    check("e: control: the second call's picked chip is Rae's person", !!rae && (await guestPerson(rece, "Rae Pick")) === rae, `${rae} ${await guestPerson(rece, "Rae Pick")}`);
+    await post({ ...pq, identity: answer(B, ["Quinn Other"], "work", A) });
+    check("e: control: dropped by the first call while the second still holds it, Rae's person is kept", await personExists(rae as string));
+    const re = await post({ ...pe, identity: answer(B, ["Uma Stay"], "work", A) });
+    check("e: a correction removing the picked chip releases it: no row of the call points at Rae's person, and, held by nothing and with no address, it is deleted",
+      re.status === 200 && re.json.identityApplied === true && (await guestPerson(rece, "Rae Pick")) === null && !(await personExists(rae as string)),
+      `${re.status} ${JSON.stringify(re.json)} exists=${await personExists(rae as string)}`);
   } finally {
     server.close();
     await dropAccount(fx);
