@@ -24,6 +24,16 @@
 //   - per fixture, a CLIPWISE_SUPPORT_DIR holding one capture, and no
 //     setup.json or consent.json, so the start gate turns any recording away
 //
+// Each launch also starts the app's recovery pass (main.js startRecovery('app
+// launch'), which runs server/src/pipeline/capture-recover.ts from this checkout
+// through tsx) on the fixture's support folder. It finishes a capture whose
+// pipeline record has a step left unfinished by a process that is gone. The
+// fixture's record carries `pid`, the pid of this check's own process, alive for
+// the whole run, as a real running record carries its pipeline's: that is what
+// keeps the pass idle. A line before the fixtures shows it (unfinishedCaptures
+// skips the record with that pid, and lists the same record without one). The
+// pass loads no database code and no API key (capture-cli.ts:7-8).
+//
 // One launch per fixture. CLIPWISE_CHECK_PROMPT_STEM is main.js's check-only
 // switch, read in one place. It takes "<stem>", "<stem>:correct" or
 // "<stem>:voices" and opens, for that capture, the stop window
@@ -58,6 +68,15 @@
 //   #recorded-by, #skip, #save
 //
 //   node check-identity-window.js
+//   CHECK_FIXTURE=group6 node check-identity-window.js      one fixture only
+//   CHECK_FIXTURE_NO_PID=1 ...                             its record without pid
+//                                                          (shows what recovery does)
+//
+// A fixture with a FAIL prints, before the temporary folder goes: its pipeline
+// record, recovery.log, recovery-<stem>.json, its upload-queue entry, the day
+// log's upload lines (or that there is no day log) and the app's stderr upload
+// lines. A fixture that throws is a FAIL with the error, and the run goes on to
+// the next.
 //
 // Needs the installed Clipwise quit only if its single-instance lock turns the
 // wrapper away; the premise run (2026-11-01) showed the wrapper takes its own.
@@ -79,6 +98,10 @@ const KEYCHAIN_ITEM = `${APP_NAME} Safe Storage`;
 const INSTALLED_NAME = 'clipwise-recorder';
 const SWITCH = 'CLIPWISE_CHECK_PROMPT_STEM';
 const MODE = 'dev';
+const ONLY = process.env.CHECK_FIXTURE || null;
+const NO_PID = process.env.CHECK_FIXTURE_NO_PID === '1';
+const SERVER_DIR = path.resolve(RECORDER_DIR, '..', 'server');
+const TSX = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
 
 let failures = 0;
 function check(name, ok, detail = '') {
@@ -164,6 +187,9 @@ const FIXTURES = [
         expectGuests: [],
         expectNoPairsFile: true,
         expectVoicesMore: true,
+        // Rows the member didn't touch are saved unnamed (decided 2026-11-01),
+        // the two behind "Show them" included.
+        expectVoiceNames: [{ voiceIndex: 1, name: null }, { voiceIndex: 2, name: null }, { voiceIndex: 3, name: null }, { voiceIndex: 4, name: null }],
     },
     {
         name: 'group2noRecent',
@@ -173,6 +199,7 @@ const FIXTURES = [
         drive: [],
         expectGuests: [{ name: 'Ann Example' }, { name: 'Bob Sample' }],
         expectNoRecent: true,
+        expectVoiceNames: [{ voiceIndex: 1, name: null }, { voiceIndex: 2, name: null }],
     },
     {
         name: 'groupFinding',
@@ -248,6 +275,34 @@ const FIXTURES = [
         expectVoicesMessage: "Couldn't separate the voices on this call.",
         drive: [],
         expectGuests: [{ name: 'Ann Example' }, { name: 'Bob Sample' }],
+    },
+    // Escape in the text box clears it and never skips; with focus on nothing
+    // editable, Escape is Skip (the control). Skip writes nothing.
+    {
+        name: 'escape',
+        preview: { matched: true, title: 'Sync', named: ['Ann Example', 'Bob Sample'], unnamed: [] },
+        voices: 'none',
+        escapeCheck: true,
+    },
+    // Change attendees… whose saved answer is gone by the time the page asks for
+    // it (identity:init). The answer is there when the switch opens the window
+    // (the switch checks it, and reopenIdentityForCorrection reads it); the check
+    // deletes it the moment main.js logs that it is opening, before the page has
+    // loaded. If that race were lost, the page would show the saved chips and the
+    // "couldn't load" line below would FAIL, not pass.
+    {
+        name: 'correctLoadFailed',
+        open: 'correct',
+        preview: null,
+        saved: {
+            identity_version: 2, recording_id: 'CHECK-WINDOW-LF', stem: STEM, answered_at: '2026-11-01T15:42:00.000Z',
+            self: { name: HOST, source: 'account_display_name' },
+            guests: [{ name: 'Ann Example', personId: P.ann }],
+            scope: 'work',
+        },
+        voices: 'none',
+        deleteSavedOnOpen: true,
+        expectLoadFailed: "Couldn't load this call's attendees. Close and try again.",
     },
     // The switch itself: unset, it opens nothing and logs nothing; a value it
     // can't use opens nothing and logs one line.
@@ -383,6 +438,9 @@ function writeCapture(outdir, n) {
     });
     w(`pipeline-${STEM}.json`, {
         pipeline: 'capture', updated_at: new Date().toISOString(),
+        // A live process, as a running record carries its pipeline's: the app's
+        // recovery pass leaves the capture alone (see the header).
+        ...(NO_PID ? {} : { pid: process.pid }),
         steps: {
             transcribe: { state: 'ok' },
             classify: { state: 'ok', detail: { classification: { verdict: 'ok', concern: null, reason: null, excludedLabels: [], tracks: null, thresholds: null } } },
@@ -427,6 +485,30 @@ if (process.env.CHECK_MODE === 'encrypt') {
     return dir;
 }
 
+// What the app's recovery pass would pick up: capture-recover.ts's own
+// unfinishedCaptures, imported by a probe run through the server's tsx. The probe
+// only imports it; capture-recover.ts and capture-cli.ts run nothing on import
+// (each runs only when it is process.argv[1]). It reads the two folders and
+// returns, and the folders are this run's own.
+function recoveryWouldFinish(root) {
+    const mk = (name, withPid) => {
+        const dir = path.join(root, name);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, `manifest-${STEM}.json`), JSON.stringify({ recording_id: 'CHECK-RECOVERY' }));
+        fs.writeFileSync(path.join(dir, `pipeline-${STEM}.json`), JSON.stringify({
+            pipeline: 'capture', updated_at: new Date().toISOString(), ...(withPid ? { pid: process.pid } : {}),
+            steps: { transcribe: { state: 'ok' }, classify: { state: 'ok' }, diarize: { state: 'running' } },
+        }));
+        return dir;
+    };
+    const dirs = [mk('recovery-with-pid', true), mk('recovery-without-pid', false)];
+    const probe = path.join(root, 'recovery-probe.mts');
+    fs.writeFileSync(probe, `import { unfinishedCaptures } from ${JSON.stringify(path.join(SERVER_DIR, 'src', 'pipeline', 'capture-recover.ts'))};\n`
+        + `process.stdout.write(JSON.stringify(JSON.parse(process.env.CHECK_DIRS).map((d) => unfinishedCaptures(d))));\n`);
+    const r = spawnSync(TSX, [probe], { cwd: SERVER_DIR, encoding: 'utf8', timeout: 60000, env: { ...process.env, CHECK_DIRS: JSON.stringify(dirs) } });
+    try { return { ok: true, lists: JSON.parse(r.stdout) }; } catch { return { ok: false, detail: `${r.status} ${(r.stderr || '').split('\n').slice(0, 3).join(' | ')}` }; }
+}
+
 function keychainHas(item) {
     return spawnSync('security', ['find-generic-password', '-s', item], { encoding: 'utf8' }).status === 0;
 }
@@ -441,6 +523,9 @@ async function runFixture(fx, n, ctx) {
     fs.copyFileSync(ctx.tokenFile, path.join(support, 'capture-token.bin'));
     if (fx.cachedSelf) fs.writeFileSync(path.join(support, 'identity-self.json'), JSON.stringify({ name: fx.cachedSelf, set_at: new Date().toISOString() }) + '\n');
     writeCapture(outdir, n);
+    const pipelinePath = path.join(outdir, `pipeline-${STEM}.json`);
+    let pipelineWritten = fs.readFileSync(pipelinePath, 'utf8');
+    const failuresBefore = failures;
     if (fx.voices === 'ready') writeVoices(outdir, fx.talk);
     const identityFile = path.join(outdir, `identity-${STEM}.json`);
     if (fx.saved) fs.writeFileSync(identityFile, JSON.stringify(fx.saved, null, 2) + '\n');
@@ -463,8 +548,16 @@ async function runFixture(fx, n, ctx) {
         })(),
         stdio: ['ignore', 'pipe', 'pipe'],
     });
-    child.stdout.on('data', (d) => { log += d; });
-    child.stderr.on('data', (d) => { log += d; });
+    let deletedOnOpen = false;
+    const onLog = (d) => {
+        log += d;
+        if (fx.deleteSavedOnOpen && !deletedOnOpen && /check switch: opening the identity window \(correct\)/.test(log)) {
+            deletedOnOpen = true;
+            fs.rmSync(identityFile, { force: true });
+        }
+    };
+    child.stdout.on('data', onLog);
+    child.stderr.on('data', onLog);
     let exited = null;
     child.on('exit', (c, s) => { exited = `${c} ${s}`; });
     const t = (s) => `${fx.name}: ${s}`;
@@ -489,6 +582,43 @@ async function runFixture(fx, n, ctx) {
         check(t('the wrapper was not turned away by a single-instance lock'), !/another Clipwise is already running/.test(log));
         await page.evaluate(PAGE_HELPERS);
         const ev = (js) => page.evaluate(js);
+        const windowOpen = async () => {
+            const res = await fetch(`http://127.0.0.1:${port}/json/list`);
+            return (await res.json()).some((x) => /identity\.html/.test(x.url));
+        };
+
+        if (fx.expectLoadFailed) {
+            check(t('the saved answer was there when the window opened, and was deleted before the page asked for it'), deletedOnOpen);
+            const shown = await waitFor(() => ev(`__check.q('#load-failed') ? __check.q('#load-failed').textContent.trim() : false`), 8000);
+            check(t(`the field is replaced by "${fx.expectLoadFailed}"`), shown === fx.expectLoadFailed && !(await ev(`!!__check.q('#people-input')`)), JSON.stringify(shown));
+            check(t('Save is disabled'), await ev(`__check.q('#save').disabled`));
+            await ev(`__check.q('#save').click(); document.activeElement && document.activeElement.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+            await pause(1500);
+            check(t('clicking Save or pressing Enter writes nothing and sends nothing; the window stays open'),
+                !fs.existsSync(identityFile) && !stub.posts.some((p) => p.identity) && (await windowOpen()),
+                `identity file: ${fs.existsSync(identityFile)}; posts: ${JSON.stringify(stub.posts)}`);
+            page.close();
+            return;
+        }
+
+        if (fx.escapeCheck) {
+            await waitFor(() => ev(`!!__check.q('#recorded-by') && __check.q('#recorded-by').textContent.trim().length > 0`), 5000);
+            await ev(`__check.type('Gus')`);
+            await waitFor(() => ev(`__check.qa('#results button').length > 0`), 5000);
+            await ev(`__check.q('#people-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+            await pause(1000);
+            const after = await ev(`({ text: __check.q('#people-input').value, results: __check.qa('#results button').length })`);
+            check(t('Escape in the text box clears it and its results'), after.text === '' && after.results === 0, JSON.stringify(after));
+            check(t('Escape in the text box does not skip: the window is still open and nothing is written'),
+                (await windowOpen()) && !fs.existsSync(identityFile), `identity file: ${fs.existsSync(identityFile)}`);
+            // The control: focus on nothing editable, Escape is Skip.
+            await ev(`document.activeElement && document.activeElement.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+            const closed = await waitFor(async () => !(await windowOpen()), 8000);
+            check(t('control: with focus on the window body, Escape skips: the window closes'), !!closed);
+            check(t('and Skip writes no answer'), !fs.existsSync(identityFile));
+            page.close();
+            return;
+        }
 
         // The calendar preview lands within its wait; the page settles.
         if (fx.preview) await waitFor(() => ev(`__check.qa('#chips .chip').length > 0 || !!__check.q('#large-chip')`), 8000);
@@ -619,7 +749,8 @@ async function runFixture(fx, n, ctx) {
             const sidecarPath = path.join(outdir, `pipeline-${STEM}.json`);
             const sidecar = readJson(sidecarPath);
             sidecar.steps.diarize = fx.diarizeOutcome;
-            fs.writeFileSync(sidecarPath, JSON.stringify(sidecar, null, 2) + '\n');
+            pipelineWritten = JSON.stringify(sidecar, null, 2) + '\n';
+            fs.writeFileSync(sidecarPath, pipelineWritten);
             const shown = await waitFor(async () => {
                 const text = await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`);
                 return text === fx.expectVoicesMessage ? text : false;
@@ -653,6 +784,23 @@ async function runFixture(fx, n, ctx) {
         const fit = await ev(`__check.fit()`);
         check(t(`the window never scrolls (scrollHeight ${fit.scrollHeight} <= clientHeight ${fit.clientHeight}; page asks for ${fit.measured}, window ${fit.innerHeight})`),
             fit.scrollHeight <= fit.clientHeight && fit.measured !== null && fit.measured <= ia.IDENTITY_WINDOW.maxHeight, JSON.stringify(fit));
+
+        // Nothing but this check wrote the pipeline record: the recovery pass
+        // left it alone.
+        const pipelineNow = fs.readFileSync(pipelinePath, 'utf8');
+        check(t('the app\'s recovery pass left the pipeline record as the check wrote it'), pipelineNow === pipelineWritten, pipelineNow.slice(0, 400));
+
+        // The pipeline finishes before Save, as a real one does once diarize is
+        // done: the upload queue sends a capture only when its pipeline has
+        // settled (main.js drainUploadQueue, pipelineSettled). transcribe,
+        // classify and the pid are kept. groupFinding is the control: its diarize
+        // stays running, and its answer is held back.
+        if (!fx.expectFinding) {
+            const doc = JSON.parse(pipelineNow);
+            doc.steps.diarize = { state: 'ok' };
+            pipelineWritten = JSON.stringify(doc, null, 2) + '\n';
+            fs.writeFileSync(pipelinePath, pipelineWritten);
+        }
 
         // Save.
         await ev(`__check.q('#save').click()`);
@@ -704,6 +852,21 @@ async function runFixture(fx, n, ctx) {
             const cache = readJson(path.join(support, 'identity-self.json'));
             check(t('identity-self.json caches the account\'s display name'), !!cache && cache.name === HOST, JSON.stringify(cache));
         }
+        if (fx.expectFinding) {
+            // The control: diarize still running under a live pid, so the answer
+            // is queued and held, not sent.
+            const post = await waitFor(() => stub.posts.find((p) => p.identity) || false, 10000);
+            check(t('control: with diarize still running, no POST /captures comes within 10 s'), !post, JSON.stringify(post && post.identity));
+            const entry = readJson(path.join(support, 'upload-queue', `${STEM}.json`));
+            const waitMs = entry ? Date.parse(entry.nextAttemptAt) - Date.parse(entry.queuedAt) : NaN;
+            check(t('control: its queue entry is queued, attempts 0, next attempt about 60 s after it was queued'),
+                !!entry && entry.state === 'queued' && entry.attempts === 0 && waitMs >= 55000 && waitMs <= 65000, JSON.stringify(entry));
+            check(t('control: the app logs that the upload is waiting for its pipeline'),
+                log.includes(`[clipwise-recorder] upload ${STEM}: waiting for its pipeline`),
+                log.split('\n').filter((l) => /upload/.test(l)).join(' | '));
+            page.close();
+            return;
+        }
         const post = await waitFor(() => stub.posts.find((p) => p.identity) || false, 10000);
         check(t('POST /captures carries the same identity guests'), !!post && JSON.stringify(post.identity.guests) === JSON.stringify(fx.expectGuests), JSON.stringify(post && post.identity));
         if (fx.expectCorrects) {
@@ -714,10 +877,25 @@ async function runFixture(fx, n, ctx) {
             check(t('POST /captures carries the same voice names'), !!vpost && JSON.stringify(vpost.voiceNames.voices) === JSON.stringify(fx.expectVoiceNames), JSON.stringify(vpost && vpost.voiceNames));
         }
         page.close();
+    } catch (err) {
+        check(t('the fixture runs to its end'), false, `threw: ${err && err.message ? err.message.split('\n')[0] : String(err)}`);
     } finally {
         if (exited === null) child.kill('SIGTERM');
         await waitFor(() => exited !== null, 8000);
         if (exited === null) child.kill('SIGKILL');
+        // A fixture with a FAIL keeps what explains it: the pipeline record and
+        // the recovery pass's log, printed before the temporary folder goes.
+        if (failures > failuresBefore) {
+            const kept = (label, text) => console.log(`      --- ${fx.name}: kept ${label}\n${text.replace(/^/gm, '      | ')}`);
+            const read = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return '(none)'; } };
+            for (const name of [`pipeline-${STEM}.json`, 'recovery.log', `recovery-${STEM}.json`]) kept(name, read(path.join(outdir, name)));
+            kept(`upload-queue/${STEM}.json`, read(path.join(support, 'upload-queue', `${STEM}.json`)));
+            let dayLogs = [];
+            try { dayLogs = fs.readdirSync(outdir).filter((f) => /^recorder-\d{4}-\d{2}-\d{2}\.log$/.test(f)); } catch {}
+            for (const f of dayLogs) kept(`${f} (upload lines)`, read(path.join(outdir, f)).split('\n').filter((l) => /upload/.test(l)).join('\n') || '(no upload lines)');
+            if (dayLogs.length === 0) kept('day log', '(no recorder-*.log in the recordings folder)');
+            kept('app stderr (upload lines)', log.split('\n').filter((l) => /upload/.test(l)).join('\n') || '(no upload lines)');
+        }
     }
 }
 
@@ -763,8 +941,21 @@ async function runFixture(fx, n, ctx) {
         // Known present, so the teardown's "gone" below is checked against both states.
         check(`the keychain item "${KEYCHAIN_ITEM}" exists once the token is encrypted`, keychainHas(KEYCHAIN_ITEM));
         if (!fs.existsSync(tokenFile)) return;
+        const rec = recoveryWouldFinish(root);
+        check('the app\'s recovery pass leaves a running record carrying a live pid alone (capture-recover.ts unfinishedCaptures)',
+            rec.ok && JSON.stringify(rec.lists[0]) === '[]', rec.ok ? JSON.stringify(rec.lists) : rec.detail);
+        check('control: it would finish the same record without a pid',
+            rec.ok && JSON.stringify(rec.lists[1]) === JSON.stringify([{ stem: STEM, why: 'diarize running' }]), rec.ok ? JSON.stringify(rec.lists) : rec.detail);
         let n = 0;
-        for (const fx of FIXTURES) await runFixture(fx, ++n, { root, wrapper, tokenFile, stub });
+        const fixtures = ONLY ? FIXTURES.filter((fx) => fx.name === ONLY) : FIXTURES;
+        check(`${ONLY ? `CHECK_FIXTURE=${ONLY} names a fixture` : 'every fixture runs'}${NO_PID ? ' (records written without pid)' : ''}`, fixtures.length > 0, ONLY || '');
+        for (const fx of fixtures) {
+            try {
+                await runFixture(fx, ++n, { root, wrapper, tokenFile, stub });
+            } catch (err) {
+                check(`${fx.name}: the fixture is set up and launched`, false, `threw: ${err && err.message ? err.message.split('\n')[0] : String(err)}`);
+            }
+        }
     } finally {
         stub.server.close();
         if (keychainHas(KEYCHAIN_ITEM)) spawnSync('security', ['delete-generic-password', '-s', KEYCHAIN_ITEM]);
