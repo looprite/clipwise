@@ -259,6 +259,23 @@ checkFn('a: control: the same scan finds an @ planted in a copy', () => {
     const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: [{ name: 'Ann Example' }], selfName: HOST, scope: 'work' });
     return [JSON.stringify({ ...doc, planted: 'x@y' }).includes('@'), ''];
 });
+{
+    const saved = { guests: [{ name: 'Ann Example', personId: P1 }, { name: 'Bob Sample' }, { name: 'Cy Person', personId: P3 }], scope: 'work' };
+    checkFn('a: the same people in another order, spelled with other case or spacing, are no change (guests compared as a set)', () => {
+        const got = ia.answerChanged(saved, [{ name: 'Cy Person', personId: P3 }, { name: ' bob  sample ' }, { name: 'Ann Example', personId: P1 }], 'work');
+        return [got === false, String(got)];
+    });
+    checkFn('a: control: one person differing is a change: a name, a personId, one added, one removed, or the scope', () => {
+        const got = [
+            ia.answerChanged(saved, [{ name: 'Ann Example', personId: P1 }, { name: 'Bob Sampler' }, { name: 'Cy Person', personId: P3 }], 'work'),
+            ia.answerChanged(saved, [{ name: 'Ann Example', personId: P2 }, { name: 'Bob Sample' }, { name: 'Cy Person', personId: P3 }], 'work'),
+            ia.answerChanged(saved, [...saved.guests, { name: 'Dana Lee' }], 'work'),
+            ia.answerChanged(saved, saved.guests.slice(0, 2), 'work'),
+            ia.answerChanged(saved, saved.guests, 'personal'),
+        ];
+        return [JSON.stringify(got) === JSON.stringify([true, true, true, true, true]), JSON.stringify(got)];
+    });
+}
 checkFn('a: the footer reads "Recorded by <name> (you)", and "Recorded by you" with no name or an address', () => {
     const got = [ia.recordedByLine(HOST), ia.recordedByLine(null), ia.recordedByLine('jd@example.test')];
     return [JSON.stringify(got) === JSON.stringify(['Recorded by Jon Example (you)', 'Recorded by you', 'Recorded by you']), JSON.stringify(got)];
@@ -338,6 +355,36 @@ checkFn('v: a name chosen for a second voice moves to it; the first is left unna
     ia.chooseVoice(choices, 2, 'ann example');
     return [choices.get(1) === null && choices.get(2) === 'ann example', JSON.stringify([...choices])];
 });
+{
+    // Shaped like voice-clips.ts NamingData: { recording_id, stem, generated_at,
+    // voices: [{ voiceIndex, clipPaths, lines: [{ text, start, end }] }] }.
+    const typed = () => ({
+        recording_id: 'r', stem: 's', generated_at: '2026-11-01T15:40:00.000Z',
+        voices: [
+            { voiceIndex: 1, clipPaths: ['/c/1a.wav', '/c/1b.wav'], lines: [{ text: 'the first long line', start: 12.48, end: 19.5 }, { text: 'the second', start: 301, end: 306.125 }] },
+            { voiceIndex: 2, clipPaths: ['/c/2a.wav'], lines: [{ text: 'voice two speaking', start: 0, end: 4.25 }] },
+        ],
+    });
+    checkFn('v: namingDataForPage keeps each voice\'s voiceIndex, clipPaths and lines, and each line\'s text, start and end unchanged', () => {
+        const src = typed();
+        const out = ia.namingDataForPage(src);
+        const want = { voices: src.voices.map((v) => ({ voiceIndex: v.voiceIndex, clipPaths: v.clipPaths, lines: v.lines })) };
+        return [JSON.stringify(out) === JSON.stringify(want), JSON.stringify(out)];
+    });
+    checkFn('v: control: an embedding planted on a voice, on a line and at the top is dropped, and the rest still comes through', () => {
+        const src = typed();
+        src.embedding = [0.5, 0.25];
+        src.voices[0].embedding = [0.1, 0.2, 0.3];
+        src.voices[1].lines[0].embedding = [0.9];
+        const planted = JSON.stringify(src).includes('embedding');
+        const out = ia.namingDataForPage(src);
+        const text = JSON.stringify(out);
+        const ok = planted && !text.includes('embedding')
+            && out.voices[0].lines[1].start === 301 && out.voices[0].lines[1].end === 306.125
+            && out.voices[1].lines[0].start === 0 && out.voices[1].lines[0].end === 4.25;
+        return [ok, `planted=${planted} ${text}`];
+    });
+}
 checkFn('v: the voice-names answer names each voice or leaves it null, nothing guessed', () => {
     const doc = ia.buildVoiceNamesDoc({ stem: 's', recordingId: 'r', voices: [{ voiceIndex: 1, name: 'Ann Example' }, { voiceIndex: 2, name: null }] });
     return [JSON.stringify(doc.voices) === JSON.stringify([{ voiceIndex: 1, name: 'Ann Example' }, { voiceIndex: 2, name: null }]), JSON.stringify(doc.voices)];
