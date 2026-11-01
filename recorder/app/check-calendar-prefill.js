@@ -1,10 +1,16 @@
 #!/usr/bin/env node
-// The calendar prefill's rules on the Mac (SAA-221), without a window: what the
-// page keeps from the server's preview (calendarPrefillFrom), the step 1 guest
-// list the page runs (guestList and friends in identity-answer.js, which
-// identity.html requires), the name-once file (buildInviteeNamesDoc,
-// writeInviteeNames) and the @ backstop in buildAnswerDoc. Every rule has its
-// control. The last cases read main.js, identity.html and build-app.sh as text.
+// The identity window's rules on the Mac, without a window (SAA-221, SAA-260
+// step 4). What the page keeps from the server's calendar preview
+// (calendarPrefillFrom); the people field the page runs (peopleField and
+// friends in identity-answer.js, which identity.html requires): invitee chips,
+// the large-call chip, search and typed names, the host's own name, and what
+// each chip sends on Save; the answer file (buildAnswerDoc) and the name-once
+// file (buildInviteeNamesDoc, writeInviteeNames); the footer and the host-name
+// cache; and the voices part's rows and choices. Every rule has its control. The
+// last cases read main.js, identity.html and build-app.sh as text.
+//
+// The step-1 checklist this file used to cover (guestList, nameInvitee and the
+// known-names roster) is gone with SAA-260 step 4's window.
 //
 //   node check-calendar-prefill.js
 
@@ -18,13 +24,29 @@ function check(name, ok, detail = '') {
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : `\n      ${detail}`}`);
     if (!ok) failures++;
 }
-const show = (list) => JSON.stringify({
-    boxes: list.boxes.map((b) => `${b.checked ? '[x]' : '[ ]'} ${b.name}`),
-    entries: ia.inviteeEntries(list),
-});
-const boxNamed = (list, name) => list.boxes.filter((b) => b.name.toLowerCase() === name.toLowerCase());
+// For rules whose functions may not exist yet: a throw is that case's FAIL, and
+// the rest still run.
+function checkFn(name, fn) {
+    let result;
+    try {
+        result = fn();
+    } catch (err) {
+        result = [false, `threw ${err && err.message ? err.message.split('\n')[0] : String(err)}`];
+    }
+    check(name, !!result[0], result[1] || '');
+}
 const A = 'anne@example.test';
 const B = 'bob@example.test';
+const HOST = 'Jon Example';
+const P1 = '11111111-1111-4111-8111-111111111111';
+const P2 = '22222222-2222-4222-8222-222222222222';
+const P3 = '33333333-3333-4333-8333-333333333333';
+const PH = '99999999-9999-4999-8999-999999999999'; // a person carrying the host's name (the backfill case)
+const field = () => ia.peopleField({ hostNames: [HOST] });
+const chipsOf = (f) => JSON.stringify(f.chips.map((c) => ({ name: c.name, email: c.email, personId: c.personId, tag: c.tag })));
+const prefill = (named, unnamed = []) => ({ title: 'Weekly sync', named, unnamed });
+const searched = (results) => ({ searched: true, results });
+const OFFLINE = { searched: false, results: [] };
 
 // --- p: what the page keeps from the reply ---------------------------------
 {
@@ -43,157 +65,213 @@ const B = 'bob@example.test';
     check('p: the title is trimmed', p.title === 'Weekly sync', JSON.stringify(p));
 }
 
-// --- g: preselection, and any touch cancelling it -----------------------------
-{
-    const untouched = ia.guestList(['Ann Example', 'Carl Known'], []);
-    ia.applyCalendarNames(untouched, ['ann example', 'Dee New']);
-    check('g: untouched: a named invitee with a known box checks that box (case-insensitive)',
-        boxNamed(untouched, 'Ann Example').length === 1 && boxNamed(untouched, 'Ann Example')[0].checked, show(untouched));
-    check('g: untouched: a named invitee with no box gets one, checked',
-        boxNamed(untouched, 'Dee New').length === 1 && boxNamed(untouched, 'Dee New')[0].checked, show(untouched));
-    check('g: a known box the calendar does not name stays unchecked',
-        !boxNamed(untouched, 'Carl Known')[0].checked, show(untouched));
+// --- c: invitees as chips (SAA-260 step 4) -----------------------------------
+checkFn('c: invitees arrive as chips tagged "invited": a named one by name, one with only an address by its address', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill(['Ann Example'], [B]));
+    const ok = f.chips.length === 2
+        && f.chips[0].name === 'Ann Example' && f.chips[0].tag === 'invited' && f.chips[0].email === null
+        && f.chips[1].name === null && f.chips[1].email === B && f.chips[1].tag === 'invited';
+    return [ok, chipsOf(f)];
+});
+checkFn('c: an invitee chip with a name is sent as {name}, with no personId (the preview gives none)', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill(['Ann Example']));
+    return [JSON.stringify(ia.answerGuests(f)) === JSON.stringify([{ name: 'Ann Example' }]), JSON.stringify(ia.answerGuests(f))];
+});
+checkFn('c: a removed invitee chip sends nothing', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill(['Ann Example', 'Bob Sample']));
+    ia.removeChip(f, f.chips[0].id);
+    return [JSON.stringify(ia.answerGuests(f)) === JSON.stringify([{ name: 'Bob Sample' }]), JSON.stringify(ia.answerGuests(f))];
+});
+checkFn('c: an address chip left unnamed sends nothing, in guests or inviteeNames (invited is not attended)', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill([], [A]));
+    return [ia.answerGuests(f).length === 0 && ia.inviteePairs(f).length === 0, `${JSON.stringify(ia.answerGuests(f))} ${JSON.stringify(ia.inviteePairs(f))}`];
+});
+checkFn('c: an address chip named with new text sends the name, and the address with it as a name-once pair', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill([], [A]));
+    ia.nameAddress(f, f.chips[0].id, ' Anne  Example ', searched([]));
+    const ok = JSON.stringify(ia.answerGuests(f)) === JSON.stringify([{ name: 'Anne Example' }])
+        && JSON.stringify(ia.inviteePairs(f)) === JSON.stringify([{ email: A, name: 'Anne Example' }]);
+    return [ok, `${JSON.stringify(ia.answerGuests(f))} ${JSON.stringify(ia.inviteePairs(f))}`];
+});
+checkFn('c: an address chip given a known person sends that personId, and no name-once pair', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill([], [A]));
+    ia.nameAddress(f, f.chips[0].id, { id: P1, name: 'Anne Example' });
+    const ok = JSON.stringify(ia.answerGuests(f)) === JSON.stringify([{ name: 'Anne Example', personId: P1 }]) && ia.inviteePairs(f).length === 0;
+    return [ok, `${JSON.stringify(ia.answerGuests(f))} ${JSON.stringify(ia.inviteePairs(f))}`];
+});
+checkFn('c: a named invitee under the host\'s own name gets no chip', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill(['jon  EXAMPLE', 'Ann Example']));
+    return [f.chips.length === 1 && f.chips[0].name === 'Ann Example', chipsOf(f)];
+});
+checkFn('c: six invitees are six chips (control for the large call)', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill(['N1 A', 'N2 A', 'N3 A', 'N4 A'], ['x1@example.test', 'x2@example.test']));
+    return [f.chips.length === 6 && f.large === null && ia.largeCallLabel(f) === null, `${chipsOf(f)} large=${JSON.stringify(f.large)}`];
+});
+checkFn('c: seven invitees are one chip, "7 invited · not confirmed", and no invitee chips', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill(['N1 A', 'N2 A', 'N3 A', 'N4 A', 'N5 A'], ['x1@example.test', 'x2@example.test']));
+    return [f.chips.length === 0 && ia.largeCallLabel(f) === '7 invited · not confirmed' && ia.LARGE_CALL_INVITEES === 6,
+        `${chipsOf(f)} label=${JSON.stringify(ia.largeCallLabel(f))}`];
+});
+checkFn('c: nothing from the large-call chip goes to guests or inviteeNames', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill(['N1 A', 'N2 A', 'N3 A', 'N4 A', 'N5 A'], ['x1@example.test', 'x2@example.test']));
+    return [ia.answerGuests(f).length === 0 && ia.inviteePairs(f).length === 0, `${JSON.stringify(ia.answerGuests(f))} ${JSON.stringify(ia.inviteePairs(f))}`];
+});
+checkFn('c: "Show the 7" offers each invitee as a suggestion; one added becomes an "invited" chip that is sent', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill(['N1 A', 'N2 A', 'N3 A', 'N4 A', 'N5 A'], ['x1@example.test', 'x2@example.test']));
+    const offered = ia.largeCallSuggestions(f);
+    ia.addSuggestion(f, offered.find((s) => s.name === 'N2 A'));
+    const ok = offered.length === 7 && f.chips.length === 1 && f.chips[0].tag === 'invited'
+        && JSON.stringify(ia.answerGuests(f)) === JSON.stringify([{ name: 'N2 A' }])
+        && ia.largeCallSuggestions(f).length === 6;
+    return [ok, `${JSON.stringify(offered)} ${chipsOf(f)}`];
+});
 
-    const touches = {
-        'checking a box': (l) => ia.setGuestChecked(l, 'Carl Known', true),
-        'typing in "Someone new?"': (l) => ia.touchGuests(l),
-        'naming an invitee': (l) => ia.nameInvitee(l, B, 'Bob Example'),
-    };
-    for (const [how, touch] of Object.entries(touches)) {
-        const l = ia.guestList(['Ann Example', 'Carl Known'], []);
-        touch(l);
-        ia.applyCalendarNames(l, ['Ann Example', 'Dee New']);
-        check(`g: after ${how}, the calendar checks nothing it names`,
-            !boxNamed(l, 'Ann Example')[0].checked && !boxNamed(l, 'Dee New')[0].checked, show(l));
-        check(`g: after ${how}, a named invitee with no box still gets one, unchecked`,
-            boxNamed(l, 'Dee New').length === 1, show(l));
-    }
-}
+// --- s: search, typing, the host's own name -----------------------------------
+checkFn('s: a person picked from search or Recent is sent with their personId', () => {
+    const f = field();
+    ia.addPerson(f, { id: P1, name: 'Ann Example' });
+    return [JSON.stringify(ia.answerGuests(f)) === JSON.stringify([{ name: 'Ann Example', personId: P1 }]), JSON.stringify(ia.answerGuests(f))];
+});
+checkFn('s: a typed name the search did not find is tagged "new", with the spelling line under the field', () => {
+    const f = field();
+    ia.addTyped(f, 'Fin  Taylor', searched([{ id: P1, name: 'Fina Taylor' }]));
+    const ok = f.chips.length === 1 && f.chips[0].tag === 'new' && f.chips[0].personId === null
+        && ia.newNameLine(f) === 'Fin Taylor is someone new. Check the spelling before saving.';
+    return [ok, `${chipsOf(f)} line=${JSON.stringify(ia.newNameLine(f))}`];
+});
+checkFn('s: a "new" chip is sent as {name} only', () => {
+    const f = field();
+    ia.addTyped(f, 'Fin Taylor', searched([]));
+    return [JSON.stringify(ia.answerGuests(f)) === JSON.stringify([{ name: 'Fin Taylor' }]), JSON.stringify(ia.answerGuests(f))];
+});
+checkFn('s: typed while the search could not answer, a name is tagged "not checked", with no "new" line', () => {
+    const f = field();
+    ia.addTyped(f, 'Fin Taylor', OFFLINE);
+    return [f.chips.length === 1 && f.chips[0].tag === 'not checked' && ia.newNameLine(f) === null, `${chipsOf(f)} line=${JSON.stringify(ia.newNameLine(f))}`];
+});
+checkFn('s: control: the same name with the search answered is "new"', () => {
+    const f = field();
+    ia.addTyped(f, 'Fin Taylor', searched([]));
+    return [f.chips[0] && f.chips[0].tag === 'new', chipsOf(f)];
+});
+checkFn('s: a typed name that is exactly one search result (case, spacing, NFC aside) is that person, not "new"', () => {
+    const f = field();
+    ia.addTyped(f, 'jose\u0301   EXAMPLE', searched([{ id: P2, name: 'Jos\u00e9 Example' }, { id: P3, name: 'Josefa Example' }]));
+    return [f.chips.length === 1 && f.chips[0].personId === P2 && f.chips[0].tag === null, chipsOf(f)];
+});
+checkFn('s: a typed name matching two search results is sent by name only, and is not "new"', () => {
+    const f = field();
+    ia.addTyped(f, 'Sam Lee', searched([{ id: P2, name: 'Sam Lee' }, { id: P3, name: 'sam lee' }]));
+    const ok = f.chips.length === 1 && f.chips[0].personId === null && f.chips[0].tag === null
+        && JSON.stringify(ia.answerGuests(f)) === JSON.stringify([{ name: 'Sam Lee' }]);
+    return [ok, chipsOf(f)];
+});
+checkFn('s: one chip per person: the same name again in another case or spacing adds nothing', () => {
+    const f = field();
+    ia.addTyped(f, 'Fin Taylor', searched([]));
+    ia.addTyped(f, '  fin   taylor ', searched([]));
+    return [f.chips.length === 1, chipsOf(f)];
+});
+checkFn('s: picking the person a "new" chip turned out to be gives that chip the personId, still one chip', () => {
+    const f = field();
+    ia.addTyped(f, 'Fin Taylor', OFFLINE);
+    ia.addPerson(f, { id: P1, name: 'Fin Taylor' });
+    return [f.chips.length === 1 && f.chips[0].personId === P1 && f.chips[0].tag === null, chipsOf(f)];
+});
+checkFn('s: the host\'s own name, typed in any case, spacing or Unicode form, is refused', () => {
+    const f = ia.peopleField({ hostNames: ['Jos\u00e9 Host'] });
+    const r = ia.addTyped(f, 'jose\u0301 HOST', searched([]));
+    return [f.chips.length === 0 && r && r.refused === 'host', `${chipsOf(f)} ${JSON.stringify(r)}`];
+});
+checkFn('s: a person carrying the host\'s name, picked, is refused too', () => {
+    const f = field();
+    const r = ia.addPerson(f, { id: PH, name: 'Jon Example' });
+    return [f.chips.length === 0 && r && r.refused === 'host', `${chipsOf(f)} ${JSON.stringify(r)}`];
+});
+checkFn('s: control: another name is accepted', () => {
+    const f = field();
+    const r = ia.addTyped(f, 'Jon Exampel', searched([]));
+    return [f.chips.length === 1 && r && !r.refused, `${chipsOf(f)} ${JSON.stringify(r)}`];
+});
+checkFn('s: suggestions leave out the host\'s name and anyone already on a chip, and keep the server\'s order', () => {
+    const f = field();
+    ia.addPerson(f, { id: P2, name: 'Bob Sample' });
+    const got = ia.filterSuggestions(f, [{ id: PH, name: 'Jon Example' }, { id: P1, name: 'Ann Example' }, { id: P2, name: 'Bob Sample' }, { id: P3, name: 'Cy Person' }], 4);
+    return [JSON.stringify(got.map((p) => p.id)) === JSON.stringify([P1, P3]), JSON.stringify(got)];
+});
+checkFn('s: the Recent row shows at most the limit asked for', () => {
+    const f = field();
+    const people = ['A', 'B', 'C', 'D', 'E', 'F'].map((n, i) => ({ id: `${i}${P1.slice(1)}`, name: `${n} Person` }));
+    return [ia.filterSuggestions(f, people, 4).length === 4, String(ia.filterSuggestions(f, people, 4).length)];
+});
+checkFn('s: a name with an @ is refused, and blocks Save while it is typed', () => {
+    const f = field();
+    const r = ia.addTyped(f, 'fin@example.test', searched([]));
+    return [f.chips.length === 0 && r && r.refused === 'at' && ia.saveBlocked(['fin@example.test']) === true, `${chipsOf(f)} ${JSON.stringify(r)}`];
+});
+checkFn('s: control: plain text does not block Save', () => [ia.saveBlocked(['Fin Taylor', '']) === false, String(ia.saveBlocked(['Fin Taylor', '']))]);
+checkFn('s: a removed picked chip sends nothing', () => {
+    const f = field();
+    ia.addPerson(f, { id: P1, name: 'Ann Example' });
+    ia.removeChip(f, f.chips[0].id);
+    return [ia.answerGuests(f).length === 0, JSON.stringify(ia.answerGuests(f))];
+});
+checkFn('s: a chip\'s name is the normalised name (NFC, one space)', () => {
+    const f = field();
+    ia.addTyped(f, '  Jose\u0301    Example ', searched([]));
+    return [f.chips[0] && f.chips[0].name === 'Jos\u00e9 Example', chipsOf(f)];
+});
 
-// --- n: name-once ----------------------------------------------------------
-{
-    // A typo corrected.
-    const l = ia.guestList([], []);
-    ia.nameInvitee(l, A, 'Anne Exmaple');
-    ia.nameInvitee(l, A, 'Anne Example');
-    check('n: a typo corrected leaves one checked box, renamed in place, not two',
-        l.boxes.length === 1 && l.boxes[0].name === 'Anne Example' && l.boxes[0].checked, show(l));
-    check('n: the entry holds the corrected name', JSON.stringify(ia.inviteeEntries(l)) === JSON.stringify([{ email: A, name: 'Anne Example' }]), show(l));
-    const two = ia.guestList([], []);
-    ia.nameInvitee(two, A, 'Anne Exmaple');
-    ia.nameInvitee(two, B, 'Anne Example');
-    check('n: control: the same two names on two addresses give two boxes', two.boxes.length === 2, show(two));
-}
-{
-    // Retyped to a name that already has its own box.
-    const l = ia.guestList(['Ann Known'], []);
-    ia.nameInvitee(l, A, 'Ann Knwn');
-    ia.nameInvitee(l, A, 'Ann Known');
-    check('n: retyped to a known name: the created box goes and the known box is checked',
-        l.boxes.length === 1 && l.boxes[0].name === 'Ann Known' && l.boxes[0].checked, show(l));
-    ia.nameInvitee(l, A, '');
-    check('n: control: clearing it then leaves the known box (a box from before is never removed)',
-        boxNamed(l, 'Ann Known').length === 1, show(l));
-}
-{
-    // Clearing.
-    const l = ia.guestList(['Carl Known'], []);
-    ia.nameInvitee(l, A, 'Anne Example');
-    ia.nameInvitee(l, A, '');
-    check('n: clearing removes the entry and the box it created',
-        ia.inviteeEntries(l).length === 0 && boxNamed(l, 'Anne Example').length === 0, show(l));
-    check('n: control: clearing leaves the box from before alone', boxNamed(l, 'Carl Known').length === 1, show(l));
-}
-{
-    // Unchecking keeps the entry.
-    const l = ia.guestList([], []);
-    ia.nameInvitee(l, A, 'Anne Example');
-    check('n: control: once typed, the name is a guest', ia.checkedGuestNames(l).includes('Anne Example'), show(l));
-    ia.setGuestChecked(l, 'Anne Example', false);
-    check('n: unchecking takes them out of the guests', !ia.checkedGuestNames(l).includes('Anne Example'), show(l));
-    check('n: unchecking keeps the name-once entry', JSON.stringify(ia.inviteeEntries(l)) === JSON.stringify([{ email: A, name: 'Anne Example' }]), show(l));
-    check('n: unchecking keeps the box', boxNamed(l, 'Anne Example').length === 1, show(l));
-    ia.nameInvitee(l, A, 'Anne Example');
-    check('n: committing the same name again (Save) leaves the box unchecked', !boxNamed(l, 'Anne Example')[0].checked, show(l));
-    ia.nameInvitee(l, A, 'Anne Example-Smith');
-    check('n: control: a different name checks it again', boxNamed(l, 'Anne Example-Smith')[0]?.checked === true, show(l));
-}
-{
-    // Two addresses given the same new name.
-    const l = ia.guestList([], []);
-    ia.nameInvitee(l, A, 'Sam Shared');
-    ia.nameInvitee(l, B, 'Sam Shared');
-    ia.nameInvitee(l, A, '');
-    check('n: two addresses, one name: clearing one keeps the box (the other entry now owns it)',
-        boxNamed(l, 'Sam Shared').length === 1 && l.entries.get(B).created === boxNamed(l, 'Sam Shared')[0], show(l));
-    ia.nameInvitee(l, B, '');
-    check('n: clearing the other then removes it', boxNamed(l, 'Sam Shared').length === 0, show(l));
-    const one = ia.guestList([], []);
-    ia.nameInvitee(one, A, 'Sam Shared');
-    ia.nameInvitee(one, A, '');
-    check('n: control: with no second entry, clearing removes the box at once', one.boxes.length === 0, show(one));
-    const ren = ia.guestList([], []);
-    ia.nameInvitee(ren, A, 'Sam Shared');
-    ia.nameInvitee(ren, B, 'Sam Shared');
-    ia.nameInvitee(ren, A, 'Sam Other');
-    check('n: two addresses, one name: retyping one does not rename the box under the other',
-        boxNamed(ren, 'Sam Shared').length === 1 && boxNamed(ren, 'Sam Other').length === 1, show(ren));
-}
-{
-    // A name with an @.
-    const l = ia.guestList([], []);
-    ia.nameInvitee(l, A, 'anne@example.test');
-    check('n: a name with an @ records nothing and adds no box', l.entries.size === 0 && l.boxes.length === 0, show(l));
-    ia.nameInvitee(l, A, 'Anne Example');
-    check('n: control: a plain name for the same address records an entry', l.entries.size === 1, show(l));
-    ia.nameInvitee(l, A, 'x@y');
-    check('n: an @ name after a plain one leaves the entry as it was', ia.inviteeEntries(l)[0].name === 'Anne Example', show(l));
-}
-{
-    // A box from before: its state is restored.
-    const corrected = ia.guestList(['Ann Known'], []);
-    ia.nameInvitee(corrected, A, 'Ann Known');
-    check('n: typing a known unchecked name checks its box', boxNamed(corrected, 'Ann Known')[0].checked, show(corrected));
-    ia.nameInvitee(corrected, A, 'Anne Example');
-    check('n: then correcting it leaves the known box unchecked again', !boxNamed(corrected, 'Ann Known')[0].checked, show(corrected));
-    const cleared = ia.guestList(['Ann Known'], []);
-    ia.nameInvitee(cleared, A, 'Ann Known');
-    ia.nameInvitee(cleared, A, '');
-    check('n: typing a known unchecked name then clearing it leaves the box unchecked', !boxNamed(cleared, 'Ann Known')[0].checked, show(cleared));
-    const wasOn = ia.guestList(['Ann Known'], ['Ann Known']);
-    ia.nameInvitee(wasOn, A, 'Ann Known');
-    ia.nameInvitee(wasOn, A, 'Anne Example');
-    check('n: control: a known box checked before stays checked after a correction', boxNamed(wasOn, 'Ann Known')[0].checked, show(wasOn));
-    const wasOn2 = ia.guestList(['Ann Known'], ['Ann Known']);
-    ia.nameInvitee(wasOn2, A, 'Ann Known');
-    ia.nameInvitee(wasOn2, A, '');
-    check('n: control: a known box checked before stays checked after clearing', boxNamed(wasOn2, 'Ann Known')[0].checked, show(wasOn2));
-    const toggled = ia.guestList(['Ann Known'], []);
-    ia.nameInvitee(toggled, A, 'Ann Known');
-    ia.setGuestChecked(toggled, 'Ann Known', false);
-    ia.setGuestChecked(toggled, 'Ann Known', true);
-    ia.nameInvitee(toggled, A, '');
-    check('n: toggled by the member since, the box is left as they set it (checked)', boxNamed(toggled, 'Ann Known')[0].checked, show(toggled));
-    check('n: control: untoggled, the same clear unchecks it (cleared case above)', !boxNamed(cleared, 'Ann Known')[0].checked);
-    const both = ia.guestList(['Ann Known'], []);
-    ia.nameInvitee(both, A, 'Ann Known');
-    ia.nameInvitee(both, B, 'Ann Known');
-    ia.nameInvitee(both, A, '');
-    check('n: two entries on one known box: clearing one keeps it checked for the other', boxNamed(both, 'Ann Known')[0].checked, show(both));
-    ia.nameInvitee(both, B, '');
-    check('n: clearing both restores the state from before the first (unchecked)', !boxNamed(both, 'Ann Known')[0].checked, show(both));
-}
-
-// --- b: the @ backstop in the identity file ---------------------------------
-{
-    const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', names: ['Ann Example', 'typed@address.test'], selfName: 'me@example.test', scope: 'work' });
-    check('b: a guest name with an @ is dropped', JSON.stringify(doc.guests) === JSON.stringify([{ name: 'Ann Example' }]), JSON.stringify(doc));
-    check('b: a self name with an @ is dropped, with no source', doc.self.name === null && doc.self.source === null, JSON.stringify(doc));
-    const plain = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', names: ['Ann Example'], selfName: 'Jon Example', scope: 'work' });
-    check('b: control: a plain self name is kept', plain.self.name === 'Jon Example' && plain.self.source === 'recorder_identity_prompt', JSON.stringify(plain));
-    check('b: the whole identity doc holds no @', !JSON.stringify(doc).includes('@'), JSON.stringify(doc));
-    check('b: control: the same scan finds an @ planted in a copy', JSON.stringify({ ...doc, planted: 'x@y' }).includes('@'));
-}
+// --- a: the answer file --------------------------------------------------------
+checkFn('a: guests carry personId where the chip has one', () => {
+    const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: [{ name: 'Ann Example', personId: P1 }, { name: 'Fin Taylor' }], selfName: HOST, scope: 'work' });
+    return [JSON.stringify(doc.guests) === JSON.stringify([{ name: 'Ann Example', personId: P1 }, { name: 'Fin Taylor' }]), JSON.stringify(doc.guests)];
+});
+checkFn('a: a personId that is not a uuid is not sent (the server refuses a capture carrying one); the name is', () => {
+    const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: [{ name: 'Ann Example', personId: 'p1' }], selfName: HOST, scope: 'work' });
+    return [JSON.stringify(doc.guests) === JSON.stringify([{ name: 'Ann Example' }]), JSON.stringify(doc.guests)];
+});
+checkFn('a: the host name comes from the account: self.source is account_display_name', () => {
+    const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: [], selfName: HOST, scope: 'work' });
+    return [doc.self.name === HOST && doc.self.source === 'account_display_name', JSON.stringify(doc.self)];
+});
+checkFn('a: with no name known, self.name and self.source are null', () => {
+    const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: [], selfName: null, scope: 'work' });
+    return [doc.self.name === null && doc.self.source === null, JSON.stringify(doc.self)];
+});
+checkFn('a: a guest or self name with an @ is dropped, and the whole doc holds no @', () => {
+    const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: [{ name: 'Ann Example' }, { name: 'typed@address.test', personId: P1 }], selfName: 'me@example.test', scope: 'work' });
+    const ok = JSON.stringify(doc.guests) === JSON.stringify([{ name: 'Ann Example' }]) && doc.self.name === null && !JSON.stringify(doc).includes('@');
+    return [ok, JSON.stringify(doc)];
+});
+checkFn('a: control: the same scan finds an @ planted in a copy', () => {
+    const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: [{ name: 'Ann Example' }], selfName: HOST, scope: 'work' });
+    return [JSON.stringify({ ...doc, planted: 'x@y' }).includes('@'), ''];
+});
+checkFn('a: the footer reads "Recorded by <name> (you)", and "Recorded by you" with no name or an address', () => {
+    const got = [ia.recordedByLine(HOST), ia.recordedByLine(null), ia.recordedByLine('jd@example.test')];
+    return [JSON.stringify(got) === JSON.stringify(['Recorded by Jon Example (you)', 'Recorded by you', 'Recorded by you']), JSON.stringify(got)];
+});
+checkFn('a: the host name is the account\'s when GET /captures/me answers, else the cached one, else none', () => {
+    const got = [
+        ia.selfNameFrom({ displayName: 'Jon Account' }, 'Jon Cached'),
+        ia.selfNameFrom(null, 'Jon Cached'),
+        ia.selfNameFrom(null, null),
+        ia.selfNameFrom({ displayName: null }, 'Jon Cached'),
+    ];
+    return [JSON.stringify(got) === JSON.stringify(['Jon Account', 'Jon Cached', null, 'Jon Cached']), JSON.stringify(got)];
+});
 
 // --- i: the name-once file ----------------------------------------------------
 {
@@ -223,16 +301,47 @@ const B = 'bob@example.test';
     const written = ia.writeInviteeNames(dir, { ...doc, stem: STEM });
     check('i: written to invitee-names-<stem>.json', path.basename(written) === `invitee-names-${STEM}.json`, written);
     check('i: read back as written', JSON.stringify(ia.readInviteeNames(dir, STEM).invitees) === JSON.stringify(doc.invitees));
-    ia.writeAnswer(dir, ia.buildAnswerDoc({ stem: STEM, recordingId: 'R', names: ['Carl Guest'], selfName: 'Jon Example', scope: 'work' }));
+    ia.writeAnswer(dir, ia.buildAnswerDoc({ stem: STEM, recordingId: 'R', guests: [{ name: 'Carl Guest' }], selfName: 'Jon Example', scope: 'work' }));
     const identityText = fs.readFileSync(path.join(dir, `identity-${STEM}.json`), 'utf8');
     check('i: the identity file beside it holds no @ and no typed invitee name',
         !identityText.includes('@') && !identityText.includes('Anne Example'), identityText);
     check('i: control: the invitee file does hold the address', fs.readFileSync(written, 'utf8').includes(A));
-    const known = ia.knownGuestNames(dir);
-    check('i: the known-names roster does not read the invitee file', !known.includes('Anne Example'), JSON.stringify(known));
-    check('i: control: it does read the identity file beside it', known.includes('Carl Guest'), JSON.stringify(known));
+    check('i: control: the identity file holds the guest it was given (SAA-260 step 4: guests as objects)', identityText.includes('Carl Guest'), identityText);
     fs.rmSync(dir, { recursive: true, force: true });
 }
+
+// --- v: the voices part --------------------------------------------------------
+const naming = (n) => ({ voices: Array.from({ length: n }, (_, i) => ({ voiceIndex: i + 1, clipPaths: [`/c/${i + 1}.wav`], lines: [] })) });
+const diarize = (secs) => ({ voices: secs.map((s, i) => ({ voiceIndex: i + 1, totalSeconds: s })) });
+checkFn('v: the voices part shows for two or more voices, and not for one or none', () => {
+    const got = [ia.showVoicesPart(naming(2)), ia.showVoicesPart(naming(1)), ia.showVoicesPart(null)];
+    return [JSON.stringify(got) === JSON.stringify([true, false, false]), JSON.stringify(got)];
+});
+checkFn('v: rows are longest first with their talk time; past two, the rest are behind "Show them"', () => {
+    const r = ia.voiceRows(naming(4), diarize([45, 1080, 30, 660]), 2);
+    const ok = JSON.stringify(r.rows.map((x) => [x.voiceIndex, x.talk])) === JSON.stringify([[2, '18 min'], [4, '11 min']]) && r.hidden === 2;
+    return [ok, JSON.stringify(r)];
+});
+checkFn('v: control: with every row shown, nothing is hidden and short talk reads in seconds', () => {
+    const r = ia.voiceRows(naming(4), diarize([45, 1080, 30, 660]), 4);
+    return [r.rows.length === 4 && r.hidden === 0 && r.rows[3].talk === '30 sec', JSON.stringify(r)];
+});
+checkFn('v: a voice\'s choices are the named chips, then "Leave unnamed" and "Add someone…"', () => {
+    const f = field();
+    ia.applyInvitees(f, prefill(['Ann Example'], [B]));
+    ia.addPerson(f, { id: P1, name: 'Cy Person' });
+    const got = ia.voiceOptions(f);
+    return [JSON.stringify(got) === JSON.stringify(['Ann Example', 'Cy Person', 'Leave unnamed', 'Add someone…']), JSON.stringify(got)];
+});
+checkFn('v: a name chosen for a second voice moves to it; the first is left unnamed', () => {
+    const choices = new Map([[1, 'Ann Example'], [2, null]]);
+    ia.chooseVoice(choices, 2, 'ann example');
+    return [choices.get(1) === null && choices.get(2) === 'ann example', JSON.stringify([...choices])];
+});
+checkFn('v: the voice-names answer names each voice or leaves it null, nothing guessed', () => {
+    const doc = ia.buildVoiceNamesDoc({ stem: 's', recordingId: 'r', voices: [{ voiceIndex: 1, name: 'Ann Example' }, { voiceIndex: 2, name: null }] });
+    return [JSON.stringify(doc.voices) === JSON.stringify([{ voiceIndex: 1, name: 'Ann Example' }, { voiceIndex: 2, name: null }]), JSON.stringify(doc.voices)];
+});
 
 // --- t: text checks ---------------------------------------------------------
 {
@@ -247,11 +356,21 @@ const B = 'bob@example.test';
     const applyText = fnStart >= 0 && fnEnd > fnStart ? html.slice(fnStart, fnEnd) : '';
     check('t: identity.html applyCalendar never touches scope', applyText.length > 0 && !/scope/i.test(applyText), `${applyText.length} chars`);
     check('t: control: identity.html does handle scope elsewhere', /selectedScope\(\)/.test(html));
-    check('t: identity.html sends inviteeNames from the guest list, outside the identity answer fields',
-        /inviteeNames: ia\.inviteeEntries\(list\)/.test(html));
     check('t: build-app.sh copies identity-answer.js beside identity.html (the page requires it)',
         build.includes('cp "$APP_SRC/identity-answer.js" "$C/Resources/app/identity-answer.js"')
         && build.includes('cp "$APP_SRC/identity.html" "$C/Resources/app/identity.html"'));
+    check('t: build-app.sh copies people-name.js beside them (identity-answer.js requires it)',
+        build.includes('cp "$APP_SRC/people-name.js" "$C/Resources/app/people-name.js"'));
+    check('t: identity.html sends inviteeNames from the people field, outside the identity answer fields',
+        /inviteeNames: ia\.inviteePairs\(field\)/.test(html));
+    check('t: identity.html sends guests from the people field', /guests: ia\.answerGuests\(field\)/.test(html));
+    check('t: the old checklist is gone: no knownNames in main.js or identity.html, no knownGuestNames export',
+        !/knownNames/.test(main) && !/knownNames/.test(html) && typeof ia.knownGuestNames === 'undefined');
+    check('t: control: the same scan finds knownNames planted in a copy of main.js', /knownNames/.test(`${main}\nknownNames: []`));
+    check('t: the host field is gone from identity.html', !/id="self"/.test(html));
+    check('t: identity.html has no "Voice 1 is you"', !/Voice 1 is you/.test(html));
+    check('t: IDENTITY_WINDOW is 460 wide, 220 to 600 high',
+        JSON.stringify(ia.IDENTITY_WINDOW) === JSON.stringify({ width: 460, minHeight: 220, maxHeight: 600 }), JSON.stringify(ia.IDENTITY_WINDOW));
 }
 
 console.log(failures === 0 ? '\ncheck-calendar-prefill: all passed' : `\ncheck-calendar-prefill: ${failures} FAILED`);
