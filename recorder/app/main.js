@@ -3774,7 +3774,8 @@ function writeIdentityAnswer(capture, answer) {
     const doc = buildAnswerDoc({
         stem: capture.stem,
         recordingId: capture.recordingId,
-        names: answer.names,
+        // Names only until the new window sends chips (SAA-260 step 4).
+        guests: (answer.names || []).map((name) => ({ name })),
         selfName: answer.selfName,
         scope: answer.scope,
         corrects: answer.corrects,
