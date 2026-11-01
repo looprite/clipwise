@@ -173,8 +173,10 @@ step is transcription.
   ```
 
   The fetch is 443 MB, checksum-verified, and gitignored; `recorder/app/build-app.sh` runs both steps.
-  Nothing touches the network at run time. The models are read from the checkout and are not
-  copied into `Clipwise.app`. The first transcription on a machine is slower while Core ML compiles
+  Nothing touches the network at run time. `build-app.sh` copies the models into the app's
+  `Resources/models`, and the built app reads them from there. Run from a checkout instead, the
+  pipeline reads the checkout's copy, in `recorder/parakeet/models` and `recorder/diarize/models`.
+  The first transcription on a machine is slower while Core ML compiles
   the model (about 12 s extra on the evaluation harness); later ones are not. Lines are built from
   word timings, breaking on pauses of 0.6 s or more, and end at the last word's end time.
 - Whisper, selectable with `CLIPWISE_TRANSCRIBER=whisper`: `brew install whisper-cpp` for the
