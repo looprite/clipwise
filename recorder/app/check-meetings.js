@@ -599,6 +599,27 @@ check('without the processing capture, the tray item is the newest ready meeting
             } catch { return false; }
         })());
 
+    // A saved answer reaching the page (identity:init) never carries an address:
+    // an answer from before SAA-221 could hold a guest typed as one.
+    {
+        const c11 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-step4-init-check-'));
+        const S = '2026-03-06T10-00-00Z';
+        fs.writeFileSync(path.join(c11, `identity-${S}.json`), JSON.stringify(answer([
+            { name: 'Ann Example', personId: P1 }, { name: 'eve@example.test' }, { name: 'Bob Sample' },
+        ])));
+        const raw = ia.readAnswer(c11, S);
+        let page = null;
+        try { page = ia.answerForPage(raw); } catch (err) { page = { error: err.message.split('\n')[0] }; }
+        check('control: the fixture answer as read from disk does hold a guest named by an address',
+            !!raw && raw.guests.some((g) => g.name.includes('@')), JSON.stringify(raw && raw.guests));
+        check('SAA-260 step 4: the saved answer sent to the page drops the guest named by an address and keeps the others as saved',
+            !!page && Array.isArray(page.guests) && !JSON.stringify(page).includes('@')
+                && JSON.stringify(page.guests) === JSON.stringify([{ name: 'Ann Example', personId: P1 }, { name: 'Bob Sample' }])
+                && page.scope === 'work' && page.answered_at === 'A',
+            JSON.stringify(page));
+        fs.rmSync(c11, { recursive: true, force: true });
+    }
+
     // One window everywhere (B.4): main.js and identity.html as text.
     const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
     const html = fs.readFileSync(path.join(__dirname, 'identity.html'), 'utf8');
@@ -618,6 +639,12 @@ check('without the processing capture, the tray item is the newest ready meeting
             text.length > 0 && text.includes('IDENTITY_HTML') && !/checkedNames|knownNames|startNames|namingData:|currentNames:/.test(text), `${text.length} chars`);
     }
     check('SAA-260 step 4: "Who\'s speaking?" is no longer a window title of its own', !/title: "Who's speaking\?"/.test(main));
+    const initAt = main.indexOf("ipcMain.handle('identity:init'");
+    const initText = initAt >= 0 ? main.slice(initAt, main.indexOf('});', initAt)) : '';
+    const sendsSaved = (text) => /saved:[^\n]*answerForPage\(readAnswer\(/.test(text);
+    check('SAA-260 step 4: identity:init sends the saved answer through answerForPage', sendsSaved(initText), `${initText.length} chars`);
+    check('control: the same scan fails on a copy of identity:init sending readAnswer directly',
+        initText.length > 0 && !sendsSaved(initText.replace('answerForPage(readAnswer(', '(readAnswer(')));
 }
 
 fs.rmSync(dir, { recursive: true, force: true });

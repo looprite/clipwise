@@ -30,7 +30,9 @@
 // (promptForIdentity), Change attendees… or Name voices / Fix names: the same
 // window each time. It opens only; it does nothing else. The correct and voices
 // fixtures drive those two ways in; check-meetings' text checks on the reopen
-// functions stay as a second line of evidence.
+// functions stay as a second line of evidence. The switch* fixtures show that
+// unset it opens nothing and logs nothing, and that a value it can't use opens
+// nothing and logs one line.
 // The check refuses to start when the recorder's capture binaries are built in
 // this checkout (call detection could start a capture), or when the installed
 // app's name is the one it would run under.
@@ -48,8 +50,11 @@
 //   #new-line                  "<Name> is someone new. …"
 //   #recent button[data-person-id]    the Recent row
 //   #large-chip, #show-large, #large-suggestions button
-//   #voices-part, #voices-finding, .voice-row[data-voice] (select, .talk),
-//   #voices-more, #leave-all
+//   #voices-part, .voice-row[data-voice] (select, .talk), #voices-more,
+//   #leave-all
+//   #voices-finding            "Finding voices…" until the voices are ready,
+//                              or the reason there will be none (main.js
+//                              identity:voices-stopped, stopMessageFor)
 //   #recorded-by, #skip, #save
 //
 //   node check-identity-window.js
@@ -114,14 +119,15 @@ const PEOPLE = [
     { id: P.dana, name: 'Dana Lee' },
 ];
 
-// --- fixtures: the six measured in A.2, plus offline, correct and voices --------
+// --- fixtures: the six measured in A.2, plus offline, correct, voices, the two
+// ways diarize ends with nothing to name, and the switch's own cases -----------
 // voices: 'none' (no voices file), 'ready' (there at open), 'late' (dropped
 // after the window is up), 'never' (still finding at Save).
 const FIXTURES = [
     {
         name: 'group6',
         preview: { matched: true, title: 'Weekly sync', named: ['Ann Example', 'Bob Sample', 'Dana Lee'], unnamed: ['eve@example.test'] },
-        voices: 'late', talk: [1080, 660],
+        voices: 'late', talk: [1080, 660], plantEmbedding: true,
         drive: [
             { pick: 'Cy', id: P.cy },
             { nameAddress: 'eve@example.test', text: 'Eve Moreno' },
@@ -223,6 +229,37 @@ const FIXTURES = [
         expectGuests: [{ name: 'Ann Example', personId: P.ann }, { name: 'Bob Sample', personId: P.bob }],
         expectVoiceNames: [{ voiceIndex: 1, name: 'Ann Example' }, { voiceIndex: 2, name: null }],
     },
+    // Diarize finishes after the window is up and finds fewer than two voices,
+    // or cannot run: the voices part says so instead of waiting to the cap.
+    {
+        name: 'oneVoice',
+        preview: { matched: true, title: 'Sync', named: ['Ann Example', 'Bob Sample'], unnamed: [] },
+        voices: 'outcome',
+        diarizeOutcome: { state: 'ok', detail: { voices_found: 1 } },
+        expectVoicesMessage: 'Only one other voice on this call — nothing to name.',
+        drive: [],
+        expectGuests: [{ name: 'Ann Example' }, { name: 'Bob Sample' }],
+    },
+    {
+        name: 'diarizeFailed',
+        preview: { matched: true, title: 'Sync', named: ['Ann Example', 'Bob Sample'], unnamed: [] },
+        voices: 'outcome',
+        diarizeOutcome: { state: 'skipped', detail: { reason: 'tool_error' } },
+        expectVoicesMessage: "Couldn't separate the voices on this call.",
+        drive: [],
+        expectGuests: [{ name: 'Ann Example' }, { name: 'Bob Sample' }],
+    },
+    // The switch itself: unset, it opens nothing and logs nothing; a value it
+    // can't use opens nothing and logs one line.
+    { name: 'switchUnset', switchValue: null, expectNoWindow: true, expectSwitchLines: [] },
+    { name: 'switchBadSuffix', switchValue: `${STEM}:bogus`, expectNoWindow: true,
+        expectSwitchLines: ['[clipwise-recorder] check switch: nothing opened — not "<stem>", "<stem>:correct" or "<stem>:voices"'] },
+    { name: 'switchNoCapture', switchValue: '2026-01-01T00-00-00Z', expectNoWindow: true,
+        expectSwitchLines: ['[clipwise-recorder] check switch: nothing opened — no capture 2026-01-01T00-00-00Z in this support folder'] },
+    { name: 'switchCorrectNoAnswer', switchValue: `${STEM}:correct`, expectNoWindow: true,
+        expectSwitchLines: [`[clipwise-recorder] check switch: nothing opened — no saved answer for ${STEM} to correct`] },
+    { name: 'switchVoicesNoData', switchValue: `${STEM}:voices`, expectNoWindow: true,
+        expectSwitchLines: [`[clipwise-recorder] check switch: nothing opened — no voices for ${STEM} to name`] },
 ];
 
 // --- the stub server ------------------------------------------------------------
@@ -353,14 +390,18 @@ function writeCapture(outdir, n) {
         },
     });
 }
-function writeVoices(outdir, talk) {
+// plant: an embedding field on every voice in both files, and at the top of the
+// naming data, as a real diarize file holds embeddings (the window check's
+// control that none reaches the page).
+function writeVoices(outdir, talk, { plant = false } = {}) {
+    const emb = plant ? { embedding: [0.125, -0.5, 0.75] } : {};
     const voices = talk.map((secs, i) => {
         const clip = path.join(outdir, `clip-${STEM}-v${i + 1}.wav`);
         silentWav(clip);
-        return { voiceIndex: i + 1, clipPaths: [clip], lines: [{ text: `line from voice ${i + 1}` }] };
+        return { voiceIndex: i + 1, clipPaths: [clip], lines: [{ text: `line from voice ${i + 1}`, start: 10 * i + 1.5, end: 10 * i + 4.25 }], ...emb };
     });
-    fs.writeFileSync(path.join(outdir, `diarize-${STEM}.json`), JSON.stringify({ voices: talk.map((s, i) => ({ voiceIndex: i + 1, totalSeconds: s })), segments: [] }));
-    fs.writeFileSync(path.join(outdir, `voices-${STEM}.json`), JSON.stringify({ voices }));
+    fs.writeFileSync(path.join(outdir, `diarize-${STEM}.json`), JSON.stringify({ voices: talk.map((s, i) => ({ voiceIndex: i + 1, totalSeconds: s, ...emb })), segments: [] }));
+    fs.writeFileSync(path.join(outdir, `voices-${STEM}.json`), JSON.stringify({ voices, ...emb }));
 }
 const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
 
@@ -413,7 +454,13 @@ async function runFixture(fx, n, ctx) {
     const port = await freePort();
     let log = '';
     const child = spawn(ELECTRON, [ctx.wrapper, `--remote-debugging-port=${port}`], {
-        env: { ...process.env, CLIPWISE_SUPPORT_DIR: support, CHECK_USERDATA: path.join(root, 'userdata'), [SWITCH]: fx.open ? `${STEM}:${fx.open}` : STEM },
+        env: (() => {
+            const env = { ...process.env, CLIPWISE_SUPPORT_DIR: support, CHECK_USERDATA: path.join(root, 'userdata') };
+            delete env[SWITCH];
+            const value = fx.switchValue !== undefined ? fx.switchValue : fx.open ? `${STEM}:${fx.open}` : STEM;
+            if (value !== null) env[SWITCH] = value;
+            return env;
+        })(),
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stdout.on('data', (d) => { log += d; });
@@ -423,6 +470,19 @@ async function runFixture(fx, n, ctx) {
     const t = (s) => `${fx.name}: ${s}`;
 
     try {
+        if (fx.expectNoWindow) {
+            // The app is up once its launch log reaches the update line; then a
+            // window the switch opened would be on its way. Give it the same
+            // time a real one takes, and look.
+            await waitFor(() => /update: not checked/.test(log), 20000);
+            const page = await connectPage(port, 8000);
+            check(t('nothing is opened'), !page, 'an identity window opened');
+            if (page) page.close();
+            const lines = log.split('\n').filter((l) => /\[clipwise-recorder\] check switch:/.test(l));
+            check(t(`the switch logs ${fx.expectSwitchLines.length === 0 ? 'nothing' : 'exactly one line, saying why'}`),
+                JSON.stringify(lines) === JSON.stringify(fx.expectSwitchLines), JSON.stringify(lines));
+            return;
+        }
         const page = await connectPage(port, 20000);
         check(t('the switch opens the identity window'), !!page, `exited=${exited}; log tail: ${log.split('\n').slice(-5).join(' | ')}`);
         if (!page) return;
@@ -521,7 +581,21 @@ async function runFixture(fx, n, ctx) {
         if (fx.voices === 'late') {
             const before = await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`);
             check(t('before the voices are ready, the voices part reads "Finding voices…"'), before === 'Finding voices…', JSON.stringify(before));
-            writeVoices(outdir, fx.talk);
+            if (fx.plantEmbedding) {
+                // A second listener on the page, beside the page's own, keeps
+                // what main.js sent exactly as it arrived.
+                await ev(`(() => { window.__voicesSent = null; require('electron').ipcRenderer.on('identity:voices', (_e, d) => { window.__voicesSent = JSON.stringify(d); }); return true; })()`);
+            }
+            writeVoices(outdir, fx.talk, { plant: !!fx.plantEmbedding });
+            if (fx.plantEmbedding) {
+                const sent = await waitFor(() => ev(`window.__voicesSent || false`), 12000);
+                const onDisk = fs.readFileSync(path.join(outdir, `voices-${STEM}.json`), 'utf8') + fs.readFileSync(path.join(outdir, `diarize-${STEM}.json`), 'utf8');
+                check(t('control: the voices and diarize files on disk do hold the planted embedding'), /embedding/.test(onDisk));
+                check(t('what main.js sends the page holds no embedding, and each line\'s text, start and end as on disk'),
+                    !!sent && !/embedding/.test(sent)
+                        && JSON.stringify(JSON.parse(sent).namingData.voices.map((v) => v.lines)) === JSON.stringify(readJson(path.join(outdir, `voices-${STEM}.json`)).voices.map((v) => v.lines)),
+                    String(sent));
+            }
         }
         if (fx.voices === 'late' || fx.voices === 'ready') {
             const rows = await waitFor(() => ev(`__check.qa('.voice-row[data-voice]').length || false`), 12000);
@@ -538,6 +612,22 @@ async function runFixture(fx, n, ctx) {
             for (const step of fx.drive.filter((s) => s.voice)) {
                 await ev(`(() => { const s = __check.q('.voice-row[data-voice="${step.voice}"] select'); s.value = ${JSON.stringify(step.choose)}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
             }
+        }
+        if (fx.voices === 'outcome') {
+            const before = await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`);
+            check(t('before diarize finishes, the voices part reads "Finding voices…"'), before === 'Finding voices…', JSON.stringify(before));
+            const sidecarPath = path.join(outdir, `pipeline-${STEM}.json`);
+            const sidecar = readJson(sidecarPath);
+            sidecar.steps.diarize = fx.diarizeOutcome;
+            fs.writeFileSync(sidecarPath, JSON.stringify(sidecar, null, 2) + '\n');
+            const shown = await waitFor(async () => {
+                const text = await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`);
+                return text === fx.expectVoicesMessage ? text : false;
+            }, 10000);
+            check(t(`then it reads "${fx.expectVoicesMessage}", not "Finding voices…" until the cap`), !!shown,
+                JSON.stringify(await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`)));
+            const rows = await ev(`__check.qa('.voice-row[data-voice]').length`);
+            check(t('and shows no voice rows'), rows === 0, String(rows));
         }
         if (fx.expectFinding) {
             const finding = await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`);

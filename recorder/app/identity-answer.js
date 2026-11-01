@@ -185,6 +185,54 @@ function isUuid(value) {
     return typeof value === 'string' && UUID_PATTERN.test(value);
 }
 
+// Whether the people or the scope on Save differ from a saved answer (SAA-260
+// step 4). Guests are compared as a set, each by its name key and personId as
+// the answer file writes them (buildAnswerDoc: names normalised, a personId only
+// when it is a uuid), so the same people in another order are no change.
+function answerChanged(saved, guests, scope) {
+    const keys = (list) => [...new Set(
+        buildAnswerDoc({ stem: '', guests: list || [], selfName: null, scope: null }).guests
+            .map((g) => JSON.stringify([peopleName.nameKey(g.name), g.personId || null])),
+    )].sort();
+    const scopeOf = (s) => (s === 'work' || s === 'personal' ? s : null);
+    return JSON.stringify(keys(saved && saved.guests)) !== JSON.stringify(keys(guests))
+        || scopeOf(saved && saved.scope) !== scopeOf(scope);
+}
+
+// A saved answer as the identity window may see it (identity:init): a guest
+// whose name holds an @ is dropped, as buildAnswerDoc drops one, and so is a
+// self name holding one, so an answer written before SAA-221 never puts an
+// address on the page. Everything else as saved. Null stays null.
+function answerForPage(saved) {
+    if (!saved || typeof saved !== 'object') return null;
+    const guests = (Array.isArray(saved.guests) ? saved.guests : [])
+        .filter((g) => g && typeof g.name === 'string' && !hasAt(g.name));
+    const self = saved.self && typeof saved.self === 'object' && typeof saved.self.name === 'string' && hasAt(saved.self.name)
+        ? { ...saved.self, name: null }
+        : saved.self;
+    return { ...saved, self, guests };
+}
+
+// The naming data (voices-<stem>.json) as the identity window may see it: the
+// fields of voice-clips.ts's NamingVoice and nothing else, whatever else the
+// file holds. Per voice voiceIndex, clipPaths and lines; per line text, start
+// and end (voice-clips.ts:183, `lines: Array<{ text: string; start: number;
+// end: number }>`), copied as they are. Null when it has no voices list.
+function namingDataForPage(data) {
+    if (!data || typeof data !== 'object' || !Array.isArray(data.voices)) return null;
+    return {
+        voices: data.voices
+            .filter((v) => v && Number.isInteger(v.voiceIndex))
+            .map((v) => ({
+                voiceIndex: v.voiceIndex,
+                clipPaths: (Array.isArray(v.clipPaths) ? v.clipPaths : []).filter((p) => typeof p === 'string'),
+                lines: (Array.isArray(v.lines) ? v.lines : [])
+                    .filter((l) => l && typeof l.text === 'string')
+                    .map((l) => ({ text: l.text, start: l.start, end: l.end })),
+            })),
+    };
+}
+
 // The saved answer for a capture, or null when there is none or it can't be read.
 function readAnswer(dir, stem) {
     try {
@@ -1030,6 +1078,9 @@ module.exports = {
     buildAnswerDoc,
     writeAnswer,
     readAnswer,
+    answerChanged,
+    answerForPage,
+    namingDataForPage,
     correctsFor,
     CALENDAR_PREVIEW_WAIT_MS,
     calendarPrefillFrom,

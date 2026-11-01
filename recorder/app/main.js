@@ -18,8 +18,8 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const {
-    IDENTITY_WINDOW, contentHeightFor, knownGuestNames, mergeGuestNames,
-    buildAnswerDoc, writeAnswer, readAnswer, correctsFor,
+    IDENTITY_WINDOW, contentHeightFor, selfNameFrom,
+    buildAnswerDoc, writeAnswer, readAnswer, answerChanged, answerForPage, namingDataForPage, correctsFor,
     CALENDAR_PREVIEW_WAIT_MS, calendarPrefillFrom, buildInviteeNamesDoc, writeInviteeNames,
     writeLaterMarker, readLaterMarker, deleteLaterMarker,
     recentPendingIdentityStems,
@@ -300,23 +300,19 @@ const CAPTURE_PIPELINE_ENTRY = BUILD_INFO
 const CAPTURE_RECOVER_ENTRY = BUILD_INFO
     ? path.join(BUNDLED_PIPELINE_DIR, 'pipeline', 'capture-recover.js')
     : path.join(SERVER_DIR, 'src', 'pipeline', 'capture-recover.ts');
-// How often the naming window polls for diarize's naming data while step 2
-// is in its waiting state (SAA-195). Diarize itself is fast (single-digit
+// How often the identity window polls for diarize's naming data while its
+// voices part reads "Finding voices…" (SAA-195, SAA-260 step 4). Diarize itself is fast (single-digit
 // seconds), but it runs after transcribe (transcribe and the old on-Mac ingest
 // together took 37-82s on the two captures this was measured against) — so what
 // this window actually waits through is the whole preceding pipeline, not
 // just diarize. 3s keeps the wait itself cheap without polling pointlessly
 // often.
 const VOICE_NAMING_POLL_MS = 3000;
-// Hard cap on step 2's wait (SAA-195 fix, 2026-09-25): past this, waiting
-// stops being a reasonable thing to ask of an open window. Treated exactly
-// as Later — silent, no message, since giving up is a patience limit, not
-// a fact about the call. If diarize finishes after this, its naming-data
-// file just sits on disk until the "Name N voices…" tray item picks it up.
+// Hard cap on that wait (SAA-195 fix, 2026-09-25): past this the window stops
+// polling and leaves the window as it is. If diarize finishes after this, its
+// naming-data file just sits on disk until the "Name N voices…" tray item
+// picks it up. Save never waits on any of it (SAA-260 step 4).
 const VOICE_NAMING_WAIT_CAP_MS = 15 * 60 * 1000;
-// How long a stop message ("nothing to name" / "couldn't separate") stays
-// on screen before the window closes itself.
-const VOICE_NAMING_STOP_MESSAGE_MS = 5000;
 
 // The identity prompt's page, and the file that remembers what the person
 // answering is called. The name is asked for once and reused; it is never
@@ -475,7 +471,7 @@ function detectActiveName(key) {
 // answer. { stem, recordingId, token }
 const identityQueue = [];
 let identityWindow = null;
-// The calendar's guests for a capture waiting on step 1 (SAA-221), by window
+// The calendar's guests for a capture's stop window (SAA-221), by window
 // token: calendarPrefillFrom's { title, named, unnamed }. Kept here and never on
 // the capture object, because the later-marker is written from that object and
 // a preview holds invitee addresses. Dropped when the window closes.
@@ -1436,11 +1432,95 @@ function registerVoicePrintsIpc() {
     });
 }
 
-// "Change attendees…" in Recent meetings (SAA-258): the identity
-// window again, filled from the saved answer: its own name, its guests checked,
-// its scope. Saving writes a correction (identity:submit, capture.correcting)
-// and sends it through the upload queue; Cancel or closing the window writes
-// nothing, and leaves no Later marker, since the call was answered.
+// The one "Who was on this call?" window (SAA-260 step 4). Every way into a
+// call's people and voices opens it, identity.html, in one of four modes:
+//   stop     a capture just stopped (promptForIdentity, through identityQueue)
+//   later    the tray's "Who was on the <date> call…" item, for a capture whose
+//            window was closed unanswered (SAA-197)
+//   correct  "Change attendees…" in Recent meetings (SAA-258): the saved answer
+//            as chips. Save sends a correction; Cancel or a close writes nothing
+//   voices   "Name N voices…" in the tray, or Fix names in Recent meetings: the
+//            saved answer as chips and the voice rows. Save names the voices,
+//            and sends a correction only when a chip or the scope changed
+// The page asks for what it shows (identity:init, identity:me, identity:search);
+// the calendar preview (stop only) and the voices, once ready, are pushed to it.
+// Only one identity window is shown at a time: a second request brings the open
+// one forward.
+function newIdentityWindow({ onTop = true } = {}) {
+    return new BrowserWindow({
+        // Content box, not frame, created at the full height and only ever
+        // shrunk (SAA-186): see pumpIdentityQueue.
+        useContentSize: true,
+        width: IDENTITY_WINDOW.width,
+        height: IDENTITY_WINDOW.maxHeight,
+        show: false,
+        resizable: false,
+        minimizable: false,
+        maximizable: false,
+        fullscreenable: false,
+        alwaysOnTop: onTop,
+        title: 'Who was on this call?',
+        webPreferences: { nodeIntegration: true, contextIsolation: false },
+    });
+}
+
+// What the page is loaded with. Everything else it asks for.
+function identityQuery(capture, mode) {
+    return {
+        token: capture.token,
+        stem: capture.stem,
+        mode,
+        // SAA-170: the scope the triggering app implies, or '' for none.
+        inferredScope: capture.inferredScope === 'work' || capture.inferredScope === 'personal' ? capture.inferredScope : '',
+        // SAA-187: milliseconds, '' when unknown.
+        duration: Number.isFinite(capture.durationMs) ? String(capture.durationMs) : '',
+    };
+}
+
+// The capture's length from its manifest, for a window reopened after the stop.
+function durationMsFor(stem) {
+    try {
+        const manifest = JSON.parse(fs.readFileSync(path.join(OUTDIR, `manifest-${stem}.json`), 'utf8'));
+        const tracks = Array.isArray(manifest.tracks) ? manifest.tracks : [];
+        const secs = Math.max(0, ...tracks.map((t) => (t && Number.isFinite(t.duration_s) ? t.duration_s : 0)));
+        return secs > 0 ? Math.round(secs * 1000) : null;
+    } catch {
+        return null;
+    }
+}
+
+// The three reopen paths share this: shown once ready, the voices watched from
+// the moment the page loads, and onClosed for a native close that was neither
+// Save nor Skip.
+function showReopenedIdentityWindow(win, capture, mode, onClosed) {
+    identityWindow = { win, capture, mode, shown: false, resolved: false, fromQueue: false, pollTimer: null, loaded: false, calendarSent: true };
+    const reveal = () => {
+        if (!identityWindow || identityWindow.win !== win || identityWindow.shown) return;
+        identityWindow.shown = true;
+        win.show();
+        try { app.focus({ steal: true }); } catch {}
+    };
+    identityWindow.reveal = reveal;
+    win.once('ready-to-show', () => setTimeout(reveal, IDENTITY_REVEAL_GRACE_MS));
+    win.webContents.once('did-finish-load', () => {
+        if (!identityWindow || identityWindow.win !== win) return;
+        identityWindow.loaded = true;
+        beginNamingDataWait(capture);
+    });
+    win.once('closed', () => {
+        if (identityWindow && identityWindow.win === win && !identityWindow.resolved) {
+            onClosed();
+            resolveIdentityWindow();
+        }
+        identityWindow = null;
+        pumpIdentityQueue();
+    });
+}
+
+// "Change attendees…" in Recent meetings (SAA-258): the window in correct mode,
+// filled from the saved answer. Saving writes a correction and sends it through
+// the upload queue; Cancel or closing the window writes nothing, and leaves no
+// Later marker, since the call was answered.
 function reopenIdentityForCorrection(stem) {
     if (identityWindow) {
         try { identityWindow.win.show(); app.focus({ steal: true }); } catch {}
@@ -1453,61 +1533,19 @@ function reopenIdentityForCorrection(stem) {
             `The saved answer for ${stem} could not be read.`);
         return;
     }
-    const guests = (Array.isArray(saved.guests) ? saved.guests : [])
-        .map((g) => (g && typeof g.name === 'string' ? g.name.trim() : ''))
-        .filter(Boolean);
-    const known = knownGuestNames(OUTDIR);
-    const knownKeys = new Set(known.map((n) => n.toLowerCase()));
-    const capture = { stem, recordingId: saved.recording_id || null, correcting: true, token: randomUUID() };
-
+    const capture = { stem, recordingId: saved.recording_id || null, correcting: true, token: randomUUID(), durationMs: durationMsFor(stem) };
     let win;
     try {
-        win = new BrowserWindow({
-            useContentSize: true,
-            width: IDENTITY_WINDOW.width,
-            height: IDENTITY_WINDOW.maxHeight,
-            show: false,
-            resizable: false,
-            minimizable: false,
-            maximizable: false,
-            fullscreenable: false,
-            alwaysOnTop: true,
-            title: 'Who was on this call?',
-            webPreferences: { nodeIntegration: true, contextIsolation: false },
-        });
+        win = newIdentityWindow();
     } catch (err) {
         console.error(`identity: could not open the correction: ${String(err)}`);
         notify('identity-change-failed', 'Clipwise: could not change who was on this call', `${stem} could not be opened.`);
         return;
     }
-    identityWindow = { win, capture, shown: false, step: 1, resolved: false, fromQueue: false, pollTimer: null };
-    const reveal = () => {
-        if (!identityWindow || identityWindow.win !== win || identityWindow.shown) return;
-        identityWindow.shown = true;
-        win.show();
-        try { app.focus({ steal: true }); } catch {}
-    };
-    identityWindow.reveal = reveal;
-    win.once('ready-to-show', () => setTimeout(reveal, IDENTITY_REVEAL_GRACE_MS));
-    win.once('closed', () => {
-        if (identityWindow && identityWindow.win === win && !identityWindow.resolved) {
-            console.error(`[clipwise-recorder] identity ${stem}: correction closed — saved answer kept`);
-            resolveIdentityWindow();
-        }
-        identityWindow = null;
-        pumpIdentityQueue();
+    showReopenedIdentityWindow(win, capture, 'correct', () => {
+        console.error(`[clipwise-recorder] identity ${stem}: correction closed — saved answer kept`);
     });
-    win.loadFile(IDENTITY_HTML, {
-        query: {
-            token: capture.token,
-            stem,
-            self: saved.self && typeof saved.self.name === 'string' ? saved.self.name : '',
-            knownNames: JSON.stringify([...known, ...guests.filter((n) => !knownKeys.has(n.toLowerCase()))]),
-            checkedNames: JSON.stringify(guests),
-            savedScope: saved.scope === 'work' || saved.scope === 'personal' ? saved.scope : '',
-            correcting: '1',
-        },
-    }).catch((err) => {
+    win.loadFile(IDENTITY_HTML, { query: identityQuery(capture, 'correct') }).catch((err) => {
         console.error(`identity: correction failed to open: ${String(err)}`);
         notify('identity-change-load-failed', 'Clipwise: could not change who was on this call', `${stem} could not be opened.`);
         identityWindow = null;
@@ -1515,34 +1553,12 @@ function reopenIdentityForCorrection(stem) {
     });
 }
 
-// Reopens step 2 directly for a capture whose naming was left for later
-// (SAA-195, tray click). Outside identityQueue entirely — that queue is for
-// captures whose pipeline just finished, and this one's already has; the
-// data it needs (the guest roster from step 1, the naming data from
-// diarize) is already sitting on disk, so there is no waiting state to
-// show.
-// opts.rename: true reopens the most recent named call's answer for
-// correction (SAA-195's "Rename voices…" item) rather than a first-time
-// naming — pre-fills each voice's current name and tags the eventual save
-// so applyVoiceNames knows it may overwrite (see voice-names.ts).
-//
-// A menu bar item must never be a dead end (SAA-195 fix, 2026-09-25):
-// every failure path below now either proceeds with a safe fallback (no
-// identity-<stem>.json — an empty guest list, so only "Someone else…" and
-// "Not sure" are offered) or shows a notification. None fail silently.
-// Reopens step 1 directly for a capture whose identity prompt was deferred
-// by closing the window (SAA-197's "Who was on the <date> call…" tray item).
-// Built as its own prompt from the later-marker's saved fields, exactly the
-// window promptForIdentity would have shown at stop — not a special reduced
-// path, since self/known-names/etc. are read fresh from disk the same way.
-// Answering it goes through the ordinary identity:submit handler unchanged,
-// which is what gives this its step 1 -> step 2 continuity for free: if
-// voices-<stem>.json already exists by the time this is answered, the
-// existing beginNamingDataWait poll picks it up on its very first tick and
-// shows step 2 in the same window, same as it would have at stop.
-//
-// A menu bar item must never be a dead end (SAA-195's rule, applied here
-// too): a missing or unreadable marker notifies rather than doing nothing.
+// The tray's "Who was on the <date> call…" item (SAA-197): the window in later
+// mode, for a capture whose window was closed unanswered, built from the
+// later-marker's saved fields. Answering it goes through identity:submit as at
+// stop. Closing it again is Later again: the marker is rewritten, never
+// consumed. A missing or unreadable marker notifies rather than doing nothing
+// (SAA-195's rule: a menu bar item is never a dead end).
 function reopenIdentityPrompt(stem) {
     if (identityWindow) {
         try { identityWindow.win.show(); app.focus({ steal: true }); } catch {}
@@ -1556,62 +1572,19 @@ function reopenIdentityPrompt(stem) {
         return;
     }
     const capture = { ...marker, stem, token: randomUUID() };
-
     let win;
     try {
-        win = new BrowserWindow({
-            useContentSize: true,
-            width: IDENTITY_WINDOW.width,
-            height: IDENTITY_WINDOW.maxHeight,
-            show: false,
-            resizable: false,
-            minimizable: false,
-            maximizable: false,
-            fullscreenable: false,
-            alwaysOnTop: true,
-            title: 'Who was on this call?',
-            webPreferences: { nodeIntegration: true, contextIsolation: false },
-        });
+        win = newIdentityWindow();
     } catch (err) {
         console.error(`identity: could not reopen the prompt: ${String(err)}`);
         notify('identity-reopen-failed', 'Clipwise: could not reopen prompt', `Who was on ${stem} could not be reopened.`);
         return;
     }
-    identityWindow = { win, capture, shown: false, step: 1, resolved: false, fromQueue: false, pollTimer: null };
-    const reveal = () => {
-        if (!identityWindow || identityWindow.win !== win || identityWindow.shown) return;
-        identityWindow.shown = true;
-        win.show();
-        try { app.focus({ steal: true }); } catch {}
-    };
-    identityWindow.reveal = reveal;
-    win.once('ready-to-show', () => setTimeout(reveal, IDENTITY_REVEAL_GRACE_MS));
-    win.once('closed', () => {
-        // Same treatment as the original prompt's own close handler — still
-        // Later, not Skip, and re-deferrable indefinitely: the marker this
-        // reopen read is simply rewritten (deferIdentityPrompt is a plain
-        // overwrite), not consumed. Unlike that handler this window was
-        // never on identityQueue, but a genuinely queued capture that has
-        // been waiting behind this one should still get its turn now.
-        if (identityWindow && identityWindow.win === win && !identityWindow.resolved) {
-            console.error(`[clipwise-recorder] identity ${stem}: closed during step 1 — treated as Later`);
-            deferIdentityPrompt(identityWindow.capture);
-            resolveIdentityWindow();
-        }
-        identityWindow = null;
-        pumpIdentityQueue();
+    showReopenedIdentityWindow(win, capture, 'later', () => {
+        console.error(`[clipwise-recorder] identity ${stem}: closed unanswered — treated as Later`);
+        deferIdentityPrompt(capture);
     });
-    win.loadFile(IDENTITY_HTML, {
-        query: {
-            token: capture.token,
-            stem,
-            self: readSelfName() || '',
-            knownNames: JSON.stringify(knownGuestNames(OUTDIR)),
-            inferredScope: capture.inferredScope === 'work' || capture.inferredScope === 'personal'
-                ? capture.inferredScope : '',
-            duration: Number.isFinite(capture.durationMs) ? String(capture.durationMs) : '',
-        },
-    }).catch((err) => {
+    win.loadFile(IDENTITY_HTML, { query: identityQuery(capture, 'later') }).catch((err) => {
         console.error(`identity: prompt failed to reopen: ${String(err)}`);
         notify('identity-reopen-load-failed', 'Clipwise: could not reopen prompt', `Who was on ${stem} could not be reopened.`);
         identityWindow = null;
@@ -1619,106 +1592,91 @@ function reopenIdentityPrompt(stem) {
     });
 }
 
+// "Name N voices…" in the tray, or Fix names in Recent meetings (SAA-195,
+// SAA-255): the window in voices mode, with the saved answer's people as chips
+// (none if the call was skipped) and the voice rows. opts.rename: the call's
+// voices were named before, so the save may overwrite or clear a name
+// (voice-names.ts applyVoiceNames). The naming data must already be on disk:
+// a menu bar item never opens a window with nothing in it.
 function reopenVoiceNaming(stem, opts = {}) {
     if (identityWindow) {
-        // Only one identity window is ever shown at a time today. Bringing
-        // the existing one forward is a plainer answer than queueing a
-        // second concurrent window would be.
         try { identityWindow.win.show(); app.focus({ steal: true }); } catch {}
         return;
     }
-    let recordingId = null;
-    let guestNames = [];
-    const identityPath = path.join(OUTDIR, `identity-${stem}.json`);
-    if (fs.existsSync(identityPath)) {
-        try {
-            const doc = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
-            recordingId = doc.recording_id || null;
-            guestNames = (doc.guests || []).map((g) => g.name).filter(Boolean);
-        } catch (err) {
-            console.error(`voice-names: identity-${stem}.json exists but could not be read: ${String(err)}`);
-            notify('naming-reopen-answer-unreadable', 'Clipwise: could not reopen naming',
-                `Naming the voices on ${stem} could not be reopened — the identity answer is unreadable.`);
-            return;
-        }
-    }
-    // else: identity was skipped for this capture. Proceeds with an empty
-    // guestNames rather than failing — step 2 still works, just with no
-    // roster to pick from.
-
-    const namingData = readNamingData(OUTDIR, stem);
-    if (!namingData) {
+    if (!readNamingData(OUTDIR, stem)) {
         console.error(`voice-names: no naming data for ${stem} — nothing to reopen`);
         notify('naming-reopen-data-missing', 'Clipwise: could not reopen naming',
             `Naming the voices on ${stem} could not be reopened — the naming data is missing.`);
         return;
     }
-
-    let currentNames = {};
-    if (opts.rename) {
-        const existing = readVoiceNamesAnswer(OUTDIR, stem);
-        if (existing && Array.isArray(existing.voices)) {
-            for (const v of existing.voices) currentNames[v.voiceIndex] = v.name || null;
-        }
+    // No answer file means the call was skipped: the window opens with no chips.
+    // One that exists but can't be read stops here, as before step 4: saving
+    // over it would replace an answer nobody has seen.
+    const saved = readAnswer(OUTDIR, stem);
+    if (!saved && fs.existsSync(path.join(OUTDIR, `identity-${stem}.json`))) {
+        console.error(`voice-names: identity-${stem}.json exists but could not be read`);
+        notify('naming-reopen-answer-unreadable', 'Clipwise: could not reopen naming',
+            `Naming the voices on ${stem} could not be reopened — the identity answer is unreadable.`);
+        return;
     }
-
+    const capture = { stem, recordingId: (saved && saved.recording_id) || captureIdFor(stem), token: randomUUID(), durationMs: durationMsFor(stem) };
     let win;
     try {
-        win = new BrowserWindow({
-            useContentSize: true,
-            width: IDENTITY_WINDOW.width,
-            height: IDENTITY_WINDOW.maxHeight,
-            show: false,
-            resizable: false,
-            minimizable: false,
-            maximizable: false,
-            fullscreenable: false,
-            alwaysOnTop: true,
-            title: "Who's speaking?",
-            webPreferences: { nodeIntegration: true, contextIsolation: false },
-        });
+        win = newIdentityWindow();
     } catch (err) {
         console.error(`voice-names: could not reopen the naming window: ${String(err)}`);
         notify('naming-reopen-failed', 'Clipwise: could not reopen naming', `Naming the voices on ${stem} could not be reopened.`);
         return;
     }
-    identityWindow = {
-        win, capture: { stem, token: randomUUID(), recordingId },
-        step: 2, resolved: false, fromQueue: false, pollTimer: null, shown: false,
-        isRename: Boolean(opts.rename),
-    };
-    const reveal = () => {
-        if (!identityWindow || identityWindow.win !== win || identityWindow.shown) return;
-        identityWindow.shown = true;
-        win.show();
-        try { app.focus({ steal: true }); } catch {}
-    };
-    identityWindow.reveal = reveal;
-    win.once('ready-to-show', () => setTimeout(reveal, IDENTITY_REVEAL_GRACE_MS));
-    win.once('closed', () => {
-        // SAA-197 applies here too: a native close is Later, never a
-        // silent reopen. No pumpIdentityQueue() call — this window was
-        // never on that queue.
-        if (identityWindow && identityWindow.win === win && !identityWindow.resolved) {
-            console.error(`[clipwise-recorder] identity ${stem}: closed during step 2 — treated as Later`);
-            resolveIdentityWindow();
-        }
-        identityWindow = null;
+    showReopenedIdentityWindow(win, capture, 'voices', () => {
+        console.error(`[clipwise-recorder] identity ${stem}: voice naming closed — left for later`);
     });
-    win.loadFile(IDENTITY_HTML, {
-        query: {
-            token: identityWindow.capture.token,
-            stem,
-            startStep: '2',
-            startNames: JSON.stringify(guestNames),
-            namingData: JSON.stringify(namingData),
-            currentNames: JSON.stringify(currentNames),
-        },
-    }).catch((err) => {
+    identityWindow.isRename = Boolean(opts.rename);
+    win.loadFile(IDENTITY_HTML, { query: identityQuery(capture, 'voices') }).catch((err) => {
         console.error(`voice-names: naming window failed to load: ${String(err)}`);
         notify('naming-reopen-load-failed', 'Clipwise: could not reopen naming', `Naming the voices on ${stem} could not be reopened.`);
         identityWindow = null;
         try { win.close(); } catch {}
+    });
+}
+
+// The window check's switch (check-identity-window.js), read here and nowhere
+// else. Unset in normal use. Set to "<stem>", "<stem>:correct" or
+// "<stem>:voices", it opens, for that capture in this support folder, the stop
+// window, Change attendees… or Name voices / Fix names: the same window each
+// time, through the same function a real stop, menu item or button calls. It
+// opens only. Unset, it returns at once. Set, it logs exactly one line: what it
+// opened, or why it opened nothing (a malformed value, no capture with that
+// stem, no saved answer to correct, no voices to name), checked before anything
+// is opened, so a bad value never reaches a notification.
+function openIdentityWindowForCheck() {
+    const raw = process.env.CLIPWISE_CHECK_PROMPT_STEM;
+    if (!raw) return;
+    const m = /^(.+?)(?::(correct|voices))?$/.exec(raw);
+    const stem = m && STEM_PATTERN.test(m[1]) ? m[1] : null;
+    const how = stem ? m[2] || 'stop' : null;
+    let manifest = null;
+    if (stem) {
+        try { manifest = JSON.parse(fs.readFileSync(path.join(OUTDIR, `manifest-${stem}.json`), 'utf8')); } catch {}
+    }
+    const why = !stem ? 'not "<stem>", "<stem>:correct" or "<stem>:voices"'
+        : !manifest ? `no capture ${stem} in this support folder`
+            : how === 'correct' && !readAnswer(OUTDIR, stem) ? `no saved answer for ${stem} to correct`
+                : how === 'voices' && !readNamingData(OUTDIR, stem) ? `no voices for ${stem} to name`
+                    : null;
+    if (why) {
+        console.error(`[clipwise-recorder] check switch: nothing opened — ${why}`);
+        return;
+    }
+    console.error(`[clipwise-recorder] check switch: opening the identity window (${how}) for ${stem}`);
+    if (how === 'correct') { reopenIdentityForCorrection(stem); return; }
+    if (how === 'voices') { reopenVoiceNaming(stem, { rename: readVoiceNamesAnswer(OUTDIR, stem) !== null }); return; }
+    const key = manifest.trigger_app && manifest.trigger_app.key;
+    promptForIdentity({
+        stem,
+        recordingId: manifest.recording_id || null,
+        inferredScope: key ? scopeForDetectedKey(key) : null,
+        durationMs: durationMsFor(stem),
     });
 }
 
@@ -3774,8 +3732,8 @@ function writeIdentityAnswer(capture, answer) {
     const doc = buildAnswerDoc({
         stem: capture.stem,
         recordingId: capture.recordingId,
-        // Names only until the new window sends chips (SAA-260 step 4).
-        guests: (answer.names || []).map((name) => ({ name })),
+        // One per chip: { name, personId? } (SAA-260 step 4).
+        guests: answer.guests,
         selfName: answer.selfName,
         scope: answer.scope,
         corrects: answer.corrects,
@@ -3785,8 +3743,11 @@ function writeIdentityAnswer(capture, answer) {
     return finalPath;
 }
 
-// Asked once, then reused. Kept beside the recordings rather than in the
-// capture directory: it is a fact about the person, not about one capture.
+// The host's name, cached (SAA-260 step 4): identity-self.json holds the last
+// display name GET /captures/me returned, for a window opened while the server
+// can't be reached. It is no longer typed: the window has no host field. Kept
+// beside the recordings rather than in the capture directory: it is a fact
+// about the person, not about one capture.
 function readSelfName() {
     try {
         const doc = JSON.parse(fs.readFileSync(SELF_PATH, 'utf8'));
@@ -3797,7 +3758,7 @@ function readSelfName() {
 }
 
 function writeSelfName(name) {
-    if (!name) return;
+    if (!name || name === readSelfName()) return;
     try {
         fs.mkdirSync(SUPPORT_DIR, { recursive: true });
         fs.writeFileSync(
@@ -3855,21 +3816,20 @@ function requestCalendarPreview(capture) {
     });
 }
 
-// To the page, if this token's window is on screen at step 1 with its page
-// loaded. Sent at most once per window: the page also ignores a second one.
+// To the page, if this token's window is the stop window with its page loaded.
+// Sent at most once per window: the page also ignores a second one.
 function sendCalendarPreview(token) {
     const prefill = calendarPreviews.get(token);
     if (!prefill || !identityWindow || identityWindow.capture.token !== token) return;
-    if (!identityWindow.loaded || identityWindow.step !== 1 || identityWindow.calendarSent) return;
+    if (!identityWindow.loaded || identityWindow.mode !== 'stop' || identityWindow.calendarSent) return;
     identityWindow.calendarSent = true;
     identityWindow.win.webContents.send('identity:calendar', prefill);
 }
 
-// Records that step 1 is unanswered (SAA-197; also written when the capture is
-// queued, see promptForIdentity). `capture`
-// carries exactly the fields promptForIdentity itself needs to reopen the
-// same prompt later — everything else (self, known names) is read fresh
-// from disk when it does. Failure just means the tray item won't appear;
+// Records that the stop window is unanswered (SAA-197; also written when the
+// capture is queued, see promptForIdentity). `capture` carries exactly the
+// fields the window needs to reopen the same way later; everything else is
+// asked for fresh when it does. Failure just means the tray item won't appear;
 // the capture is unaffected either way, so this only logs.
 function deferIdentityPrompt(capture) {
     try {
@@ -3888,9 +3848,9 @@ function deferIdentityPrompt(capture) {
 
 // Ends this window's turn for good: stops its naming-data poll if one is
 // running, and — only when it came off identityQueue — advances past it, so
-// the queue can offer the next different capture. A window reopened from
-// the tray (reopenVoiceNaming) never touched the queue and must not shift
-// it; that path's own `fromQueue: false` is what this checks.
+// the queue can offer the next different capture. A reopened window never
+// touched the queue and must not shift it; its `fromQueue: false` is what this
+// checks.
 function resolveIdentityWindow() {
     if (!identityWindow) return;
     identityWindow.resolved = true;
@@ -3913,42 +3873,54 @@ function readPipelineSidecar(dir, stem) {
     }
 }
 
-// Step 2's wait, with a stop (SAA-195 fix, 2026-09-25). Every tick: naming
-// data found -> show it. Otherwise, stopMessageFor (voice-naming-wait.js —
-// see its own comment for exactly which pipeline-record fields it reads)
-// decides whether to give up and why.
+// Each voice's talk time from diarize's file, for the voice rows: its index and
+// total seconds, nothing else (the file also holds every voice's embedding,
+// which never goes to the page).
+function readDiarizeVoices(stem) {
+    try {
+        const doc = JSON.parse(fs.readFileSync(path.join(OUTDIR, `diarize-${stem}.json`), 'utf8'));
+        const voices = Array.isArray(doc.voices) ? doc.voices : [];
+        return { voices: voices.filter((v) => v && Number.isInteger(v.voiceIndex))
+            .map((v) => ({ voiceIndex: v.voiceIndex, totalSeconds: Number(v.totalSeconds) || 0 })) };
+    } catch {
+        return { voices: [] };
+    }
+}
+
+// The voices part's wait, from the moment the page loads (SAA-260 step 4: the
+// voices are named in this same window, and fill in late). Every tick: naming
+// data found -> sent to the page. Otherwise stopMessageFor (voice-naming-wait.js,
+// whose comment says which pipeline-record fields it reads) decides whether
+// there will be none, and why; the page shows that in place of "Finding
+// voices…". Neither closes the window: Save never waits for voices, and voices
+// not ready by then stay pending for the tray (pendingVoiceNamingStems).
 function beginNamingDataWait(capture) {
+    if (!identityWindow || identityWindow.pollTimer) return;
     const startedAt = Date.now();
-    identityWindow.pollTimer = setInterval(() => {
+    const tick = () => {
         if (!identityWindow || identityWindow.capture.token !== capture.token) return;
-
-        const data = readNamingData(OUTDIR, capture.stem);
+        const stop = () => {
+            clearInterval(identityWindow.pollTimer);
+            identityWindow.pollTimer = null;
+        };
+        // Only the fields the voice rows use (namingDataForPage), whatever else
+        // the file holds.
+        const data = namingDataForPage(readNamingData(OUTDIR, capture.stem));
         if (data) {
-            clearInterval(identityWindow.pollTimer);
-            identityWindow.pollTimer = null;
-            identityWindow.win.webContents.send('identity:step2-ready', data);
+            stop();
+            identityWindow.win.webContents.send('identity:voices', { namingData: data, diarize: readDiarizeVoices(capture.stem) });
             return;
         }
-
-        const sidecar = readPipelineSidecar(OUTDIR, capture.stem);
-        const stopMessage = stopMessageFor(sidecar);
-
+        const stopMessage = stopMessageFor(readPipelineSidecar(OUTDIR, capture.stem));
         if (stopMessage) {
-            clearInterval(identityWindow.pollTimer);
-            identityWindow.pollTimer = null;
-            identityWindow.win.webContents.send('identity:step2-stopped', { message: stopMessage });
-            setTimeout(() => {
-                if (identityWindow && identityWindow.capture.token === capture.token) finishIdentityWindow();
-            }, VOICE_NAMING_STOP_MESSAGE_MS);
+            stop();
+            identityWindow.win.webContents.send('identity:voices-stopped', { message: stopMessage });
             return;
         }
-
-        if (Date.now() - startedAt > VOICE_NAMING_WAIT_CAP_MS) {
-            clearInterval(identityWindow.pollTimer);
-            identityWindow.pollTimer = null;
-            finishIdentityWindow();
-        }
-    }, VOICE_NAMING_POLL_MS);
+        if (Date.now() - startedAt > VOICE_NAMING_WAIT_CAP_MS) stop();
+    };
+    identityWindow.pollTimer = setInterval(tick, VOICE_NAMING_POLL_MS);
+    tick();
 }
 
 function pumpIdentityQueue() {
@@ -3956,38 +3928,19 @@ function pumpIdentityQueue() {
     const capture = identityQueue[0];
     let win;
     try {
-        win = new BrowserWindow({
-            // Content box, not frame: the page measures its own content and
-            // asks for a height (identity:resize), and a frame-sized window
-            // would apply that measurement to the wrong box and clip by the
-            // height of the title bar.
-            useContentSize: true,
-            width: IDENTITY_WINDOW.width,
-            // Created at the full height from the start, then shrunk once
-            // the page reports its real size (SAA-186). Starting small and
-            // growing after load — the previous behaviour — corrupted the
-            // known-names checklist whenever the grow crossed into territory
-            // the hidden window had never painted: created at 220px, resized
-            // to a clamped 560px, the newly-exposed 220-560 band showed a
-            // stale/torn composite on first show(), reproducibly, on both
-            // the dev Electron binary and the signed packaged app. Creating
-            // at maxHeight and only ever shrinking from here never exposes
-            // unpainted territory — confirmed by the same repro with the
-            // creation height flipped and nothing else changed. The window
-            // is still hidden until reveal(), so a short dialog never
-            // visibly flashes the taller size.
-            height: IDENTITY_WINDOW.maxHeight,
-            show: false,
-            resizable: false,
-            minimizable: false,
-            maximizable: false,
-            fullscreenable: false,
-            // Not on top after an auto-stop: nobody asked for this window, and the
-            // person may be in the middle of something else.
-            alwaysOnTop: !capture.auto,
-            title: 'Who was on this call?',
-            webPreferences: { nodeIntegration: true, contextIsolation: false },
-        });
+        // Content box, not frame: the page measures its own content and asks
+        // for a height (identity:resize), and a frame-sized window would apply
+        // that measurement to the wrong box and clip by the height of the title
+        // bar. Created at the full height from the start, then shrunk once the
+        // page reports its real size (SAA-186): starting small and growing after
+        // load showed a stale, torn composite in the newly exposed band on first
+        // show(), on both the dev Electron binary and the signed packaged app.
+        // Creating at maxHeight and only ever shrinking never exposes unpainted
+        // territory. The window is hidden until reveal(), so a short window
+        // never visibly flashes the taller size. Not on top after an auto-stop:
+        // nobody asked for this window, and the person may be in the middle of
+        // something else.
+        win = newIdentityWindow({ onTop: !capture.auto });
     } catch (err) {
         // A prompt that cannot be drawn leaves the recording unidentified. The
         // capture is already on disk and already in the pipeline.
@@ -3995,11 +3948,11 @@ function pumpIdentityQueue() {
         calendarPreviews.delete(identityQueue.shift().token);
         return;
     }
-    identityWindow = { win, capture, shown: false, step: 1, resolved: false, fromQueue: true, pollTimer: null, loaded: false, calendarSent: false };
+    identityWindow = { win, capture, mode: 'stop', shown: false, resolved: false, fromQueue: true, pollTimer: null, loaded: false, calendarSent: false };
     // Shown once, by whichever comes first: the page's own height message, or
     // a deadline. The deadline is what stops a broken measurement from leaving
     // the prompt invisible — a window nobody can see is worse than one sized
-    // to the minimum, and the layout keeps the buttons reachable either way.
+    // to the minimum.
     const reveal = () => {
         if (!identityWindow || identityWindow.win !== win || identityWindow.shown) return;
         identityWindow.shown = true;
@@ -4012,81 +3965,62 @@ function pumpIdentityQueue() {
     };
     identityWindow.reveal = reveal;
     win.once('ready-to-show', () => setTimeout(reveal, IDENTITY_REVEAL_GRACE_MS));
-    // A calendar preview that came before the page could receive it (SAA-221).
+    // A calendar preview that came before the page could receive it (SAA-221),
+    // and the voices, watched from now on.
     win.webContents.once('did-finish-load', () => {
         if (!identityWindow || identityWindow.win !== win) return;
         identityWindow.loaded = true;
         sendCalendarPreview(capture.token);
+        beginNamingDataWait(capture);
     });
     win.once('closed', () => {
-        // SAA-197: closing via the window's own controls used to reopen the
-        // same capture immediately — this queue never advanced, because
-        // only Save/Skip/Later did that. Treated now as Later, both at step
-        // 1 (a marker written so a tray item can offer it again — see
-        // deferIdentityPrompt) and step 2 (unchanged: driven entirely by
-        // voices-<stem>.json existing without voice-names-<stem>.json,
-        // nothing to write) — a native close is a real, resumable answer,
-        // never a silent reopen and never Skip's permanence.
+        // SAA-197: a close by the window's own controls is Later, never a
+        // silent reopen and never Skip's permanence: the marker stays, so a
+        // tray item offers the call again. Voices not named stay pending as
+        // they are (voices-<stem>.json without voice-names-<stem>.json).
         if (identityWindow && identityWindow.win === win && !identityWindow.resolved) {
-            const capture = identityWindow.capture;
-            if (identityWindow.step === 2) {
-                console.error(
-                    `[clipwise-recorder] identity ${capture.stem}: closed during step 2 — treated as Later`);
-            } else {
-                console.error(
-                    `[clipwise-recorder] identity ${capture.stem}: closed during step 1 — treated as Later`);
-                deferIdentityPrompt(capture);
-            }
+            console.error(`[clipwise-recorder] identity ${identityWindow.capture.stem}: closed unanswered — treated as Later`);
+            deferIdentityPrompt(identityWindow.capture);
             resolveIdentityWindow();
         }
         calendarPreviews.delete(capture.token);
         identityWindow = null;
         pumpIdentityQueue();
     });
-    win.loadFile(IDENTITY_HTML, {
-        query: {
-            token: capture.token,
-            stem: capture.stem,
-            self: readSelfName() || '',
-            // SAA-169: names from every previous answer on this machine, so
-            // the page can offer them as a pick-list instead of requiring
-            // them to be retyped. Small (JSON array of strings) and local —
-            // a directory scan, not a network or DB call — so this stays
-            // synchronous with the rest of window setup.
-            knownNames: JSON.stringify(knownGuestNames(OUTDIR)),
-            // SAA-170: which scope the triggering app implies, or '' for no
-            // inference (a manual start, or an app with no entry) — the page
-            // pre-selects this and nothing else, never defaulting on its own.
-            inferredScope: capture.inferredScope === 'work' || capture.inferredScope === 'personal'
-                ? capture.inferredScope : '',
-            // SAA-187: milliseconds, as a string — '' when unavailable rather
-            // than omitted, matching inferredScope's convention so the page
-            // can tell "not provided" from "provided as zero".
-            duration: Number.isFinite(capture.durationMs) ? String(capture.durationMs) : '',
-        },
-    }).catch((err) => {
+    win.loadFile(IDENTITY_HTML, { query: identityQuery(capture, 'stop') }).catch((err) => {
         console.error(`identity: prompt failed to load: ${String(err)}`);
         try { win.close(); } catch {}
     });
 }
 
-// Validates that `token` names the window currently on screen and returns
-// its capture, without resolving anything — unlike the old
-// claimIdentityPrompt, a step 1 submission with more than one guest must
-// leave the window and the queue exactly where they are while step 2 takes
-// over the same window.
+// Validates that `token` names the window currently on screen and returns its
+// capture, without resolving anything.
 function currentCapture(token) {
     if (!identityWindow || identityWindow.capture.token !== token) return null;
     return identityWindow.capture;
 }
 
-// Terminal for this capture: resolves the queue/poll bookkeeping, then
-// closes the window. Every path that ends this capture's turn — the
-// one-guest short-circuit, a step 2 save, Skip, Later — goes through this,
-// so exactly one thing ever advances the queue for it.
+// Terminal for this capture: resolves the queue/poll bookkeeping, then closes
+// the window. Every path that ends this capture's turn — Save, Skip, Cancel —
+// goes through this, so exactly one thing ever advances the queue for it.
 function finishIdentityWindow() {
     resolveIdentityWindow();
     try { identityWindow.win.close(); } catch {}
+}
+
+// The page's chips, as sent: [{ name, personId? }], at most 50 (the server's
+// bound, captures.ts identitySchema), names as strings.
+function guestsFromPage(raw) {
+    return (Array.isArray(raw) ? raw : []).slice(0, 50)
+        .filter((g) => g && typeof g.name === 'string')
+        .map((g) => (typeof g.personId === 'string' ? { name: g.name, personId: g.personId } : { name: g.name }));
+}
+
+// The voice rows' choices, as sent: [{ voiceIndex, name | null }].
+function voicesFromPage(raw) {
+    return (Array.isArray(raw) ? raw : []).slice(0, 64)
+        .filter((v) => v && Number.isInteger(v.voiceIndex) && v.voiceIndex > 0)
+        .map((v) => ({ voiceIndex: v.voiceIndex, name: typeof v.name === 'string' && v.name.trim() ? v.name : null }));
 }
 
 function registerIdentityIpc() {
@@ -4106,39 +4040,110 @@ function registerIdentityIpc() {
         identityWindow.reveal();
     });
 
+    // What the page starts from: the saved answer when it reopens one (correct,
+    // voices), with any guest or self name holding an @ dropped (answerForPage),
+    // the voice names already saved, and the cached host name.
+    ipcMain.handle('identity:init', (_event, payload) => {
+        const capture = currentCapture(payload && payload.token);
+        if (!capture) return null;
+        const mode = identityWindow.mode;
+        return {
+            mode,
+            saved: mode === 'correct' || mode === 'voices' ? answerForPage(readAnswer(OUTDIR, capture.stem)) : null,
+            voiceNames: readVoiceNamesAnswer(OUTDIR, capture.stem),
+            cachedSelf: readSelfName(),
+        };
+    });
+
+    // The host's name for the footer and the answer (SAA-260 step 1's GET
+    // /captures/me). Cached in identity-self.json each time it is read, for a
+    // window opened while the server can't be reached. The log says where the
+    // name came from, never the name. Anything thrown on the way to the server
+    // (the refresh path's sign-out included) counts as no reply: the page gets
+    // the cached name, never an error.
+    ipcMain.handle('identity:me', async (_event, payload) => {
+        const capture = currentCapture(payload && payload.token);
+        if (!capture) return null;
+        const window = identityWindow;
+        const cached = readSelfName();
+        const server = signedInServer();
+        let me = null;
+        if (server) {
+            try {
+                const reply = await captureServerRequest(server, 'GET', '/captures/me');
+                if (reply.status === 200) me = reply.json;
+            } catch {
+                me = null;
+            }
+        }
+        const name = selfNameFrom(me, cached);
+        const source = me && selfNameFrom(me, null) ? 'account' : name ? 'cache' : 'none';
+        if (source === 'account') writeSelfName(name);
+        if (identityWindow === window) identityWindow.selfName = name;
+        console.error(`[clipwise-recorder] identity ${capture.stem}: host name from ${source}`);
+        return { displayName: name, source };
+    });
+
+    // The field's search (SAA-260 step 1's GET /captures/people). An empty q is
+    // the Recent row. searched: false means the server could not answer
+    // (signed out, offline, a refused token), and the page tags a typed name
+    // "not checked" instead of "new". Anything thrown on the way to the server
+    // counts the same. Nothing about the query or the people is logged.
+    ipcMain.handle('identity:search', async (_event, payload) => {
+        const capture = currentCapture(payload && payload.token);
+        if (!capture) return { searched: false, results: [] };
+        const q = typeof payload.q === 'string' ? payload.q.slice(0, 256) : '';
+        const server = signedInServer();
+        if (!server) return { searched: false, results: [] };
+        let reply;
+        try {
+            reply = await captureServerRequest(server, 'GET', `/captures/people?q=${encodeURIComponent(q)}`);
+        } catch {
+            return { searched: false, results: [] };
+        }
+        if (reply.status !== 200 || !reply.json || !Array.isArray(reply.json.people)) return { searched: false, results: [] };
+        const results = reply.json.people
+            .filter((p) => p && typeof p.id === 'string' && typeof p.name === 'string')
+            .map((p) => ({ id: p.id, name: p.name }));
+        return { searched: true, results };
+    });
+
+    // Save: the people and the scope, and the voices if their rows were on
+    // screen. Never waits for voices (B.5): ones not ready stay pending.
+    //   stop, later  the answer is written (and invitee names typed for
+    //                addresses, stop only, SAA-221)
+    //   correct      a correction of the saved answer is written (SAA-258)
+    //   voices       a correction only if a chip or the scope changed; with no
+    //                saved answer (the call was skipped), an answer only if it
+    //                names anyone or a scope
+    // Rows the member didn't touch are saved as null, which settles the naming
+    // (decided 2026-11-01).
     ipcMain.on('identity:submit', (_event, payload) => {
         const capture = currentCapture(payload && payload.token);
         if (!capture) return;
-        // SAA-169: guests are known names the person checked off, plus
-        // anyone typed into the "someone new" field — merged and deduped in
-        // identity-answer.js so a known name checked AND (redundantly)
-        // retyped still only counts once.
-        const names = mergeGuestNames(payload.selectedNames, payload.newNames);
-        const selfName = String(payload.self || '').trim() || null;
-        // SAA-170: no default here. 'work' used to be assumed whenever
-        // nothing else was chosen — but now that an actual signal exists for
-        // the common case (the detected app), assuming a value indistinguishable
-        // from a deliberate one is worse than leaving scope unset when there
-        // truly is no basis for either. identity.html only sends 'work' or
-        // 'personal' when a button is actually active (inferred or clicked);
-        // anything else means neither was, and null is the honest answer.
+        const mode = identityWindow.mode;
+        const guests = guestsFromPage(payload.guests);
+        // SAA-170: no default. Only a button actually active counts.
         const scope = payload.scope === 'personal' || payload.scope === 'work' ? payload.scope : null;
-        // A correction (SAA-258) corrects the answer the server holds, which is
-        // not always the one on disk (correctsFor). It doesn't change the name
-        // remembered for the next call: it is about this call only.
-        const corrects = capture.correcting
-            ? correctsFor(readAnswer(OUTDIR, capture.stem), (readUploadEntry(capture.stem) || {}).identityAcceptedAt || null)
-            : undefined;
-        // A name with an @ is an address (SAA-221): the page blocks Save on one,
-        // and it is never remembered as the member's name. buildAnswerDoc drops
-        // it from the answer too.
-        if (!capture.correcting && selfName && !selfName.includes('@')) writeSelfName(selfName);
+        const selfName = identityWindow.selfName !== undefined ? identityWindow.selfName : readSelfName();
+        const saved = readAnswer(OUTDIR, capture.stem);
+        let writeIdentity = true;
+        let corrects;
+        if (mode === 'correct' || (mode === 'voices' && saved)) {
+            writeIdentity = mode === 'correct' || answerChanged(saved, guests, scope);
+            // A correction corrects the answer the server holds, which is not
+            // always the one on disk (correctsFor, SAA-258).
+            if (writeIdentity) corrects = correctsFor(saved, (readUploadEntry(capture.stem) || {}).identityAcceptedAt || null);
+        } else if (mode === 'voices') {
+            writeIdentity = guests.length > 0 || scope !== null;
+        }
+        let wrote = false;
+
         // Names typed for invitees the calendar could not name (SAA-221): their
         // own file, and only for addresses this window's preview offered. A
-        // failure loses those names, not the answer; it is logged and the
-        // answer is still written.
+        // failure loses those names, not the answer.
         const prefill = calendarPreviews.get(capture.token);
-        if (prefill && !capture.correcting) {
+        if (prefill && mode === 'stop') {
             const doc = buildInviteeNamesDoc({
                 stem: capture.stem,
                 recordingId: capture.recordingId,
@@ -4148,122 +4153,79 @@ function registerIdentityIpc() {
             if (doc.invitees.length > 0) {
                 try {
                     console.error(logLines.inviteeNamesLine(capture.stem, doc.invitees.length, writeInviteeNames(OUTDIR, doc)));
+                    wrote = true;
                 } catch (err) {
                     console.error(logLines.inviteeNamesFailedLine(capture.stem, err));
                 }
             }
         }
-        try {
-            writeIdentityAnswer(capture, { names, selfName, scope, corrects });
-        } catch (err) {
-            // The answer is lost; the capture is not. Say so where it can be
-            // read rather than pretending it was written.
-            console.error(`identity: could not write the answer for ${capture.stem}: ${String(err)}`);
-            notify('identity-not-saved', 'Clipwise: identity not saved',
-                `Who was on ${capture.stem} could not be written — the recording is unidentified.`);
-            finishIdentityWindow();
-            return;
+        if (writeIdentity) {
+            try {
+                writeIdentityAnswer(capture, { guests, selfName, scope, corrects });
+                wrote = true;
+                // Answered now, deferred or not (SAA-197): a marker left from an
+                // earlier close no longer describes this capture.
+                deleteLaterMarker(OUTDIR, capture.stem);
+            } catch (err) {
+                // The answer is lost; the capture is not. Say so where it can be
+                // read rather than pretending it was written.
+                console.error(`identity: could not write the answer for ${capture.stem}: ${String(err)}`);
+                notify('identity-not-saved', 'Clipwise: identity not saved',
+                    `Who was on ${capture.stem} could not be written — the recording is unidentified.`);
+            }
+        } else {
+            console.error(`[clipwise-recorder] identity ${capture.stem}: people and scope unchanged — no correction sent`);
         }
+
+        // The voice rows, when they were on screen. An empty list is never sent
+        // by the page; one would write a voice-names file that names nothing.
+        const voices = voicesFromPage(payload.voices);
+        if (voices.length > 0) {
+            const doc = buildVoiceNamesDoc({
+                stem: capture.stem,
+                recordingId: capture.recordingId,
+                voices,
+                // A new answered_at every save, so the server applies it; rename
+                // when this call's voices were named before (voice-names.ts).
+                rename: identityWindow.isRename === true || readVoiceNamesAnswer(OUTDIR, capture.stem) !== null,
+            });
+            try {
+                const finalPath = writeVoiceNamesAnswer(OUTDIR, doc);
+                console.error(logLines.voiceNamesLine(capture.stem, doc.voices.length,
+                    doc.voices.filter((v) => v.name).length, finalPath));
+                wrote = true;
+            } catch (err) {
+                console.error(`voice-names: could not write the answer for ${capture.stem}: ${String(err)}`);
+                notify('voice-names-not-saved', 'Clipwise: voice names not saved',
+                    `Naming the voices on ${capture.stem} could not be written.`);
+            }
+        }
+
         // The answer goes with the capture; the server applies it (SAA-227).
-        uploadAnswer(capture.stem);
-        // Answered now, deferred or not (SAA-197) — a marker left from an
-        // earlier close no longer describes this capture's state. No-op
-        // when there was never one.
-        deleteLaterMarker(OUTDIR, capture.stem);
-        renderTray();
-
-        if (capture.correcting) {
-            // Step 1 only: the server unnames a voice it no longer has a guest
-            // for, and Fix names in Recent meetings names voices again.
-            console.error(`[clipwise-recorder] identity ${capture.stem}: corrected, sent with the upload queue`);
-            finishIdentityWindow();
-            return;
-        }
-
-        if (names.length === 1) {
-            // One-guest rule (SAA-194 §5, SAA-195): the one guest is the other
-            // side of the call, so there is no step 2. Diarize can still leave
-            // naming data for the call; identity-answer.js namingSettled counts
-            // this answer as settling the naming, so neither the tray nor
-            // Recent meetings asks for it (SAA-255).
-            finishIdentityWindow();
-            return;
-        }
-
-        // Step 2: the window stays open. identity.html switches itself to
-        // the waiting view; this starts polling for the naming data diarize
-        // (after transcribe) will eventually produce.
-        identityWindow.step = 2;
-        identityWindow.win.webContents.send('identity:show-step2', { guestNames: names });
-        beginNamingDataWait(capture);
-    });
-
-    ipcMain.on('identity:submit-voices', (_event, payload) => {
-        const capture = currentCapture(payload && payload.token);
-        if (!capture) return;
-        const voices = Array.isArray(payload.voices) ? payload.voices : [];
-        // An empty list names nothing but still writes voice-names-<stem>.json,
-        // which is what takes a call out of the naming reminder. No legitimate
-        // path sends one: "Not sure" for every voice is a non-empty list of
-        // null names, and Later / the stopped auto-close / the wait cap never
-        // submit. Ignored, window left as it is.
-        if (voices.length === 0) {
-            console.error(
-                `[clipwise-recorder] voice-names ${capture.stem}: empty voice list ignored, nothing written`);
-            return;
-        }
-        const doc = buildVoiceNamesDoc({
-            stem: capture.stem,
-            recordingId: capture.recordingId,
-            voices,
-            // A new answered_at every save (buildVoiceNamesDoc's default),
-            // even on a rename of the same stem — that's what lets
-            // voiceNamesAlreadyApplied's guard see this as a new answer to
-            // apply rather than the one already on record.
-            rename: identityWindow && identityWindow.isRename === true,
-        });
-        try {
-            const finalPath = writeVoiceNamesAnswer(OUTDIR, doc);
-            console.error(logLines.voiceNamesLine(capture.stem, doc.voices.length,
-                doc.voices.filter((v) => v.name).length, finalPath));
-        } catch (err) {
-            console.error(`voice-names: could not write the answer for ${capture.stem}: ${String(err)}`);
-            notify('voice-names-not-saved', 'Clipwise: voice names not saved',
-                `Naming the voices on ${capture.stem} could not be written.`);
-            finishIdentityWindow();
-            return;
-        }
-        uploadAnswer(capture.stem);
+        if (wrote) uploadAnswer(capture.stem);
+        console.error(`[clipwise-recorder] identity ${capture.stem}: saved (${mode})${wrote ? ', sent with the upload queue' : ', nothing to send'}`);
         finishIdentityWindow();
-        // The tray's "Name N voices…" item for this stem should disappear
-        // now, not at the next unrelated tray refresh.
         renderTray();
     });
 
+    // Skip (stop, later): the recording stays unidentified, as before (SAA-197:
+    // nothing written; a marker a previous close left is cleared). Cancel
+    // (correct): the saved answer stands. In voices mode it is Later: the voices
+    // stay pending.
     ipcMain.on('identity:skip', (_event, payload) => {
         const capture = currentCapture(payload && payload.token);
         if (!capture) return;
-        if (capture.correcting) {
-            // Cancel on a correction: the saved answer stands, nothing is written.
+        const mode = identityWindow.mode;
+        if (mode === 'correct') {
             console.error(`[clipwise-recorder] identity ${capture.stem}: correction cancelled — saved answer kept`);
-            finishIdentityWindow();
-            return;
+        } else if (mode === 'voices') {
+            console.error(`[clipwise-recorder] identity ${capture.stem}: voice naming left for later`);
+        } else {
+            console.error(`[clipwise-recorder] identity ${capture.stem}: skipped — recording is unidentified`);
+            deleteLaterMarker(OUTDIR, capture.stem);
         }
-        console.error(`[clipwise-recorder] identity ${capture.stem}: skipped — recording is unidentified`);
-        // Skip's own meaning is unchanged (SAA-197) — nothing is written
-        // here, same as before. This only clears a marker a previous close
-        // may have left, so a reopened-then-skipped capture stops showing
-        // as pending rather than lingering in the tray forever.
-        deleteLaterMarker(OUTDIR, capture.stem);
+        finishIdentityWindow();
         renderTray();
-        finishIdentityWindow();
-    });
-
-    ipcMain.on('identity:later', (_event, payload) => {
-        const capture = currentCapture(payload && payload.token);
-        if (!capture) return;
-        console.error(`[clipwise-recorder] identity ${capture.stem}: voice naming left for later`);
-        finishIdentityWindow();
     });
 }
 
@@ -5606,6 +5568,8 @@ app.whenReady().then(async () => {
     pruneDayLogsNow();
     setInterval(pruneDayLogsNow, DAY_LOG_PRUNE_INTERVAL_MS);
     registerIdentityIpc();
+    // Unset in normal use: see openIdentityWindowForCheck.
+    openIdentityWindowForCheck();
     registerMeetingsIpc();
     registerVoicePrintsIpc();
     registerSetupIpc();
