@@ -411,9 +411,34 @@ checkFn('v: the voice-names answer names each voice or leaves it null, nothing g
     check('t: identity.html sends inviteeNames from the people field, outside the identity answer fields',
         /inviteeNames: ia\.inviteePairs\(field\)/.test(html));
     check('t: identity.html sends guests from the people field', /guests: ia\.answerGuests\(field\)/.test(html));
-    check('t: the old checklist is gone: no knownNames in main.js or identity.html, no knownGuestNames export',
-        !/knownNames/.test(main) && !/knownNames/.test(html) && typeof ia.knownGuestNames === 'undefined');
+    // The step-1 checklist's functions, exported and internal, removed in SAA-260
+    // step 4: none is exported, defined in identity-answer.js, or named in main.js
+    // or identity.html.
+    const OLD_EXPORTS = ['parseNames', 'knownGuestNames', 'mergeGuestNames', 'guestList', 'applyCalendarNames', 'setGuestChecked',
+        'touchGuests', 'nameInvitee', 'checkedGuestNames', 'inviteeEntries'];
+    const OLD_INTERNAL = ['boxFor', 'borrowerOf', 'letGoOfBox'];
+    const answerSrc = fs.readFileSync(path.join(__dirname, 'identity-answer.js'), 'utf8');
+    const oldLeft = (mod, texts) => [
+        ...OLD_EXPORTS.filter((n) => typeof mod[n] !== 'undefined').map((n) => `export ${n}`),
+        ...[...OLD_EXPORTS, ...OLD_INTERNAL].flatMap((n) => texts
+            .filter(([, text]) => new RegExp(`\\b${n}\\b`).test(text)).map(([file]) => `${n} in ${file}`)),
+        ...(texts.some(([, text]) => /knownNames/.test(text)) ? ['knownNames'] : []),
+    ];
+    const texts = [['identity-answer.js', answerSrc], ['main.js', main], ['identity.html', html]];
+    const left = oldLeft(ia, texts);
+    check('t: the old checklist is gone: none of its functions is exported, defined in identity-answer.js, or named in main.js or identity.html; no knownNames',
+        left.length === 0, left.join(', '));
     check('t: control: the same scan finds knownNames planted in a copy of main.js', /knownNames/.test(`${main}\nknownNames: []`));
+    {
+        const planted = oldLeft({ ...ia, checkedGuestNames: () => [] }, [
+            ['identity-answer.js', `${answerSrc}\nfunction letGoOfBox(list) {}`],
+            ['main.js', main],
+            ['identity.html', `${html}\nia.guestList([])`],
+        ]);
+        check('t: control: the same scan finds an export, an internal function and a page call planted in copies',
+            JSON.stringify(planted) === JSON.stringify(['export checkedGuestNames', 'guestList in identity.html', 'letGoOfBox in identity-answer.js']),
+            JSON.stringify(planted));
+    }
     check('t: the host field is gone from identity.html', !/id="self"/.test(html));
     check('t: identity.html has no "Voice 1 is you"', !/Voice 1 is you/.test(html));
     check('t: IDENTITY_WINDOW is 460 wide, 220 to 600 high',
