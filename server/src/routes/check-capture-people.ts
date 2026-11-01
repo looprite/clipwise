@@ -2,8 +2,10 @@
 // normalizeName and nameKey (what two names are compared by), escapeLike (the
 // search's LIKE pattern), decideCreate (step 2's same-name rule) and
 // displayNameFor (the host's name); and (SAA-260 step 2) the host-line rule in
-// ingest/attendee-people.ts, hostKeysFor and isLinkableGuest. Every rule has its
-// control: an input one change away that comes out the other way.
+// ingest/attendee-people.ts, hostKeysFor and isLinkableGuest; and (SAA-260 step
+// 4) that the identity window's copy, recorder/app/people-name.js, gives the
+// same normalizeName and nameKey on every input. Every rule has its control: an
+// input one change away that comes out the other way.
 //
 // No database: DATABASE_URL is set to a loopback port nothing listens on before
 // anything is imported (db/index.ts requires one at import and connects only on
@@ -12,6 +14,9 @@
 // reported as a FAIL rather than the file failing to load.
 //
 //   DOTENV_CONFIG_PATH=/dev/null npx --no-install tsx src/routes/check-capture-people.ts
+
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
 
 process.env.DATABASE_URL = "postgres://check:check@127.0.0.1:1/none";
 
@@ -139,6 +144,46 @@ const linkCases: Array<[string, (m: LinkMod) => [boolean, string]]> = [
   }],
 ];
 
+// --- the Mac's copy (SAA-260 step 4, recorder/app/people-name.js) -----------
+// The identity window compares names with its own copy of normalizeName and
+// nameKey. Both copies over the same inputs must give the same answer, or the
+// window would show one chip where ingest sees two people, or the reverse.
+type MacMod = { MAX_NAME_LENGTH: number; normalizeName: (raw: unknown) => string | null; nameKey: (raw: unknown) => string | null };
+const PARITY_INPUTS: unknown[] = [
+  "Ann Lee", "  Ann \t\n  Lee  ", "ANN lee", "AnnLee", "Wiliam Example", "William Example",
+  "Jos\u00e9 Example", "Jose\u0301 Example", "Ann\u00a0Lee", "Ann\u2003Lee", "\u00c5ngstr\u00f6m", "A\u030angstro\u0308m",
+  "ann@example.test", "ann example.test", "", "   ", "a".repeat(256), `  ${"a".repeat(256)}  `, "a".repeat(257),
+  null, undefined, 42, {}, ["Ann"],
+];
+// The inputs where the two copies disagree, as [input, server, mac] triples.
+function disagreements(server: (raw: unknown) => string | null, mac: (raw: unknown) => string | null): Array<[unknown, string | null, string | null]> {
+  const out: Array<[unknown, string | null, string | null]> = [];
+  for (const input of PARITY_INPUTS) {
+    const a = server(input), b = mac(input);
+    if (a !== b) out.push([input, a, b]);
+  }
+  return out;
+}
+const macCases: Array<[string, (m: Mod, mac: MacMod) => [boolean, string]]> = [
+  ["mac copy: normalizeName agrees with the server's on every input", (m, mac) => {
+    const d = disagreements(m.normalizeName, mac.normalizeName);
+    return [d.length === 0, JSON.stringify(d)];
+  }],
+  ["mac copy: nameKey agrees with the server's on every input", (m, mac) => {
+    const d = disagreements(m.nameKey, mac.nameKey);
+    return [d.length === 0, JSON.stringify(d)];
+  }],
+  ["mac copy: control: the same comparison finds a copy that skips NFC", (m) => {
+    const noNfc = (raw: unknown) => (typeof raw === "string" ? raw.replace(/\s+/g, " ").trim().toLowerCase() || null : null);
+    const d = disagreements(m.nameKey, noNfc);
+    return [d.some(([input]) => input === "Jose\u0301 Example"), `${d.length} disagreement(s)`];
+  }],
+  ["mac copy: the composed and decomposed inputs really differ before normalizing (guard)", () => {
+    return [("Jos\u00e9 Example" as string) !== ("Jose\u0301 Example" as string) && ("\u00c5ngstr\u00f6m" as string) !== ("A\u030angstro\u0308m" as string), "literals equal"];
+  }],
+  ["mac copy: the same length limit", (m, mac) => [mac.MAX_NAME_LENGTH === m.MAX_NAME_LENGTH, `${mac.MAX_NAME_LENGTH} vs ${m.MAX_NAME_LENGTH}`]],
+];
+
 async function main(): Promise<void> {
   let mod: Mod | null = null;
   let why = "";
@@ -180,7 +225,27 @@ async function main(): Promise<void> {
     }
     check(name, result[0], result[1]);
   }
-  const total = cases.length + linkCases.length;
+  let mac: MacMod | null = null;
+  let macWhy = "";
+  try {
+    mac = createRequire(import.meta.url)(resolve(import.meta.dirname, "..", "..", "..", "recorder", "app", "people-name.js")) as MacMod;
+  } catch (err) {
+    macWhy = `recorder/app/people-name.js not present (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`;
+  }
+  for (const [name, run] of macCases) {
+    if (!mod || !mac) {
+      check(name, false, !mod ? why : macWhy);
+      continue;
+    }
+    let result: [boolean, string];
+    try {
+      result = run(mod, mac);
+    } catch (err) {
+      result = [false, `threw ${err instanceof Error ? err.message : String(err)}`];
+    }
+    check(name, result[0], result[1]);
+  }
+  const total = cases.length + linkCases.length + macCases.length;
   console.log(`\n${total - failures}/${total} passed`);
   process.exit(failures === 0 ? 0 : 1);
 }
