@@ -463,6 +463,16 @@ async function main(): Promise<void> {
     record(sameSet(mineB, ["a2", "b1", "b2"]), "recordings list: another member's list", mineB.join(","));
     record((await http("GET", `/accounts/${acc}/recordings/${rec.a1.id}`, { token: B.token })).status === 404 && (await http("GET", `/accounts/${acc}/recordings/${rec.a2.id}`, { token: B.token })).status === 200, "recordings by id: private is 404, shared is 200");
     record((await http("GET", `/accounts/${acc}/recordings/${rec.a1.id}/attendees`, { token: B.token })).status === 404, "attendees: a private call's attendee list is 404 to others");
+    {
+      // The other side of the line above (SAA-243 item 1): the owner reads it.
+      const own = await http("GET", `/accounts/${acc}/recordings/${rec.a1.id}/attendees`, { token: A.token });
+      const rows = (own.json?.attendees ?? []) as any[];
+      record(
+        own.status === 200 && rows.some((a) => a.personId === people.hidden.id),
+        "attendees: the owner gets their own private call's attendee list",
+        `${own.status}; ${rows.length} row(s)`,
+      );
+    }
 
     // ---- the recorder's tokens (SAA-244) -------------------------------------
     // The write routes take a capture token, so the "only the owner" checks below
@@ -481,8 +491,6 @@ async function main(): Promise<void> {
     const capToken = (who: Who): string => (who === A ? capA : who === B ? capB : capC).access ?? "";
 
     // ---- writes are the owner's --------------------------------------------
-    const addAtt = (who: Who, key: string) => http("POST", `/accounts/${acc}/recordings/${rec[key].id}/attendees`, { token: capToken(who), json: { name: "Added" } });
-    record((await addAtt(B, "a2")).status === 404 && (await addAtt(A, "a2")).status === 201, "attendees: only the owner can add one — even to a shared call");
     const addMoment = (who: Who, key: string) => http("POST", `/accounts/${acc}/moments`, { token: capToken(who), json: { recordingId: rec[key].id, kind: "observation", title: `${WORD} added`, startSec: 0, endSec: 1 } });
     record((await addMoment(B, "a2")).status === 404 && (await addMoment(A, "a2")).status === 201, "moments: only the owner can add one");
 
@@ -497,7 +505,6 @@ async function main(): Promise<void> {
         ["GET /recordings/:id/transcript", await http("GET", `/recordings/${bad}/transcript`, { token: A.token }), "recording_not_found"],
         ["GET /accounts/:accountId/recordings/:id", await http("GET", `/accounts/${acc}/recordings/${bad}`, { token: A.token }), "recording_not_found"],
         ["GET /accounts/:accountId/recordings/:id/attendees", await http("GET", `/accounts/${acc}/recordings/${bad}/attendees`, { token: A.token }), "recording_not_found"],
-        ["POST /accounts/:accountId/recordings/:id/attendees", await http("POST", `/accounts/${acc}/recordings/${bad}/attendees`, { token: capToken(A), json: { name: "x" } }), "recording_not_found"],
         ["GET /accounts/:accountId/moments/:id", await http("GET", `/accounts/${acc}/moments/${bad}`, { token: A.token }), "moment_not_found"],
         ["GET /accounts/:accountId/people/:id", await http("GET", `/accounts/${acc}/people/${bad}`, { token: A.token }), "person_not_found"],
       ];
@@ -1247,6 +1254,46 @@ async function main(): Promise<void> {
     record(emailsA.includes(people.hidden.email), "people: the owner of that call does see them");
     record((await http("GET", `/accounts/${acc}/people/${people.hidden.id}`, { token: B.token })).status === 404, "people by id: the hidden person is 404");
 
+    // SAA-243 item 1. The other side of the line above, the fields the people
+    // routes answer with, and a hidden person's id sent to the attendee POST.
+    {
+      const sharedB = await http("GET", `/accounts/${acc}/people/${people.shared.id}`, { token: B.token });
+      record(
+        sharedB.status === 200 && sharedB.json?.person?.id === people.shared.id && sharedB.json?.person?.email === people.shared.email,
+        "people by id: a person on a shared call is readable by another member",
+        `${sharedB.status}`,
+      );
+
+      // Exactly id, name and email: no created_at (when someone first had them on a
+      // call), updated_at or avatar_url, in either spelling.
+      const notAllowed = ["created_at", "createdAt", "updated_at", "updatedAt", "avatar_url", "avatarUrl"];
+      const onlyThree = (p: any) => !!p && sameSet(Object.keys(p), ["id", "name", "email"]) && notAllowed.every((k) => !(k in p));
+      const listed = (peopleB.json?.people ?? []) as any[];
+      const listedA = (peopleA.json?.people ?? []) as any[];
+      const extra = [...listed, ...listedA, sharedB.json?.person].filter((p) => !onlyThree(p)).map((p) => Object.keys(p ?? {}).join(","));
+      record(
+        listed.length > 0 && listedA.length > 0 && extra.length === 0,
+        "people: the list and by-id routes return id, name and email only, never created_at, updated_at or avatar_url",
+        extra.length ? `other keys: ${[...new Set(extra)].join(" | ")}` : `${listed.length + listedA.length + 1} checked`,
+      );
+
+      // The route is gone (SAA-243 item 1): nothing called it, and it stored any
+      // personId unchecked, which made that person visible to the caller.
+      const hiddenOnB1 = async () =>
+        (await pool.query(`select count(*)::int as n from attendees where recording_id = $1 and person_id = $2`, [rec.b1.id, people.hidden.id])).rows[0].n as number;
+      const post = await http("POST", `/accounts/${acc}/recordings/${rec.b1.id}/attendees`, { token: capToken(B), json: { name: "Probe", personId: people.hidden.id } });
+      const written = await hiddenOnB1();
+      const after = await http("GET", `/accounts/${acc}/people/${people.hidden.id}`, { token: B.token });
+      record(
+        post.status === 404 && written === 0 && after.status === 404,
+        "attendees: member B's capture token cannot store a hidden person's id on B's own call, and B still gets 404 for that person",
+        `POST ${post.status}; rows written ${written}; GET people/:hidden ${after.status}`,
+      );
+      // So that, on code that still has the route, the lines further down see the
+      // fixtures they expect.
+      await pool.query(`delete from attendees where recording_id = $1 and person_id = $2`, [rec.b1.id, people.hidden.id]);
+    }
+
     // ---- the recorder's people questions (SAA-260 step 1) ------------------
     // GET /captures/me and GET /captures/people, with capture tokens. The
     // generic loops above and below cover them once they are classified; the
@@ -1319,6 +1366,25 @@ async function main(): Promise<void> {
         "capture me: a null, blank or address-shaped display name is null",
         `null → ${JSON.stringify(meNull.json)}, blank → ${JSON.stringify(meBlank.json)}, address → ${JSON.stringify(meAt.json)}`,
       );
+      // SAA-243 item 1: B's answer never holds A's name. Distinct names, set for
+      // this line only, then put back.
+      {
+        const nameA = `Alicename ${tag}`;
+        const nameB = `Bobname ${tag}`;
+        const setName = (who: Who, v: string) => db.update(schema.accountMembers).set({ displayName: v }).where(eq(schema.accountMembers.id, who.memberId));
+        await setName(A, nameA);
+        await setName(B, nameB);
+        const meB = await http("GET", "/captures/me", { token: capOf(B) });
+        const meA2 = await http("GET", "/captures/me", { token: capOf(A) });
+        await setName(A, "Check alice");
+        await setName(B, "Check bob");
+        const textB = JSON.stringify(meB.json ?? null);
+        record(
+          meB.status === 200 && meB.json?.displayName === nameB && !textB.includes(nameA) && !textB.includes("Alicename") && meA2.json?.displayName === nameA,
+          "capture me: member B's answer is B's own name and never holds member A's (A, the control, gets A's)",
+          `B ${meB.status} ${textB}; A ${JSON.stringify(meA2.json ?? null)}`,
+        );
+      }
 
       // -- visibility --
       const hiddenNew = await person(`Hidnew ${tag}`);
