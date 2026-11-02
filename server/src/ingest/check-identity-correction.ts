@@ -31,7 +31,10 @@
 //       is deleted; the corrected name gets a person
 //   x   control: a person removed from one call but on another is kept
 //   k   a kept name keeps its person, including one linked by address; a
-//       removed person with an address is kept
+//       removed person with an address, on nothing else, is deleted
+//       (SAA-243 item 4)
+//   k2  control: a removed person with an address, still on another call, is
+//       kept
 // SAA-260 step 4 (the window sends guests[].personId, ingest/attendee-people.ts
 // chosenPeople):
 //   p2  a correction where the pick beats the carried person: a guest linked
@@ -54,7 +57,7 @@ import express from "express";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { pool } from "../db/index.js";
-import { dropAccount, endPool, makeAccount, refuseUnlessScratch } from "../extract/fixtures-for-checks.js";
+import { dropAccount, endPool, makeAccount, makeRecording, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
 import { runExtraction } from "../extract/extract.js";
 import { makeStubModel } from "../extract/stub-model.js";
 import { errorHandler } from "../lib/http.js";
@@ -293,19 +296,42 @@ async function main(): Promise<void> {
     check("k: after a correction keeping both, Kay and Lee keep their people", (await guestPerson(reck, "Kay Example")) === kay && (await guestPerson(reck, "Lee Example")) === lee, `${await guestPerson(reck, "Kay Example")} ${await guestPerson(reck, "Lee Example")}`);
     check("k: and the added Mo Example gets one", !!(await guestPerson(reck, "Mo Example")));
     await post({ ...pkNoInvitees, identity: answer(C, ["Lee Example", "Mo Example"], "work", B) });
-    check("k: a correction removing Kay keeps Kay's person, which has an address", await personExists(kay as string));
+    check("k: a correction removing Kay releases Kay's person, which has an address and is on nothing else: it is deleted", !(await personExists(kay as string)));
 
-    const newPerson = async (accountId: string, name: string): Promise<string> =>
-      (await pool.query(`insert into people (account_id, name) values ($1, $2) returning id`, [accountId, name])).rows[0].id as string;
+    // k2. control: a released person with an address, still on another call, is kept.
+    const kimEmail = `kim-${randomUUID().slice(0, 8)}@example.test`;
+    const pk2 = payload(ONE_TO_ONE, { identity: answer(A, ["Kim Address"], "work"), inviteeNames: [{ email: kimEmail, name: "Kim Address" }] });
+    const reck2 = String((await post(pk2)).json.recordingId);
+    const kim = await guestPerson(reck2, "Kim Address");
+    const reck3 = String((await post(payload(ONE_TO_ONE, { identity: answer(A, ["Kim Address"], "work") }))).json.recordingId);
+    check("k2: control: Kim's person has an address, and both calls point at it", !!kim && (await personEmail(kim)) !== null && (await guestPerson(reck3, "Kim Address")) === kim, `${kim} / ${await guestPerson(reck3, "Kim Address")}`);
+    const { inviteeNames: _drop2, ...pk2NoInvitees } = pk2;
+    await post({ ...pk2NoInvitees, identity: answer(B, ["Lin Other"], "work", A) });
+    check("k2: a correction removing Kim from one call keeps Kim's person, which is still on the other", (await guestPerson(reck2, "Kim Address")) === null && (await personExists(kim as string)), `row ${await guestPerson(reck2, "Kim Address")}; exists ${await personExists(kim as string)}`);
+
+    // A person on a shared recording of `owner`'s account, so every member there
+    // may see them; a person on no recording is seen by no one (SAA-243 item 4).
+    // The fixture recording's id is kept, for p2 to take the person off it.
+    const fixtureCall = new Map<string, string>();
+    const newPerson = async (owner: Fixture, name: string): Promise<string> => {
+      const id = (await pool.query(`insert into people (account_id, name) values ($1, $2) returning id`, [owner.accountId, name])).rows[0].id as string;
+      const rec = await makeRecording(owner, { segments: 0 });
+      await pool.query(`update recordings set visibility = 'shared' where id = $1`, [rec]);
+      await pool.query(`insert into attendees (recording_id, person_id, name, is_host) values ($1, $2, $3, false)`, [rec, id, name]);
+      fixtureCall.set(id, rec);
+      return id;
+    };
 
     // p2. a correction where the pick beats the carried person. While only
     // twinA exists, a capture naming Sam Twin is linked to twinA by the
     // same-name rule. twinB is made after it.
-    const twinA = await newPerson(fx.accountId, "Sam Twin");
+    const twinA = await newPerson(fx, "Sam Twin");
     const pp2 = payload(ONE_TO_ONE, { identity: answer(A, ["Sam Twin"], "work") });
     const recp2 = String((await post(pp2)).json.recordingId);
     check("p2: control: with only twinA named Sam Twin, the first send links the guest to twinA", (await guestPerson(recp2, "Sam Twin")) === twinA, `${await guestPerson(recp2, "Sam Twin")} (twinA ${twinA})`);
-    const twinB = await newPerson(fx.accountId, "Sam Twin");
+    // Off its fixture call, so p2's call is the only one holding twinA.
+    await pool.query(`delete from attendees where recording_id = $1 and person_id = $2`, [fixtureCall.get(twinA), twinA]);
+    const twinB = await newPerson(fx, "Sam Twin");
     const rp2c = await post({ ...pp2, identity: answer(B, ["Sam Twin"], "work", A) });
     check("p2: control: a correction naming Sam Twin with no personId keeps twinA (carried)",
       rp2c.status === 200 && (await guestPerson(recp2, "Sam Twin")) === twinA, `${rp2c.status} ${await guestPerson(recp2, "Sam Twin")} (twinA ${twinA}, twinB ${twinB})`);
@@ -318,8 +344,9 @@ async function main(): Promise<void> {
     check("p2: and twinA, released by the pick and held by nothing, is deleted", !(await personExists(twinA)));
 
     // p. a picked person wins over the same-name rule. Two people the caller
-    // may see share the name: twinB (on p2's call) and a new, unattached twinC.
-    const twinC = await newPerson(fx.accountId, "Sam Twin");
+    // may see share the name: twinB (on p2's call) and a new twinC (on a shared
+    // call of its own).
+    const twinC = await newPerson(fx, "Sam Twin");
     const recp0 = String((await post(payload(ONE_TO_ONE, { identity: answer(A, ["Sam Twin"], "work") }))).json.recordingId);
     check("p: control: two people the caller may see are named Sam Twin, so the same-name rule leaves the guest unlinked",
       (await guestPerson(recp0, "Sam Twin")) === null, `${await guestPerson(recp0, "Sam Twin")} (twinB ${twinB}, twinC ${twinC})`);
@@ -332,7 +359,7 @@ async function main(): Promise<void> {
     // i. a picked personId the caller may not see: another account's person.
     const other = await makeAccount("check-identity-correction-other");
     try {
-      const foreign = await newPerson(other.accountId, "Ivy Other");
+      const foreign = await newPerson(other, "Ivy Other");
       const ri = await post(payload(ONE_TO_ONE, { identity: answer(A, [{ name: "Ivy Other", personId: foreign }], "work") }));
       const reci = String(ri.json.recordingId);
       const ivy = await guestPerson(reci, "Ivy Other");

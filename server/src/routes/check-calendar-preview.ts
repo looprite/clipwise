@@ -34,6 +34,13 @@
 //       scan finds both planted in a copy
 //   a   a guest name with an @ in the identity answer never becomes an attendee.
 //       Control: the answer sent did carry it
+//   u   (SAA-243 item 4) with no invitee row for the address, inviteeNames
+//       leaves no person with that address unreferenced: not after a
+//       correction that removes the typed guest while the pair is still sent,
+//       not after a later repeat, and not for a pair sent with no identity
+//       answer. Controls: the count finds a planted unreferenced person; the
+//       pair was applied; with the match job run after the first send, its
+//       invitee row is linked to the person and the person is kept
 //   l   the route's log lines (calendar-preview, invitee-names and, since
 //       SAA-260 step 2, attendee-people, at least one of each) carry no @, no
 //       title and no name. Control: the same scan finds each planted in a copy
@@ -46,6 +53,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { db, pool, schema } from "../db/index.js";
 import { dropAccount, endPool, makeAccount, makeRecording, refuseUnlessScratch } from "../extract/fixtures-for-checks.js";
+import { applyCalendarMatch } from "../ingest/calendar-match.js";
 import { encrypt } from "../lib/crypto.js";
 import { errorHandler } from "../lib/http.js";
 import { calendarPreviewPost } from "./calendar-preview.js";
@@ -135,10 +143,20 @@ async function main(): Promise<void> {
   const setConnection = (set: { calendarEmail?: string; searchedCalendarIds?: string[] }) =>
     db.update(schema.calendarConnections).set(set).where(eqMember(fx.memberId));
 
-  // People: Mike named and unattached (visible); Hidden only on member B's
+  // A person on a shared recording of the caller's account, so every member
+  // there may see them. A person on no recording is seen by no one (SAA-243
+  // item 4).
+  const onSharedCall = async (personId: string, name: string): Promise<void> => {
+    const rec = await makeRecording(fx, { segments: 0 });
+    await db.update(schema.recordings).set({ visibility: "shared" }).where(eq(schema.recordings.id, rec));
+    await db.insert(schema.attendees).values({ recordingId: rec, name, isHost: false, personId });
+  };
+
+  // People: Mike named and on a shared call (visible); Hidden only on member B's
   // private recording; Cross in the other account only; Noname with no name.
+  const [mike] = await db.insert(schema.people).values({ accountId: fx.accountId, email: MIKE, name: "Mike Example" }).returning();
+  await onSharedCall(mike.id, "Mike Example");
   await db.insert(schema.people).values([
-    { accountId: fx.accountId, email: MIKE, name: "Mike Example" },
     { accountId: other.accountId, email: CROSS, name: "Cross Example" },
     { accountId: fx.accountId, email: NONAME, name: null },
   ]);
@@ -245,7 +263,8 @@ async function main(): Promise<void> {
 
     // x. another account.
     check("x: Cross, a person in another account only, is not named (an address)", !base0.p.named.includes("Cross Example") && base0.p.unnamed.includes(CROSS) && !base0.raw.includes("Cross Example"), base0.raw);
-    await db.insert(schema.people).values({ accountId: fx.accountId, email: CROSS, name: "Cross Example" });
+    const [crossHere] = await db.insert(schema.people).values({ accountId: fx.accountId, email: CROSS, name: "Cross Example" }).returning();
+    await onSharedCall(crossHere.id, "Cross Example");
     const ctlCross = await preview();
     check("x: control: the same address in the caller's account is named", ctlCross.p.named.includes("Cross Example") && !ctlCross.p.unnamed.includes(CROSS), ctlCross.raw);
 
@@ -316,7 +335,7 @@ async function main(): Promise<void> {
     // Changed in SAA-260 step 2: the pair naming Mike's address "Michael Other"
     // still links nothing (his person keeps its name), but the guest row "Mike
     // Example" is then linked by the same-name rule: exactly one person the
-    // caller may see has that name (Mike, unattached).
+    // caller may see has that name (Mike, on a shared call).
     const mikeId = (await person(MIKE))[0]?.id;
     check("c: the Mike Example attendee is linked by name to Mike (same-name rule), not through the pair that named his address as someone else", !!mikeId && atts.find((a) => a.name === "Mike Example")?.person_id === mikeId, JSON.stringify(atts));
     check("c: a person with no name gets the typed one", (await person(NONAME))[0]?.name === "Nora Example", JSON.stringify(await person(NONAME)));
@@ -351,6 +370,7 @@ async function main(): Promise<void> {
     const BO = `bo-${t}@example.test`;
     const [ada] = await db.insert(schema.people).values({ accountId: fx.accountId, email: null, name: "Ada Adopt" }).returning();
     const bos = await db.insert(schema.people).values([{ accountId: fx.accountId, email: null, name: "Bo Twin" }, { accountId: fx.accountId, email: null, name: "Bo Twin" }]).returning();
+    for (const p of [ada, ...bos]) await onSharedCall(p.id, p.name as string);
     const dIdentity = { ...identity, answered_at: "2026-10-26T15:33:00.000Z", guests: [{ name: "Ada Adopt" }, { name: "Bo Twin" }] };
     const rd = await post("/captures", payload({ identity: dIdentity, inviteeNames: [{ email: ADA, name: "Ada Adopt" }, { email: BO, name: "Bo Twin" }] }));
     const recD = String(rd.json.recordingId);
@@ -381,6 +401,76 @@ async function main(): Promise<void> {
     const ra = await post("/captures", payload({ identity: atIdentity }));
     const aAtts = (await pool.query(`select name from attendees where recording_id = $1`, [String(ra.json.recordingId)])).rows.map((r) => String(r.name));
     check("a: the capture is stored, and no attendee name carries an @ (Real Name and the host are there)", ra.status === 201 && !aAtts.some((n) => n.includes("@")) && aAtts.includes("Real Name") && aAtts.includes("Check Host"), `${ra.status} ${JSON.stringify(aAtts)}`);
+
+    // u. (SAA-243 item 4) inviteeNames leaves no person without a reference once
+    // a request has finished, with no invitee row for the address (no calendar,
+    // no event matched, or the match job failed or not yet run: this check runs
+    // no job). The recorder sends the pairs on every upload of a capture
+    // (recorder/app/capture-payload.js), corrections included.
+    // unreferenced(E): people in the account with address E that nothing points
+    // at, through the references attendee-people.ts dropReleasedPeople checks.
+    const unreferenced = async (email: string): Promise<number> =>
+      (await pool.query(
+        `select count(*)::int as n from people p where p.account_id = $1 and lower(p.email) = $2
+           and not exists (select 1 from attendees a where a.person_id = p.id)
+           and not exists (select 1 from speakers s where s.person_id = p.id)
+           and not exists (select 1 from invitees i where i.person_id = p.id)
+           and not exists (select 1 from clips c where c.created_by = p.id)
+           and not exists (select 1 from shares h where h.created_by = p.id)
+           and not exists (select 1 from moments m where m.account_id = p.account_id and position(p.id::text in coalesce(m.metadata::text, '')) > 0)`,
+        [fx.accountId, email.toLowerCase()],
+      )).rows[0].n as number;
+    const PLANT = `plant-${t}@example.test`;
+    const [plantRow] = await db.insert(schema.people).values({ accountId: fx.accountId, email: PLANT, name: "Plant Row" }).returning();
+    const plantedCount = await unreferenced(PLANT);
+    await db.delete(schema.people).where(eq(schema.people.id, plantRow.id));
+    check("u: control: unreferenced() finds a planted person with an address and no reference (1), and none once it is gone", plantedCount === 1 && (await unreferenced(PLANT)) === 0, `${plantedCount}`);
+
+    // Flow 1: the typed guest removed by a correction, the pair still sent.
+    const ZED = `zed-${t}@example.test`;
+    const zedAnswer = { ...identity, answered_at: "2026-10-26T15:40:00.000Z", guests: [{ name: "Zed Pair" }] };
+    const pz = payload({ identity: zedAnswer, inviteeNames: [{ email: ZED, name: "Zed Pair" }] });
+    const rz1 = await post("/captures", pz);
+    const recZ = String(rz1.json.recordingId);
+    const zedRow = (await pool.query(`select person_id from attendees where recording_id = $1 and name = 'Zed Pair'`, [recZ])).rows[0]?.person_id ?? null;
+    check("u: flow 1, step 1: the first send links the person with Zed's address to the guest row; none is unreferenced",
+      rz1.status === 201 && !!zedRow && (await person(ZED))[0]?.id === zedRow && (await unreferenced(ZED)) === 0, `${rz1.status} row ${zedRow} unreferenced ${await unreferenced(ZED)}`);
+    const zedCorrection = { ...identity, answered_at: "2026-10-26T15:41:00.000Z", corrects: zedAnswer.answered_at, guests: [{ name: "Yan Other" }] };
+    const rz2 = await post("/captures", { ...pz, identity: zedCorrection });
+    check("u: flow 1, step 2: a correction removing Zed, still carrying the pair, leaves no person with Zed's address unreferenced",
+      rz2.status === 200 && rz2.json.identityApplied === true && (await unreferenced(ZED)) === 0, `${rz2.status} ${JSON.stringify(rz2.json)} unreferenced ${await unreferenced(ZED)}`);
+    const rz3 = await post("/captures", { ...pz, identity: zedCorrection });
+    check("u: flow 1, step 3: a later repeat, still carrying the pair, leaves none either",
+      rz3.status === 200 && (await unreferenced(ZED)) === 0, `${rz3.status} unreferenced ${await unreferenced(ZED)}`);
+
+    // Flow 2: the pair with no identity answer (the answer lost at stop).
+    const XAN = `xan-${t}@example.test`;
+    const rx = await post("/captures", payload({ inviteeNames: [{ email: XAN, name: "Xan Pair" }] }));
+    const xanLine = serverLines.filter((l) => l.startsWith(`invitee-names: recording=${String(rx.json.recordingId)} `)).pop() ?? "";
+    check("u: flow 2: control: the pair was applied (its invitee-names line counts created=1)", rx.status === 201 && xanLine.includes(" created=1 "), `${rx.status} ${xanLine}`);
+    check("u: flow 2: a pair sent with no identity answer leaves no person with that address unreferenced", (await unreferenced(XAN)) === 0, `unreferenced ${await unreferenced(XAN)}`);
+
+    // Control: the match job links the person when it finds them. Flow 1 again,
+    // with the job run after the first send.
+    const WEN = `wen-${t}@example.test`;
+    const wenAnswer = { ...identity, answered_at: "2026-10-26T15:42:00.000Z", guests: [{ name: "Wen Pair" }] };
+    const pw = payload({ identity: wenAnswer, inviteeNames: [{ email: WEN, name: "Wen Pair" }] });
+    const recW = String((await post("/captures", pw)).json.recordingId);
+    await applyCalendarMatch(db, fx.accountId, recW, String(pw.stem), {
+      event_id: `evt-u-${t}`,
+      title: null,
+      recurring_event_id: null,
+      invitees: [{ email: WEN, name: null, response_status: "accepted" }],
+      offset_ms: 0,
+    });
+    const wenInvitee = async () => (await pool.query(`select person_id from invitees where recording_id = $1 and email = $2`, [recW, WEN])).rows[0]?.person_id ?? null;
+    const wenPerson = (await person(WEN))[0]?.id ?? null;
+    check("u: control: the match job, run after the first send, links its invitee row to the person the pair made", !!wenPerson && (await wenInvitee()) === wenPerson, `${await wenInvitee()} vs ${wenPerson}`);
+    const wenCorrection = { ...identity, answered_at: "2026-10-26T15:43:00.000Z", corrects: wenAnswer.answered_at, guests: [{ name: "Vic Other" }] };
+    await post("/captures", { ...pw, identity: wenCorrection });
+    await post("/captures", { ...pw, identity: wenCorrection });
+    check("u: control: with that invitee row, the correction and the repeat keep the person, linked to the row, and none is unreferenced",
+      (await wenInvitee()) === wenPerson && (await person(WEN)).length === 1 && (await unreferenced(WEN)) === 0, `${await wenInvitee()} vs ${wenPerson}; unreferenced ${await unreferenced(WEN)}`);
 
     // l. the route's log lines.
     const leaks = (lines: string[]) => {

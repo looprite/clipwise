@@ -1123,6 +1123,16 @@ async function main(): Promise<void> {
       const before = await find(target.rid);
       const controlBefore = await find(control.rid);
       const peopleBefore = await peopleCount();
+      // The people each capture's rows point at: here, the one guest's.
+      const peopleOf = async (rid: string): Promise<string[]> =>
+        (await pool.query(
+          `select person_id::text as id from attendees where recording_id = $1 and person_id is not null
+           union select person_id::text from speakers where recording_id = $1 and person_id is not null
+           union select person_id::text from invitees where recording_id = $1 and person_id is not null`,
+          [rid],
+        )).rows.map((r) => r.id as string);
+      const targetPeople = await peopleOf(target.rid);
+      const controlPeople = await peopleOf(control.rid);
       process.stdout.write(`captures 18f: before, the capture: ${counts(before)}; moments with an embedding ${before.embedded}\n`);
       process.stdout.write(`captures 18f: before, the control: ${counts(controlBefore)}; moments with an embedding ${controlBefore.embedded}\n`);
       record(
@@ -1157,16 +1167,112 @@ async function main(): Promise<void> {
         `before ${counts(controlBefore)}; after ${counts(controlAfter)}`,
       );
       const peopleAfter = await peopleCount();
+      const personLeft = async (ids: string[]) => (await pool.query(`select count(*)::int as n from people where id = any($1::uuid[])`, [ids])).rows[0].n as number;
+      const targetLeft = await personLeft(targetPeople);
+      const controlLeft = await personLeft(controlPeople);
       record(
-        peopleAfter === peopleBefore,
-        "captures 18f: people, the account's contact list and outside item 4, has the same number of rows after the delete as before",
-        `${peopleBefore} → ${peopleAfter}`,
+        targetPeople.length === 1 && controlPeople.length === 1 && targetLeft === 0 && controlLeft === 1 && peopleAfter === peopleBefore - 1,
+        "captures 18f: the person only the deleted capture pointed at is gone, the people count is down by that one, and the control capture's person is still there",
+        `target people ${targetPeople.length}, left ${targetLeft}; control people ${controlPeople.length}, left ${controlLeft}; people ${peopleBefore} → ${peopleAfter}`,
       );
 
       // The control goes the same way, so nothing it holds reaches the checks below.
       const ctl = (method: string, suffix: string) => http(method, `/captures/${control.p.captureId}${suffix}`, { token: capToken(A), json: method === "POST" ? {} : undefined });
       await ctl("POST", "/trash");
       await ctl("DELETE", "");
+    }
+
+    // 18g. People after a delete (SAA-243 item 4): a person no row points at does
+    // not exist, and nobody is shown a person they could not see before. Member A
+    // stores private captures naming guests and deletes them as the recorder does;
+    // member B asks through the three people routes (by id and the list with an
+    // MCP token, /captures/people with a capture token).
+    {
+      const guestCapture = async (name: string, inviteeNames?: Array<{ email: string; name: string }>) => {
+        const p = capPayload({
+          identity: { identity_version: 2, answered_at: "2026-10-10T10:05:00.000Z", self: { name: `Alice ${tag}` }, guests: [{ name }], scope: "work" },
+          extra: inviteeNames ? { inviteeNames } : {},
+        });
+        const posted = await capPost(A, p);
+        const rid = posted.json?.recordingId as string;
+        const pid = ((await pool.query(`select person_id from attendees where recording_id = $1 and not is_host and name = $2`, [rid, name])).rows[0]?.person_id ?? null) as string | null;
+        return { captureId: p.captureId, status: posted.status, pid };
+      };
+      const remove = async (captureId: string): Promise<string> => {
+        const t = await http("POST", `/captures/${captureId}/trash`, { token: capToken(A), json: {} });
+        const d = await http("DELETE", `/captures/${captureId}`, { token: capToken(A) });
+        return `trash ${t.status}, delete ${d.status}`;
+      };
+      const exists = async (id: string | null): Promise<boolean> => !!id && (await pool.query(`select 1 from people where id = $1`, [id])).rows.length === 1;
+      const byId = async (who: Who, id: string): Promise<number> => (await http("GET", `/accounts/${acc}/people/${id}`, { token: who.token })).status;
+      const listed = async (who: Who, id: string): Promise<boolean> =>
+        ((await http("GET", `/accounts/${acc}/people`, { token: who.token })).json?.people ?? []).some((p: any) => p.id === id);
+      const found = async (who: Who, q: string, id: string): Promise<boolean> =>
+        ((await http("GET", `/captures/people?q=${encodeURIComponent(q)}`, { token: capToken(who) })).json?.people ?? []).some((p: any) => p.id === id);
+
+      // A person on a shared call of A's, for the line after the deletes below.
+      const keptName = `Keptshared ${tag}`;
+      const [kept] = await db.insert(schema.people).values({ accountId: acc, email: null, name: keptName }).returning({ id: schema.people.id });
+      const [sharedCall] = await db
+        .insert(schema.recordings)
+        .values({ accountId: acc, ownerMemberId: A.memberId, visibility: "shared", scope: "work", slug: `check-access-${tag}-18g-shared`, title: `18g ${tag} shared`, source: "check-access", sourceId: `${tag}-18g-shared`, startedAt: new Date("2026-10-10T09:00:00Z") })
+        .returning({ id: schema.recordings.id });
+      await db.insert(schema.attendees).values({ recordingId: sharedCall.id, personId: kept.id, name: keptName });
+      const keptBefore = await byId(B, kept.id);
+
+      // A guest with no address, only on the deleted capture.
+      const goneName = `Goneguest ${tag}`;
+      const gone = await guestCapture(goneName);
+      const goneBefore = { byId: gone.pid ? await byId(B, gone.pid) : 0, listed: gone.pid ? await listed(B, gone.pid) : true, found: gone.pid ? await found(B, goneName, gone.pid) : true };
+      record(
+        gone.status === 201 && !!gone.pid && goneBefore.byId === 404 && !goneBefore.listed && !goneBefore.found,
+        "captures 18g: control: A's private capture names a guest, whose person B gets 404 for and finds in neither the list nor /captures/people",
+        `capture ${gone.status}; person ${!!gone.pid}; B ${JSON.stringify(goneBefore)}`,
+      );
+      const goneDel = await remove(gone.captureId);
+      record(!(await exists(gone.pid)), "captures 18g: once A deletes that capture, the guest's person (no address, on nothing else) is gone", goneDel);
+      const goneAfter = gone.pid ? { byId: await byId(B, gone.pid), listed: await listed(B, gone.pid), found: await found(B, goneName, gone.pid) } : null;
+      record(
+        !!goneAfter && goneAfter.byId === 404 && !goneAfter.listed && !goneAfter.found,
+        "captures 18g: and B still gets 404 for that person, and finds them in neither the list nor /captures/people",
+        JSON.stringify(goneAfter),
+      );
+
+      // A guest given an address through inviteeNames, only on the deleted capture.
+      const addrName = `Addrguest ${tag}`;
+      const addr = await guestCapture(addrName, [{ email: `addrguest-${tag}@clipwise.test`, name: addrName }]);
+      const addrEmail = addr.pid ? ((await pool.query(`select email from people where id = $1`, [addr.pid])).rows[0]?.email ?? null) : null;
+      record(addr.status === 201 && addrEmail === `addrguest-${tag}@clipwise.test`, "captures 18g: control: a guest named with an invitee's address gets a person with that address", `capture ${addr.status}; email ${addrEmail}`);
+      const addrDel = await remove(addr.captureId);
+      record(!(await exists(addr.pid)), "captures 18g: once A deletes that capture, the person with the address (on nothing else) is gone", addrDel);
+
+      // A guest also named on A's second capture.
+      const bothName = `Bothguest ${tag}`;
+      const both1 = await guestCapture(bothName);
+      const both2 = await guestCapture(bothName);
+      record(both1.status === 201 && both2.status === 201 && !!both1.pid && both1.pid === both2.pid, "captures 18g: control: the same guest on two of A's captures is one person", `${both1.pid} / ${both2.pid}`);
+      const bothDel = await remove(both1.captureId);
+      const bothAfter = both1.pid ? { exists: await exists(both1.pid), a: await byId(A, both1.pid), b: await byId(B, both1.pid) } : null;
+      record(
+        !!bothAfter && bothAfter.exists && bothAfter.a === 200 && bothAfter.b === 404,
+        "captures 18g: deleting one of the two keeps the person, still on the other: A gets 200, B 404",
+        `${bothDel}; ${JSON.stringify(bothAfter)}`,
+      );
+      await remove(both2.captureId);
+
+      // A person on a shared recording, after the unrelated deletes above.
+      const keptAfter = await byId(B, kept.id);
+      record(keptBefore === 200 && keptAfter === 200, "captures 18g: a person on a shared recording is 200 to B before and after the unrelated deletes", `${keptBefore} → ${keptAfter}`);
+
+      // A bare person row, on no recording.
+      const [bare] = await db.insert(schema.people).values({ accountId: acc, email: null, name: `Barerow ${tag}` }).returning({ id: schema.people.id });
+      const bareA = await byId(A, bare.id);
+      const bareB = await byId(B, bare.id);
+      record(bareA === 404 && bareB === 404, "captures 18g: a person row no recording points at is 404 to A and to B", `A ${bareA}, B ${bareB}`);
+
+      // Control for the 404s above: an id that names no person.
+      const none = await byId(B, randomUUID());
+      record(none === 404, "captures 18g: control: an id that names no person is 404 to B", `got ${none}`);
     }
 
     // ---- the recording-notice acknowledgement (SAA-227 part I) ---------------
@@ -1250,7 +1356,7 @@ async function main(): Promise<void> {
     const emailsB = (peopleB.json?.people ?? []).map((p: any) => p.email);
     const peopleA = await http("GET", `/accounts/${acc}/people`, { token: A.token });
     const emailsA = (peopleA.json?.people ?? []).map((p: any) => p.email);
-    record(!emailsB.includes(people.hidden.email) && emailsB.includes(people.shared.email) && emailsB.includes(people.free.email), "people: someone seen only on another member's private call is not listed; people on shared calls and unattached people are", `${emailsB.filter((e: string | null) => (e ?? "").endsWith(`-${tag}@clipwise.test`)).length} listed`); // e ?? "": people made at ingest have no address (SAA-260 step 2)
+    record(!emailsB.includes(people.hidden.email) && emailsB.includes(people.shared.email) && !emailsB.includes(people.free.email), "people: someone seen only on another member's private call is not listed, nor is a person on no call; people on shared calls are", `${emailsB.filter((e: string | null) => (e ?? "").endsWith(`-${tag}@clipwise.test`)).length} listed`); // e ?? "": people made at ingest have no address (SAA-260 step 2)
     record(emailsA.includes(people.hidden.email), "people: the owner of that call does see them");
     record((await http("GET", `/accounts/${acc}/people/${people.hidden.id}`, { token: B.token })).status === 404, "people by id: the hidden person is 404");
 
@@ -1417,8 +1523,8 @@ async function main(): Promise<void> {
       await seenOn("o-c", { owner: A, visibility: "shared", at: "2026-01-03T00:00:00Z", attendee: oC });
       const order = await search(B, `Order${tag}`);
       record(
-        JSON.stringify(names(order)) === JSON.stringify([`Order${tag} C`, `Order${tag} B`, `Order${tag} A`, `Order${tag} D`]),
-        "capture people: most recently seen first (an invitee row counts), a person on no call last",
+        JSON.stringify(names(order)) === JSON.stringify([`Order${tag} C`, `Order${tag} B`, `Order${tag} A`]),
+        "capture people: most recently seen first (an invitee row counts); a person on no call is not listed",
         JSON.stringify(names(order)),
       );
 
@@ -1451,7 +1557,9 @@ async function main(): Promise<void> {
       );
 
       // -- at most 10 --
-      for (let i = 0; i < 12; i++) await person(`Cap${tag} ${String(i).padStart(2, "0")}`);
+      for (let i = 0; i < 12; i++) {
+        await seenOn(`cap-${i}`, { owner: A, visibility: "shared", at: "2026-04-01T00:00:00Z", attendee: await person(`Cap${tag} ${String(i).padStart(2, "0")}`) });
+      }
       const cap = await search(B, `Cap${tag}`);
       record(names(cap).length === 10, "capture people: at most 10", `${names(cap).length} returned`);
 
@@ -1462,10 +1570,10 @@ async function main(): Promise<void> {
         "capture people: q ignores case and runs of spaces",
         JSON.stringify(names(spaced)),
       );
-      await person(`Pct${tag} 100% real`);
-      await person(`Pct${tag} 100x real`);
-      await person(`Und${tag} a_b`);
-      await person(`Und${tag} axb`);
+      // On a shared call each, so B may see all four and only the matching rule decides.
+      for (const [key, name] of [["pct-1", `Pct${tag} 100% real`], ["pct-2", `Pct${tag} 100x real`], ["und-1", `Und${tag} a_b`], ["und-2", `Und${tag} axb`]]) {
+        await seenOn(key, { owner: A, visibility: "shared", at: "2026-04-02T00:00:00Z", attendee: await person(name) });
+      }
       const pct = await search(B, `Pct${tag} 100%`);
       const und = await search(B, `Und${tag} a_b`);
       record(
@@ -1475,7 +1583,8 @@ async function main(): Promise<void> {
       );
 
       // -- what comes back --
-      await person(`At${tag} someone@clipwise.test`);
+      // On a shared call, so only the @ rule keeps it out.
+      await seenOn("at", { owner: A, visibility: "shared", at: "2026-04-03T00:00:00Z", attendee: await person(`At${tag} someone@clipwise.test`) });
       const at = await search(B, `At${tag}`);
       const all = [order, visB, emptyB, cap, at];
       record(
@@ -1490,6 +1599,7 @@ async function main(): Promise<void> {
       const nfcDecomposed: string = `Nfc${tag} Jose\u0301`, nfcComposed: string = `Nfc${tag} Jos\u00e9`;
       record(nfcDecomposed !== nfcComposed, "capture people: guard: the decomposed and composed raw strings differ", `${nfcDecomposed.length} / ${nfcComposed.length}`);
       const nfcPerson = await person(nfcDecomposed);
+      await seenOn("nfc", { owner: A, visibility: "shared", at: "2026-04-04T00:00:00Z", attendee: nfcPerson });
       const nfc = await search(B, nfcComposed);
       record(
         ids(nfc).includes(nfcPerson.id),

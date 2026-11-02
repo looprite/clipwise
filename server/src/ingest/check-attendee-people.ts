@@ -141,9 +141,15 @@ async function main(): Promise<void> {
     )).rows[0].n;
   const peopleCount = async (): Promise<number> =>
     (await pool.query(`select count(*)::int as n from people where account_id = $1`, [fx.accountId])).rows[0].n;
-  // An unattached person (on no recording), visible to every member.
-  const plantPerson = async (accountId: string, name: string, email: string | null = null): Promise<string> =>
-    (await pool.query(`insert into people (account_id, name, email) values ($1, $2, $3) returning id`, [accountId, name, email])).rows[0].id;
+  // A person on a shared recording of their account's, so every member there may
+  // see them. A person on no recording is seen by no one (SAA-243 item 4).
+  const plantPerson = async (accountId: string, name: string, email: string | null = null): Promise<string> => {
+    const id = (await pool.query(`insert into people (account_id, name, email) values ($1, $2, $3) returning id`, [accountId, name, email])).rows[0].id as string;
+    const rec = await makeRecording(accountId === other.accountId ? other : fx, { segments: 0 });
+    await pool.query(`update recordings set visibility = 'shared' where id = $1`, [rec]);
+    await pool.query(`insert into attendees (recording_id, person_id, name, is_host) values ($1, $2, $3, false)`, [rec, id, name]);
+    return id;
+  };
   const capture = async (guests: Guest[], member: "a" | "b" = "a", extra: Record<string, unknown> = {}): Promise<string> => {
     const r = await post(payload(ONE_TO_ONE, { identity: answer(guests), ...extra }), member);
     if (r.status !== 201) throw new Error(`capture not stored: ${r.status} ${JSON.stringify(r.json)}`);
