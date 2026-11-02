@@ -10,6 +10,9 @@ const listPeopleQuerySchema = z.object({
   email: z.string().max(320).optional(),
 });
 
+// What both routes answer with: id, name and email, and no other column.
+const personFields = { id: schema.people.id, name: schema.people.name, email: schema.people.email };
+
 export const peopleRouter = Router({ mergeParams: true });
 // An id that is not a UUID names no person: the same 404 as one that names nothing.
 peopleRouter.param("id", uuidParam("person_not_found"));
@@ -27,7 +30,7 @@ peopleRouter.get(
     const where = query.email
       ? and(personVisibleTo(ctx), ilike(schema.people.email, `%${query.email}%`))
       : personVisibleTo(ctx);
-    const people = await db.select().from(schema.people).where(where);
+    const people = await db.select(personFields).from(schema.people).where(where);
     res.json({ people });
   }),
 );
@@ -37,7 +40,7 @@ peopleRouter.get(
   asyncHandler(async (req, res) => {
     const ctx = accessOf(req);
     const [person] = await db
-      .select()
+      .select(personFields)
       .from(schema.people)
       .where(and(personVisibleTo(ctx), eq(schema.people.id, req.params.id)));
     if (!person) throw new HttpError(404, "person_not_found");

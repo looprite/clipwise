@@ -99,7 +99,6 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
   "POST /accounts/:accountId/recordings": { access: "member", requires: "capture", note: "creates a recording owned by the caller" },
   "GET /accounts/:accountId/recordings": { access: "member", requires: "mcp", note: "recordings the caller can see" },
   "GET /accounts/:accountId/recordings/:id": { access: "member", requires: "mcp", note: "404 unless the caller can see it" },
-  "POST /accounts/:accountId/recordings/:id/attendees": { access: "owner", requires: "capture", note: "only the recording's owner" },
   "GET /accounts/:accountId/recordings/:id/attendees": { access: "member", requires: "mcp", note: "404 unless the caller can see it" },
 
   // No caller exists; capture closes it to MCP tokens; a curation requirement is named when a caller exists.
