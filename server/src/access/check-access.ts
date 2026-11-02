@@ -1285,9 +1285,9 @@ async function main(): Promise<void> {
       const written = await hiddenOnB1();
       const after = await http("GET", `/accounts/${acc}/people/${people.hidden.id}`, { token: B.token });
       record(
-        post.status === 404 && written === 0 && after.status === 404,
+        post.status === 401 && written === 0 && after.status === 404,
         "attendees: member B's capture token cannot store a hidden person's id on B's own call, and B still gets 404 for that person",
-        `POST ${post.status}; rows written ${written}; GET people/:hidden ${after.status}`,
+        `POST ${post.status} (expected 401: the route no longer exists); rows written ${written}; GET people/:hidden ${after.status}`,
       );
       // So that, on code that still has the route, the lines further down see the
       // fixtures they expect.
