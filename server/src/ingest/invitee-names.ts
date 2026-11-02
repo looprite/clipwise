@@ -72,9 +72,9 @@ export type InviteeNamesApplication = {
 // A person found by address is named when it has no name, never renamed. Then
 // this recording's invitee row for the address points at it, and so does the
 // guest attendee row carrying the same name, the one the prompt added when the
-// name was typed. That link also puts the person on this (private) recording
-// at once, so it is not shown to other members as an unattached person
-// (access/visibility.ts personVisibleTo).
+// name was typed. That link puts the person on this (private) recording at
+// once, which is what lets the caller see them (access/visibility.ts
+// personVisibleTo).
 //
 // Names are written through normalizeName and compared through nameKey
 // (routes/capture-people.ts). The caller holds attendee-people.ts lockNames

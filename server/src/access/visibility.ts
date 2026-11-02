@@ -21,7 +21,7 @@
 // momentVisibleTo need the `recordings` table in the query (every moment query
 // joins it already); personVisibleTo is for queries on `people`.
 
-import { and, eq, exists, isNull, ne, not, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, exists, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import type { AccessContext } from "./context.js";
 
@@ -47,11 +47,11 @@ export function momentVisibleTo(ctx: AccessContext): SQL {
 }
 
 // A person row is shared address-book material: it carries a name and an
-// email, and it exists because someone was on a call. It is visible when it is
-// attached to a recording the member can see, or when it is attached to no
-// recording at all (nothing to reveal). A person who appears only on someone
-// else's private recording is not visible — their name would reveal that the
-// recording exists.
+// email, and it exists because someone was on a call. It is visible only when
+// an attendee, speaker or invitee row on a recording the member can see points
+// at it. A person who appears only on someone else's private recording is not
+// visible — their name would reveal that the recording exists — and a person
+// no row points at is visible to no one (SAA-243 item 4; check-access 18g).
 export function personVisibleTo(ctx: AccessContext): SQL {
   const p = schema.people;
   const one = sql`1`;
@@ -76,11 +76,5 @@ export function personVisibleTo(ctx: AccessContext): SQL {
       .innerJoin(r, eq(r.id, schema.invitees.recordingId))
       .where(and(eq(schema.invitees.personId, p.id), recordingVisibleTo(ctx))),
   );
-  const anyAttendee = exists(db.select({ one }).from(schema.attendees).where(eq(schema.attendees.personId, p.id)));
-  const anySpeaker = exists(db.select({ one }).from(schema.speakers).where(eq(schema.speakers.personId, p.id)));
-  const anyInvitee = exists(db.select({ one }).from(schema.invitees).where(eq(schema.invitees.personId, p.id)));
-  return and(
-    eq(p.accountId, ctx.accountId),
-    or(viaAttendee, viaSpeaker, viaInvitee, and(not(anyAttendee), not(anySpeaker), not(anyInvitee))),
-  )!;
+  return and(eq(p.accountId, ctx.accountId), or(viaAttendee, viaSpeaker, viaInvitee))!;
 }
