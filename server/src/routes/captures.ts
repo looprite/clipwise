@@ -36,8 +36,9 @@
 // answer's own personIds, then inviteeNames by address, then the same-name rule
 // for the rest; then voice names, which copy the attendee's person. Only a
 // request that applies an answer, a correction or inviteeNames links anything,
-// so a plain retry creates no person. A correction then deletes a person step 2
-// made that nothing points at any more.
+// so a plain retry creates no person. A correction then deletes each person it
+// released that nothing points at any more, with an address or without
+// (SAA-243 item 4).
 // Both replies, 201 and 200, carry `people`: each Voice N's person and, with no
 // Voice rows, the one guest's for `them` (ingest/attendee-people.ts
 // voicePeopleFor). Ids only. The recorder's voice-print store on the Mac

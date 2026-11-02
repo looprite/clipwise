@@ -10,9 +10,9 @@
 //   3. the same-name rule (linkAttendeePeople below), for every guest row still
 //      unlinked: the people the caller may see (personVisibleTo) whose name
 //      compares equal (nameKey). None: a person is created, in this same
-//      transaction, already linked to this recording, so it is never an
-//      unattached person (visible to every member). Exactly one: reused. Two or
-//      more: the row stays unlinked and nothing is created (correct or absent).
+//      transaction, already linked to this recording. Exactly one: reused. Two
+//      or more: the row stays unlinked and nothing is created (correct or
+//      absent).
 //
 // The host line is the member, never a guest person. The host row is never
 // linked, and a guest whose name is the host's own (the answer's self name, or
@@ -186,9 +186,12 @@ export async function linkAttendeePeople(
   return out;
 }
 
-// After a correction: of the people the recording's previous rows pointed at,
-// delete each that step 2 made (no address) and that nothing points at any
-// more. Anything else is left. -> how many were deleted.
+// Of the given people, delete each that nothing points at any more, with an
+// address or without one (SAA-243 item 4: a person with no reference does not
+// exist). Called after a correction with the people the recording's previous
+// rows pointed at, and after a permanent delete with the people the deleted
+// recording's rows pointed at (routes/capture-scope.ts). -> how many were
+// deleted.
 //
 // The not-exists list is every foreign key to people.id, checked against
 // schema.ts (and pg_constraint on main, 2026-10-31): attendees.person_id,
@@ -206,7 +209,6 @@ export async function dropReleasedPeople(tx: Tx, accountId: string, personIds: s
       and(
         eq(p.accountId, accountId),
         inArray(p.id, ids),
-        isNull(p.email),
         sql`not exists (select 1 from ${schema.attendees} where ${schema.attendees.personId} = ${p.id})`,
         sql`not exists (select 1 from ${schema.speakers} where ${schema.speakers.personId} = ${p.id})`,
         sql`not exists (select 1 from ${schema.invitees} where ${schema.invitees.personId} = ${p.id})`,
