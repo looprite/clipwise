@@ -63,6 +63,9 @@ export type InviteeNamesApplication = {
   refused: number;
   inviteesLinked: number;
   attendeesLinked: number;
+  // The people inserted here, for the caller to pass to attendee-people.ts
+  // dropReleasedPeople once its linking is done. Never logged.
+  createdIds: string[];
 };
 
 // For each pair: the person with that address in the account. When there is
@@ -89,7 +92,7 @@ export async function applyInviteeNames(
   pairs: InviteeName[],
 ): Promise<InviteeNamesApplication> {
   const accountId = ctx.accountId;
-  const app: InviteeNamesApplication = { created: 0, adopted: 0, named: 0, kept: 0, refused: 0, inviteesLinked: 0, attendeesLinked: 0 };
+  const app: InviteeNamesApplication = { created: 0, adopted: 0, named: 0, kept: 0, refused: 0, inviteesLinked: 0, attendeesLinked: 0, createdIds: [] };
   for (const pair of pairs) {
     const email = normalizeEmail(pair.email);
     const name = normalizeName(pair.name);
@@ -127,6 +130,7 @@ export async function applyInviteeNames(
       if (inserted) {
         person = inserted;
         app.created += 1;
+        app.createdIds.push(inserted.id);
       } else {
         [person] = await executor
           .select({ id: schema.people.id, name: schema.people.name })

@@ -38,7 +38,8 @@
 // request that applies an answer, a correction or inviteeNames links anything,
 // so a plain retry creates no person. A correction then deletes each person it
 // released that nothing points at any more, with an address or without
-// (SAA-243 item 4).
+// (SAA-243 item 4). Every request, first send or repeat, also deletes a person
+// inviteeNames created that no row points at once its linking is done.
 // Both replies, 201 and 200, carry `people`: each Voice N's person and, with no
 // Voice rows, the one guest's for `them` (ingest/attendee-people.ts
 // voicePeopleFor). Ids only. The recorder's voice-print store on the Mac
@@ -390,11 +391,15 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
   const notice = body.notice ?? null;
   const inviteeNames = body.inviteeNames ?? [];
   // After the identity answer, so the guest attendee row a name links to exists.
-  // -> the counts for the log, or null when none were sent.
-  const nameInvitees = async (tx: Tx, recordingId: string): Promise<string | null> => {
-    if (inviteeNames.length === 0) return null;
+  // -> the counts for the log (null when none were sent), and the people it
+  // created, for dropReleasedPeople once this request's linking is done: one
+  // that neither row it may link took is deleted (SAA-243 item 4;
+  // check-calendar-preview u).
+  const nameInvitees = async (tx: Tx, recordingId: string): Promise<{ log: string | null; createdIds: string[] }> => {
+    if (inviteeNames.length === 0) return { log: null, createdIds: [] };
     const owner = await ownerAddressesFor(tx, ctx.memberId, ctx.email);
-    return describeInviteeNames(await applyInviteeNames(tx, ctx, recordingId, owner, inviteeNames));
+    const applied = await applyInviteeNames(tx, ctx, recordingId, owner, inviteeNames);
+    return { log: describeInviteeNames(applied), createdIds: applied.createdIds };
   };
   // The advisory locks for every name and address this request may create or
   // reuse a person for, before any of it is looked up (attendee-people.ts).
@@ -523,7 +528,8 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       }
       // Before voice names, so a voice named after a guest copies that guest's
       // person (voice-names.ts).
-      const inviteeNamesLog = await nameInvitees(tx, existing.id);
+      const named = await nameInvitees(tx, existing.id);
+      const inviteeNamesLog = named.log;
       const linked = linking ? await linkAttendeePeople(tx, ctx, existing.id, hostKeys) : null;
       // After identity, so a one-guest answer that merged the Voice rows back
       // leaves these names nothing to land on, as on the Mac. applyVoiceNames
@@ -536,7 +542,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
         voiceNamesApplied = true;
         namesWritten ||= naming.applied.length > 0;
       }
-      const dropped = await dropReleasedPeople(tx, ctx.accountId, released);
+      const dropped = await dropReleasedPeople(tx, ctx.accountId, [...released, ...named.createdIds]);
       const peopleLog = linked ? describeLinking(linked, dropped) : null;
       const reextractJobId = namesWritten ? await enqueueReextractForLateNames(tx, existing) : null;
       const people = await voicePeopleFor(tx, existing.id);
@@ -591,10 +597,12 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       await applySpeakerNames(tx, recording.id, identity);
       await applyScope(tx, recording.id, identity);
     }
-    const inviteeNamesLog = await nameInvitees(tx, recording.id);
+    const named = await nameInvitees(tx, recording.id);
+    const inviteeNamesLog = named.log;
     // After inviteeNames, so a guest named by address is not also given a
     // name-only person; before voice names, which copy the attendee's person.
     const peopleLog = linking ? describeLinking(await linkAttendeePeople(tx, ctx, recording.id, hostKeys)) : null;
+    await dropReleasedPeople(tx, ctx.accountId, named.createdIds);
 
     // The member's acknowledgement of that notice version, recorded the first time
     // a capture carries it. A later capture with the same version adds nothing,
