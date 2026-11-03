@@ -5673,9 +5673,9 @@ app.on('web-contents-created', (_event, contents) => {
 // What Electron applied to a window's page, as it reports it
 // (getLastWebPreferences), not what main.js asked for: the line that shows on a
 // built app that the hardening is in force. Only the settings that decide
-// whether the page reaches Node, and the preload's file name. The page is named
-// by its file only: the URL's query carries a token and a capture's stem. A
-// setting Electron does not report reads as undefined, not as its default.
+// whether the page reaches Node. The page is named by its file only: the URL's
+// query carries a token and a capture's stem. A setting Electron does not
+// report reads as undefined, not as its default.
 const HARDENING_PREFERENCES = ['contextIsolation', 'sandbox', 'nodeIntegration', 'nodeIntegrationInWorker',
     'nodeIntegrationInSubFrames', 'webviewTag'];
 function logAppliedPreferences(contents) {
@@ -5688,6 +5688,5 @@ function logAppliedPreferences(contents) {
         return;
     }
     const settings = HARDENING_PREFERENCES.map((k) => `${k}=${String(prefs[k])}`).join(' ');
-    const preload = typeof prefs.preload === 'string' && prefs.preload ? path.basename(prefs.preload) : 'none';
-    console.error(`[clipwise-recorder] window ${page}: applied ${settings} preload=${preload}`);
+    console.error(`[clipwise-recorder] window ${page}: applied ${settings}`);
 }
