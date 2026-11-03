@@ -24,8 +24,10 @@
      the saved answer; Later, in Name voices, leaves the voices for the tray).
      Closing the window is Later (SAA-197).
 
-     Loaded from file:// with nodeIntegration on: it ships in the bundle and loads
-     no remote content. Clips play from local files this Mac's capture wrote.
+     Loaded from file:// with no Node (SAA-243 window hardening): contextIsolation
+     and sandbox on, nodeIntegration off; identity-preload.js is all it reaches of
+     the main process. It ships in the bundle and loads no remote content. Clips
+     play from local files this Mac's capture wrote.
      From a voice it reads voiceIndex and clipPaths, and from a line its text. -->
 <title>Who was on this call?</title>
 <style>
@@ -176,9 +178,13 @@
     <button id="save" type="button" class="primary">Save</button>
   </div>
 
+<script src="people-name.js"></script>
+<script src="identity-rules.js"></script>
 <script>
-  const { ipcRenderer } = require('electron');
-  const ia = require('./identity-rules.js');
+  // No Node here (SAA-243 window hardening): identity-preload.js's channels,
+  // and the rules as page scripts, people-name.js first.
+  const ipcRenderer = window.clipwise;
+  const ia = window.identityRules;
   const params = new URLSearchParams(window.location.search);
   const token = params.get('token');
   const MODES = ['stop', 'later', 'correct', 'voices'];

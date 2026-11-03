@@ -15,9 +15,10 @@
      its words and bump both together. Turning on sends the version shown here,
      and main.js refuses any other.
 
-     Loaded from file:// with nodeIntegration, like the other windows: it ships
-     inside the bundle and loads no remote content. Every name from the data is
-     put on the page with textContent. -->
+     Loaded from file:// with no Node, like the other windows (SAA-243 window
+     hardening): voice-prints-preload.js is all it reaches of the main process.
+     It ships inside the bundle and loads no remote content. Every name from the
+     data is put on the page with textContent. -->
 <title>Recognize voices</title>
 <style>
   :root {
@@ -93,7 +94,8 @@
   <button id="done" hidden>Done</button>
 </footer>
 <script>
-  const { ipcRenderer } = require('electron');
+  // No Node here (SAA-243 window hardening): voice-prints-preload.js's channels.
+  const ipcRenderer = window.clipwise;
   // The statement on this page (see the comment at the top).
   const STATEMENT_VERSION = 1;
   const $ = (id) => document.getElementById(id);

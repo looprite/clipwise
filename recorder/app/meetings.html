@@ -12,9 +12,10 @@
      meetings: no moments, no search, no transcript, no summary. Reading
      meetings back happens in Claude.
 
-     Loaded from file:// with nodeIntegration, same reasoning as the identity
-     window: it ships inside the bundle and loads no remote content. Every
-     value from the data is put on the page with textContent. -->
+     Loaded from file:// with no Node, like the identity window (SAA-243 window
+     hardening): meetings-preload.js is all it reaches of the main process. It
+     ships inside the bundle and loads no remote content. Every value from the
+     data is put on the page with textContent. -->
 <title>Recent meetings</title>
 <style>
   :root {
@@ -107,7 +108,8 @@
 </header>
 <div id="list"></div>
 <script>
-  const { ipcRenderer } = require('electron');
+  // No Node here (SAA-243 window hardening): meetings-preload.js's channels.
+  const ipcRenderer = window.clipwise;
 
   // The All / Work / Personal switch. A row with no scope recorded matches
   // neither Work nor Personal, so it shows under All only. The page's own, so it

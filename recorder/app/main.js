@@ -1205,6 +1205,13 @@ async function changeTrash(action, rawStems) {
     sendMeetingsData();
 }
 
+// Every window's page runs with no Node (SAA-243 window hardening): isolated
+// from its preload, sandboxed, no nodeIntegration. Its preload, beside main.js,
+// exposes that window's IPC channels and nothing else.
+function windowPreferences(preload) {
+    return { preload: path.join(__dirname, preload), contextIsolation: true, sandbox: true, nodeIntegration: false };
+}
+
 function openMeetingsWindow() {
     // A row whose status is unknown gets its answer while the window is open.
     askJobsAgain('Recent meetings opened');
@@ -1220,7 +1227,7 @@ function openMeetingsWindow() {
         minHeight: 320,
         title: 'Recent meetings',
         show: false,
-        webPreferences: { nodeIntegration: true, contextIsolation: false },
+        webPreferences: windowPreferences('meetings-preload.js'),
     });
     const win = meetingsWindow;
     win.once('ready-to-show', () => {
@@ -1361,7 +1368,7 @@ function openVoicePrintsWindow() {
         minHeight: 360,
         title: 'Recognize voices',
         show: false,
-        webPreferences: { nodeIntegration: true, contextIsolation: false },
+        webPreferences: windowPreferences('voice-prints-preload.js'),
     });
     const win = voicePrintsWindow;
     win.once('ready-to-show', () => {
@@ -1466,7 +1473,7 @@ function newIdentityWindow({ onTop = true } = {}) {
         fullscreenable: false,
         alwaysOnTop: onTop,
         title: 'Who was on this call?',
-        webPreferences: { nodeIntegration: true, contextIsolation: false },
+        webPreferences: windowPreferences('identity-preload.js'),
     });
 }
 
@@ -4345,7 +4352,7 @@ function showSetupWindow(mode = 'launch') {
             // the browser's sign-in page and macOS's prompts have to come in front.
             alwaysOnTop: noticeOnly,
             title: noticeOnly ? 'Before you record' : 'Set up Clipwise',
-            webPreferences: { nodeIntegration: true, contextIsolation: false },
+            webPreferences: windowPreferences('setup-preload.js'),
         });
     } catch (err) {
         // Nothing records while the gate is shut, so a window that cannot be
