@@ -35,6 +35,7 @@ import { addMember, createPasswordLogin, removeMember, requireAccount, Refusal }
 import { findMemberByEmail } from "./membership.js";
 import { mountAuth } from "./mount.js";
 import { oauthRouter } from "../routes/oauth.js";
+import { errorHandler } from "../lib/http.js";
 
 if (process.env.CLIPWISE_CHECK_SCRATCH_DB !== "1") {
   process.stderr.write(
@@ -966,6 +967,8 @@ async function main(): Promise<void> {
         const gRedirectSaved = process.env.GOOGLE_OAUTH_REDIRECT_URI;
         process.env.GOOGLE_OAUTH_REDIRECT_URI = `${origin}/oauth/google/callback`;
         gapp.use(oauthRouter);
+        // Last, as in app.ts: a callback with no code is a ZodError, answered 400.
+        gapp.use(errorHandler);
         const outerFetch = globalThis.fetch;
         let signInGrant: { sub: string; email: string; refresh: boolean; nonce: string | null } | null = null;
         // A token request outside a sign-in (a Reconnect code exchange): counted,
@@ -1050,6 +1053,11 @@ async function main(): Promise<void> {
             "that consent state from a browser without the sign-in's session: not sent on to the sign-in's destination",
             `status ${elsewhere.status}, location ${elsewhere.headers.get("location")}`,
           );
+          record(
+            elsewhere.status === 400,
+            "that consent state from a browser without the sign-in's session, with no code: answered 400",
+            `status ${elsewhere.status}`,
+          );
 
           // The state altered (the first character after "c1.", inside the signed
           // payload): not sent on either.
@@ -1062,6 +1070,11 @@ async function main(): Promise<void> {
             altered !== consentState && tampered.headers.get("location") !== "/login",
             "that consent state altered: not sent on to the sign-in's destination",
             `status ${tampered.status}, location ${tampered.headers.get("location")}`,
+          );
+          record(
+            tampered.status === 400,
+            "that consent state altered, with no code: answered 400",
+            `status ${tampered.status}`,
           );
 
           // That consent denied: Google comes back with an error and no code.
