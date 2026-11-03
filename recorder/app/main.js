@@ -5615,3 +5615,31 @@ app.on('second-instance', () => {
 app.on('will-quit', () => { isQuitting = true; stopDetector(); });
 
 app.on('window-all-closed', (e) => { e.preventDefault?.(); });
+
+// Every window shows one bundled page and nothing else (SAA-243, window
+// hardening). App-wide, so a window added later is covered without remembering
+// to: no page may open a new window, and none may navigate away from its own
+// file. A query or fragment change on the same file is not "away". loadFile is
+// not a navigation the page asked for, so it never reaches will-navigate. The
+// log line says only that something was refused, never the URL: a link's
+// address can carry a meeting's text.
+function samePageFile(target, current) {
+    try {
+        const to = new URL(target);
+        const from = new URL(current);
+        return to.protocol === 'file:' && from.protocol === 'file:' && to.pathname === from.pathname;
+    } catch {
+        return false;
+    }
+}
+app.on('web-contents-created', (_event, contents) => {
+    contents.setWindowOpenHandler(() => {
+        console.error('[clipwise-recorder] window: a new window was refused');
+        return { action: 'deny' };
+    });
+    contents.on('will-navigate', (event, url) => {
+        if (samePageFile(url, contents.getURL())) return;
+        event.preventDefault();
+        console.error('[clipwise-recorder] window: a navigation away from the page was refused');
+    });
+});
