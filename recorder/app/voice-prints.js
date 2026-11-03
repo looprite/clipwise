@@ -195,6 +195,40 @@ function removeDiarizeEmbeddings(outdir, { stem = null, skip = () => false } = {
     return out;
 }
 
+// Which captures the removal leaves alone, from main.js's state. While a
+// recovery pass runs, every one: main.js does not know which capture it is on,
+// and its exit runs the pass again. Otherwise the capture whose pipeline is
+// running, unless that is the process that just ended (its own exit's pass).
+function removalSkip({ pipeline, recovering, endedProc = null }) {
+    const running = pipeline && pipeline.state === 'running' && pipeline.proc !== endedProc ? pipeline.stem : null;
+    return (stem) => !!recovering || (running !== null && stem === running);
+}
+
+// The removal while off as main.js runs it, at launch, at a pipeline exit and
+// at a recovery exit. Never throws, whatever getStore or the pass throws, so a
+// launch always finishes. The day log gets counts, or one fixed line on a
+// failure: never a name, a path or an error message. reason is one of
+// REMOVAL_REASONS, anything else is logged as "other".
+//   getStore () -> createVoicePrints(...)'s store
+//   log      (line) -> undefined
+const REMOVAL_REASONS = ['launch', 'pipeline exit', 'recovery exit'];
+function runRemovalWhileOff(getStore, { reason, stem = null, skip, log }) {
+    const why = REMOVAL_REASONS.includes(reason) ? reason : 'other';
+    try {
+        const r = getStore().removeWhileOff({ stem, skip });
+        if (r.skipped) return r;
+        const e = r.embeddings;
+        if (r.profiles || r.scores || r.hostPrints || e.changed || e.skipped || e.failed) {
+            log(`[clipwise-recorder] voice prints off (${why}): store ${r.profiles ? 'deleted' : 'none'}, score log ${r.scores ? 'deleted' : 'none'}, host prints ${r.hostPrints}, `
+                + `embeddings removed from ${e.changed} of ${e.files} diarize file(s), ${e.skipped} skipped, ${e.failed} failed`);
+        }
+        return r;
+    } catch {
+        try { log(`[clipwise-recorder] voice prints off (${why}): removal failed`); } catch {}
+        return { failed: true };
+    }
+}
+
 // The store. encrypt(string) -> Buffer and decrypt(Buffer) -> string are
 // Electron safeStorage's in the app, and a stand-in in the checks.
 function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => new Date() }) {
@@ -454,4 +488,7 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
     };
 }
 
-module.exports = { STATEMENT_VERSION, SELF_MATCH_CUTOFF, normalise, cosine, meanOf, decideEnrolment, removeDiarizeEmbeddings, createVoicePrints };
+module.exports = {
+    STATEMENT_VERSION, SELF_MATCH_CUTOFF, normalise, cosine, meanOf, decideEnrolment,
+    removeDiarizeEmbeddings, removalSkip, runRemovalWhileOff, createVoicePrints,
+};

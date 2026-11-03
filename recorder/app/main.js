@@ -1332,6 +1332,19 @@ function voicePrintsAfterSend(stem, people) {
     }
 }
 
+// While prints are off (SAA-243 item 7): at launch and at a recovery exit, every
+// capture's diarize embeddings, plus a store or waiting host print a turn-off
+// cut short left; at a pipeline exit, that capture's. Never throws
+// (runRemovalWhileOff), so a launch always finishes. endedProc: the pipeline
+// process whose exit this is, so its own stem is not skipped.
+function voicePrintsRemoveWhileOff(reason, stem = null, endedProc = null) {
+    return voicePrintsModule.runRemovalWhileOff(voicePrints, {
+        reason, stem,
+        skip: voicePrintsModule.removalSkip({ pipeline, recovering: !!recoveryProc, endedProc }),
+        log: (line) => console.error(line),
+    });
+}
+
 // Before a capture's files are deleted from the trash.
 function voicePrintsRemoveRecording(stem) {
     try {
@@ -1436,8 +1449,12 @@ function registerVoicePrintsIpc() {
         });
         if (response !== 1) return;
         try {
-            const gone = voicePrints().disable();
-            console.error(`[clipwise-recorder] voice prints: turned off (prints ${gone.profiles ? 'deleted' : 'none'}, scores ${gone.scores ? 'deleted' : 'none'}, host prints ${gone.hostPrints})`);
+            // A running pipeline's capture, or every capture while recovery
+            // runs, is left to that process's exit (voicePrintsRemoveWhileOff).
+            const gone = voicePrints().disable({ skip: voicePrintsModule.removalSkip({ pipeline, recovering: !!recoveryProc }) });
+            const e = gone.embeddings;
+            console.error(`[clipwise-recorder] voice prints: turned off (prints ${gone.profiles ? 'deleted' : 'none'}, scores ${gone.scores ? 'deleted' : 'none'}, host prints ${gone.hostPrints}, `
+                + `embeddings removed from ${e.changed} of ${e.files} diarize file(s), ${e.skipped} skipped, ${e.failed} failed)`);
         } catch (err) {
             console.error(`[clipwise-recorder] voice prints: turn off failed (${err.code || err.name})`);
         }
@@ -2886,6 +2903,10 @@ function startPipeline(stem) {
         // capture only once its record shows its steps settled. Drained after
         // `pipeline` is updated below, so this capture counts as settled.
         setImmediate(() => drainUploadQueue('pipeline exit'));
+        // Whatever the exit code, and before the early return below: with
+        // prints off, this capture's diarize embeddings (SAA-243 item 7), for
+        // a pipeline started while they were on or a turn-off that skipped it.
+        voicePrintsRemoveWhileOff('pipeline exit', stem, proc);
         if (!pipeline || pipeline.proc !== proc) return;
         if (code === 0) {
             pipeline = null;
@@ -2990,6 +3011,9 @@ function startRecovery(reason, opts = {}) {
             );
         } catch {}
         if (recoveryProc === proc) recoveryProc = null;
+        // With prints off, every capture's diarize embeddings: the pass skipped
+        // them all while this ran (SAA-243 item 7).
+        voicePrintsRemoveWhileOff('recovery exit');
         // The captures this pass finished are sent, whether or not their own
         // pipeline ever queued them: only those whose record says "recovered"
         // at or after this pass began, never every capture recovery looked at
@@ -5641,6 +5665,10 @@ app.whenReady().then(async () => {
     try { fs.mkdirSync(OUTDIR, { recursive: true }); } catch (err) {
         console.error(`launch: could not create ${OUTDIR}: ${String(err)}`);
     }
+    // With prints off, every capture's diarize embeddings and anything a
+    // turn-off cut short left (SAA-243 item 7). Before recovery starts, which
+    // would make it skip every capture. Never throws.
+    voicePrintsRemoveWhileOff('launch');
     startRecovery('app launch');
     // After the tray, for the same reason: call detection must never be able
     // to cost someone their menu bar icon. A missing or crashing micwatch
