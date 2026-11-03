@@ -1693,6 +1693,25 @@ function openIdentityWindowForCheck() {
     });
 }
 
+// The window-hardening check's switch (check-identity-window.js, its hardening
+// fixture), read here and nowhere else: the windows no other switch opens.
+// Unset in normal use. Set to a comma-separated list of "meetings" and
+// "voice-prints", it opens each through the function its tray item calls, and
+// logs one line naming them. Any other value opens nothing and logs one line
+// saying so, without the value. It opens only; it does nothing else.
+function openWindowsForCheck() {
+    const raw = process.env.CLIPWISE_CHECK_OPEN_WINDOWS;
+    if (!raw) return;
+    const OPEN = { meetings: openMeetingsWindow, 'voice-prints': openVoicePrintsWindow };
+    const names = raw.split(',').map((s) => s.trim());
+    if (!names.every((n) => Object.prototype.hasOwnProperty.call(OPEN, n))) {
+        console.error('[clipwise-recorder] check switch: nothing opened — not a list of "meetings" and "voice-prints"');
+        return;
+    }
+    console.error(`[clipwise-recorder] check switch: opening ${names.join(', ')}`);
+    for (const n of names) OPEN[n]();
+}
+
 // Opens the THIRD_PARTY_NOTICES file bundled inside the packaged app
 // (Contents/Resources/THIRD_PARTY_NOTICES, copied there by build-app.sh —
 // see that script's THIRD_PARTY_NOTICES line), not the repo's copy: the
@@ -5598,6 +5617,8 @@ app.whenReady().then(async () => {
     registerMeetingsIpc();
     registerVoicePrintsIpc();
     registerSetupIpc();
+    // Unset in normal use: see openWindowsForCheck.
+    openWindowsForCheck();
     // Before any call can start a capture, so that a new person has read the
     // notice by the time their first one is turned away (SAA-216). Opens setup
     // if it was never finished, the notice alone if setup was finished and the
