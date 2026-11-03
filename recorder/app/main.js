@@ -1703,13 +1703,13 @@ function openWindowsForCheck() {
     const raw = process.env.CLIPWISE_CHECK_OPEN_WINDOWS;
     if (!raw) return;
     const OPEN = { meetings: openMeetingsWindow, 'voice-prints': openVoicePrintsWindow };
-    const names = raw.split(',').map((s) => s.trim());
-    if (!names.every((n) => Object.prototype.hasOwnProperty.call(OPEN, n))) {
+    const windows = raw.split(',').map((s) => s.trim());
+    if (!windows.every((w) => Object.prototype.hasOwnProperty.call(OPEN, w))) {
         console.error('[clipwise-recorder] check switch: nothing opened — not a list of "meetings" and "voice-prints"');
         return;
     }
-    console.error(`[clipwise-recorder] check switch: opening ${names.join(', ')}`);
-    for (const n of names) OPEN[n]();
+    console.error(`[clipwise-recorder] check switch: opening ${windows.join(', ')}`);
+    for (const w of windows) OPEN[w]();
 }
 
 // Opens the THIRD_PARTY_NOTICES file bundled inside the packaged app
