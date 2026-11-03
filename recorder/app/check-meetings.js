@@ -21,7 +21,7 @@ function pageFunction(file, name) {
     if (!m) throw new Error(`${name} not found in ${file}`);
     return new Function(`${m[0]}\nreturn ${name};`)();
 }
-const filterRows = pageFunction('meetings.html', 'filterRows');
+const filterRows = pageFunction('meetings-page.js', 'filterRows');
 
 let failed = 0;
 function check(name, ok, detail = '') {
@@ -523,8 +523,9 @@ check('without the processing capture, the tray item is the newest ready meeting
         ia.buildAnswerDoc({ stem: ANS, names: [], corrects: 'A' }).corrects === 'A' && !('corrects' in ia.buildAnswerDoc({ stem: ANS, names: [] })));
     fs.rmSync(c9, { recursive: true, force: true });
 
-    // The menu item's wording (SAA-221): meetings.html as text.
-    const page = fs.readFileSync(path.join(__dirname, 'meetings.html'), 'utf8');
+    // The menu item's wording (SAA-221): the page as text, its markup and its
+    // script (meetings-page.js since SAA-243's CSP moved it out) as one.
+    const page = ['meetings.html', 'meetings-page.js'].map((f) => fs.readFileSync(path.join(__dirname, f), 'utf8')).join('\n');
     const OLD = 'Change who was on this call';
     check('SAA-221: the ⋯ menu item reads "Change attendees…"',
         page.includes("el('button', null, 'Change attendees…')"));
@@ -632,9 +633,10 @@ check('without the processing capture, the tray item is the newest ready meeting
         fs.rmSync(c11, { recursive: true, force: true });
     }
 
-    // One window everywhere (B.4): main.js and identity.html as text.
+    // One window everywhere (B.4): main.js and the identity page as text, its
+    // markup and its script (identity-page.js since SAA-243's CSP) as one.
     const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
-    const html = fs.readFileSync(path.join(__dirname, 'identity.html'), 'utf8');
+    const html = ['identity.html', 'identity-page.js'].map((f) => fs.readFileSync(path.join(__dirname, f), 'utf8')).join('\n');
     const body = (name) => {
         const start = main.indexOf(`function ${name}(`);
         if (start < 0) return '';

@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Scripts from the bundle's own files only, nothing remote (SAA-243 window
+     hardening). Styles stay inline. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <!-- The voice prints opt-in screen (SAA-260 step 3, SAA-196's 10-08 decision):
      what is stored and about whom, that some places require consent from the
      people on the call, and that it can be turned off with the prints deleted.
@@ -93,61 +96,6 @@
   <button id="off" class="danger" hidden>Turn off and delete prints</button>
   <button id="done" hidden>Done</button>
 </footer>
-<script>
-  // No Node here (SAA-243 window hardening): voice-prints-preload.js's channels.
-  const ipcRenderer = window.clipwise;
-  // The statement on this page (see the comment at the top).
-  const STATEMENT_VERSION = 1;
-  const $ = (id) => document.getElementById(id);
-
-  function render(data) {
-    const on = !!(data && data.enabled);
-    $('prints').hidden = !on;
-    $('on').hidden = on;
-    $('later').hidden = on;
-    $('off').hidden = !on;
-    $('done').hidden = !on;
-    const list = $('list');
-    list.textContent = '';
-    if (!on) return;
-    const people = (data.profiles && data.profiles.people) || [];
-    const self = data.profiles && data.profiles.self;
-    const row = (label, count, personId) => {
-      const r = document.createElement('div');
-      r.className = 'row';
-      const who = document.createElement('div');
-      who.className = 'who';
-      who.textContent = label;
-      const c = document.createElement('span');
-      c.className = 'count';
-      c.textContent = `${count} ${count === 1 ? 'call' : 'calls'}`;
-      who.appendChild(c);
-      r.appendChild(who);
-      if (personId) {
-        const del = document.createElement('button');
-        del.className = 'small danger';
-        del.textContent = 'Delete';
-        del.addEventListener('click', () => ipcRenderer.send('voice-prints:delete', { personId }));
-        r.appendChild(del);
-      }
-      list.appendChild(r);
-    };
-    if (self) row('You', self.count, null);
-    for (const p of people) row(p.name || 'Someone (no name kept)', p.count, p.personId);
-    if (!self && people.length === 0) {
-      const e = document.createElement('div');
-      e.className = 'empty';
-      e.textContent = 'None yet. A print is kept once you name someone on a call.';
-      list.appendChild(e);
-    }
-  }
-
-  $('on').addEventListener('click', () => ipcRenderer.send('voice-prints:enable', { statementVersion: STATEMENT_VERSION }));
-  $('off').addEventListener('click', () => ipcRenderer.send('voice-prints:disable'));
-  $('later').addEventListener('click', () => window.close());
-  $('done').addEventListener('click', () => window.close());
-  ipcRenderer.on('voice-prints:data', (_e, data) => render(data));
-  ipcRenderer.send('voice-prints:ready');
-</script>
+<script src="voice-prints-page.js"></script>
 </body>
 </html>
