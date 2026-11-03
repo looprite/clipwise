@@ -17,8 +17,9 @@
      something tried to start a capture. "Not now" and closing the window are the
      same thing: nothing is written and the gate stays shut.
 
-     Loaded from file:// with nodeIntegration on, same reasoning as
-     identity.html: ships inside the bundle, loads no remote content. -->
+     Loaded from file:// with no Node, like identity.html (SAA-243 window
+     hardening): setup-preload.js is all it reaches of the main process. Ships
+     inside the bundle, loads no remote content. -->
 <title>Set up Clipwise</title>
 <style>
   :root {
@@ -166,7 +167,8 @@
     <button id="primary" class="primary" type="button"></button>
   </div>
 <script>
-  const { ipcRenderer } = require('electron');
+  // No Node here (SAA-243 window hardening): setup-preload.js's channels.
+  const ipcRenderer = window.clipwise;
   const token = new URLSearchParams(location.search).get('token');
   const $ = (id) => document.getElementById(id);
   const send = (channel, extra) => ipcRenderer.send(channel, { token, ...(extra || {}) });
