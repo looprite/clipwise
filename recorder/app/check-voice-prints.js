@@ -441,8 +441,97 @@ function main() {
         return [r1.enrolled === 0 && r1.refused === 2 && reasons.length === 2 && reasons.every((x) => x === 'no_embedding') && r3.enrolled === 1, JSON.stringify({ r1, reasons, r3 })];
     });
 
+    // As main.js runs the pass (runRemovalWhileOff): it never throws, and the
+    // day log gets counts or one fixed line. The planted error carries a name
+    // and a path, as a real fs error's message carries the file's path.
+    const NAME = 'Ann Example';
+    const leaky = (fx) => Object.assign(new Error(`EIO: i/o error, unlink '${path.join(fx.support, 'voice-prints', 'profiles.json')}' for ${NAME}`), { code: 'EIO' });
+    const FIXED = '[clipwise-recorder] voice prints off (launch): removal failed';
+    add('35. the launch pass catches what the store throws (a failed delete, a store that cannot be opened, a log that throws), returns, and logs only the fixed line; control: the planted error names the person and the path', () => {
+        const { fx, vp } = embeddingFixture();
+        vp.disable();
+        fs.writeFileSync(vp.profilesPath, 'left by a cut-short turn-off', { mode: 0o600 });
+        const err = leaky(fx);
+        const lines = [];
+        const log = (l) => lines.push(l);
+        const outcomes = [];
+        // 1. a real throw from inside the pass: the store's delete fails.
+        stubbing('unlinkSync', (real) => (p) => { if (p === vp.profilesPath) throw err; return real(p); }, () => {
+            try { outcomes.push(mod.runRemovalWhileOff(() => open(fx), { reason: 'launch', log })); } catch (e) { outcomes.push({ threw: e.message }); }
+        });
+        // 2. the store cannot be opened at all.
+        try { outcomes.push(mod.runRemovalWhileOff(() => { throw err; }, { reason: 'launch', log })); } catch (e) { outcomes.push({ threw: e.message }); }
+        // 3. the log itself throws, after the store threw.
+        try { outcomes.push(mod.runRemovalWhileOff(() => { throw err; }, { reason: 'launch', log: () => { throw err; } })); } catch (e) { outcomes.push({ threw: e.message }); }
+        const ok = outcomes.length === 3 && outcomes.every((o) => o && o.failed === true)
+            && lines.length === 2 && lines.every((l) => l === FIXED)
+            && err.message.includes(NAME) && err.message.includes(fx.support);
+        return [ok, JSON.stringify({ outcomes, lines })];
+    });
+    add('36. the pass\'s counts line holds counts and fixed words only (no path, no stem, no name), and a pass with nothing to do logs nothing', () => {
+        const { fx } = offFixture();
+        fx.write(`host-print-${STEM1}.json`, { embedding: SELF });
+        const lines = [];
+        const r = mod.runRemovalWhileOff(() => open(fx), { reason: 'launch', log: (l) => lines.push(l) });
+        const second = [];
+        mod.runRemovalWhileOff(() => open(fx), { reason: 'launch', log: (l) => second.push(l) });
+        const want = '[clipwise-recorder] voice prints off (launch): store none, score log none, host prints 1, embeddings removed from 3 of 3 diarize file(s), 0 skipped, 0 failed';
+        return [lines.length === 1 && lines[0] === want && !lines[0].includes('/') && !lines[0].includes(STEM1) && second.length === 0 && r.embeddings.changed === 3, JSON.stringify({ lines, second })];
+    });
+    add('37. a reason the pass does not know is logged as "other"; control: the three it knows are logged as given', () => {
+        const got = [];
+        for (const reason of ['launch', 'pipeline exit', 'recovery exit', `made up ${NAME}`]) {
+            mod.runRemovalWhileOff(() => { throw new Error('x'); }, { reason, log: (l) => got.push(l) });
+        }
+        const want = ['launch', 'pipeline exit', 'recovery exit', 'other'].map((r) => `[clipwise-recorder] voice prints off (${r}): removal failed`);
+        return [JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got)];
+    });
+    add('38. the skip rule: every stem while recovery runs; else the running pipeline\'s stem; not the stem of the pipeline whose exit this is; nothing for a failed one or none', () => {
+        const proc = {};
+        const other = {};
+        const s = (opts) => [STEM1, STEM2].map(mod.removalSkip(opts));
+        const got = {
+            recovering: s({ pipeline: null, recovering: true }),
+            running: s({ pipeline: { stem: STEM2, state: 'running', proc }, recovering: false }),
+            ownExit: s({ pipeline: { stem: STEM2, state: 'running', proc }, recovering: false, endedProc: proc }),
+            otherExit: s({ pipeline: { stem: STEM2, state: 'running', proc }, recovering: false, endedProc: other }),
+            failed: s({ pipeline: { stem: STEM2, state: 'failed', proc: null }, recovering: false }),
+            none: s({ pipeline: null, recovering: false }),
+        };
+        const want = { recovering: [true, true], running: [false, true], ownExit: [false, false], otherExit: [false, true], failed: [false, false], none: [false, false] };
+        return [JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got)];
+    });
+    // main.js, as text: where the pass runs.
+    const whenReady = SRC.slice(SRC.indexOf('app.whenReady().then(async () => {'), SRC.indexOf("app.on('second-instance'"));
+    const fnBody = (name) => { const at = SRC.indexOf(`function ${name}(`); return at < 0 ? '' : SRC.slice(at, SRC.indexOf('\n}\n', at)); };
+    add('39. main.js (text): at launch the pass runs as a plain call (not awaited, nothing after it on the line) after the tray exists and before recovery starts, and its function is only the never-throwing runRemovalWhileOff', () => {
+        const at = whenReady.indexOf("\n    voicePrintsRemoveWhileOff('launch');\n");
+        const body = fnBody('voicePrintsRemoveWhileOff');
+        const ok = at > 0 && at > whenReady.indexOf('tray = new Tray(') && at < whenReady.indexOf("startRecovery('app launch');")
+            && /^function voicePrintsRemoveWhileOff\(reason, stem = null, endedProc = null\) \{\s*return voicePrintsModule\.runRemovalWhileOff\(voicePrints, \{[^;]*\}\);\s*$/.test(body)
+            && !/await voicePrintsRemoveWhileOff/.test(SRC);
+        return [ok, `at ${at}; body ${JSON.stringify(body.slice(0, 120))}`];
+    });
+    add('40. main.js (text): every pipeline exit runs the pass for its stem, passing its own process, before the early return', () => {
+        const exit = SRC.slice(SRC.indexOf("proc.once('exit', (code, signal) => {"), SRC.indexOf('// --- recovery (SAA-136)'));
+        const call = exit.indexOf("voicePrintsRemoveWhileOff('pipeline exit', stem, proc);");
+        const ret = exit.indexOf('if (!pipeline || pipeline.proc !== proc) return;');
+        return [call > 0 && ret > call && exit.indexOf('if (code === 0)') > call, `call ${call}, return ${ret}`];
+    });
+    add('41. main.js (text): a recovery exit runs the whole pass once recoveryProc is cleared', () => {
+        const rec = SRC.slice(SRC.indexOf('function startRecovery('), SRC.indexOf('function retryPipeline('));
+        return [/proc\.once\('exit'[\s\S]*if \(recoveryProc === proc\) recoveryProc = null;\s*(\/\/[^\n]*\n\s*)*voicePrintsRemoveWhileOff\('recovery exit'\);/.test(rec), ''];
+    });
+    add('42. main.js (text): turning off passes the skip rule from the running pipeline and recovery, and every call to the pass uses a reason it knows', () => {
+        const disable = SRC.slice(SRC.indexOf("ipcMain.on('voice-prints:disable'"), SRC.indexOf("ipcMain.on('voice-prints:disable'") + 1500);
+        const reasons = [...SRC.matchAll(/voicePrintsRemoveWhileOff\('([^']*)'/g)].map((m) => m[1]);
+        const ok = /voicePrints\(\)\.disable\(\{ skip: voicePrintsModule\.removalSkip\(\{ pipeline, recovering: !!recoveryProc \}\) \}\)/.test(disable)
+            && reasons.length === 3 && reasons.every((r) => ['launch', 'pipeline exit', 'recovery exit'].includes(r));
+        return [ok, reasons.join(', ')];
+    });
+
     for (const [name, fn] of cases) {
-        const needsModule = !/^2[2-5]\./.test(name);
+        const needsModule = !/^(2[2-5]|39|4[0-2])\./.test(name);
         if (needsModule && !mod) { check(name, false, why); continue; }
         let result;
         try { result = fn(); } catch (err) { result = [false, `threw ${err.message}`]; }
