@@ -12,7 +12,7 @@
 // The --naive modes swap in versions with one rule removed. They are the
 // negative controls: the cases for that rule must fail against them.
 
-import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { sidecarForCapture } from "./diarize.js";
@@ -205,6 +205,39 @@ const CASES: Case[] = [
       if (!/statSync\(path, \{ bigint: true \}\)/.test(readers) || !/String\(st\.mtimeNs\)/.test(readers)) return "no bigint mtimeNs comparison in voice-clips.ts";
       if (/mtimeMs/.test(src) || /mtimeMs/.test(readers)) return "capture-cli.ts or voice-clips.ts reads mtimeMs";
       return null;
+    },
+  },
+  {
+    name: "SAA-243 item 7: an early sidecar whose voices have no embedding (diarize with voice prints off, or the recorder's removal) is used as is, every other field kept",
+    run: (w) => {
+      const voices = [{ voiceIndex: 1, sourceLabel: "S1", totalSeconds: 30, clipRanges: [{ start: 1, end: 2 }] }];
+      writeSidecar(w, goodBlock(w), { voices });
+      const { calls, res } = ran(w);
+      if (!res.usedEarly || calls !== 0) return `not used as is: ${res.reason}, binary ran ${calls} time(s)`;
+      const got = (res.sidecar as unknown as { voices: unknown[] }).voices;
+      return JSON.stringify(got) === JSON.stringify(voices) ? null : `voices came back as ${JSON.stringify(got)}`;
+    },
+  },
+  {
+    name: "control: the same sidecar with an embedding on its voice is used too, embedding and all",
+    run: (w) => {
+      const voices = [{ voiceIndex: 1, sourceLabel: "S1", totalSeconds: 30, embedding: [0.25, -0.5], clipRanges: [{ start: 1, end: 2 }] }];
+      writeSidecar(w, goodBlock(w), { voices });
+      const { calls, res } = ran(w);
+      if (!res.usedEarly || calls !== 0) return `not used as is: ${res.reason}, binary ran ${calls} time(s)`;
+      const got = (res.sidecar as unknown as { voices: unknown[] }).voices;
+      return JSON.stringify(got) === JSON.stringify(voices) ? null : `voices came back as ${JSON.stringify(got)}`;
+    },
+  },
+  {
+    name: "SAA-243 item 7: voice-clips.ts declares the embedding optional, and no pipeline source (checks aside) reads a voice's .embedding",
+    run: () => {
+      const dir = resolve(import.meta.dirname, "..", "..", "src", "pipeline");
+      const types = readFileSync(join(dir, "voice-clips.ts"), "utf8");
+      if (!/\n  embedding\?: number\[\];\n/.test(types)) return "DiarizeVoice.embedding is not `embedding?: number[]`";
+      const readers = readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.startsWith("check-"))
+        .filter((f) => /\.embedding\b/.test(readFileSync(join(dir, f), "utf8")));
+      return readers.length === 0 ? null : `read in ${readers.join(", ")}`;
     },
   },
   {

@@ -96,7 +96,10 @@ export type DiarizeVoice = {
   voiceIndex: number;
   sourceLabel: string;
   totalSeconds: number;
-  embedding: number[];
+  // Present only while the recorder's voice prints are on (diarize's
+  // keepsVoiceEmbeddings, SAA-243 item 7), and removed from past sidecars when
+  // they are turned off. Nothing in the pipeline reads it.
+  embedding?: number[];
   clipRanges: ClipRange[];
 };
 

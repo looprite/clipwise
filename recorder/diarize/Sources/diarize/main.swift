@@ -15,8 +15,10 @@
 // recorder sets it only while voice prints are on), that host reference is
 // also written to host-print-<stem>.json beside the output, mode 600: the
 // member's own print, for the recorder's store on this Mac. Without it, or
-// when no reference could be built, no such file is written. The sidecar is
-// unchanged either way.
+// when no reference could be built, no such file is written. The same flag
+// decides whether the sidecar keeps each voice's embedding (SAA-243 item 7):
+// only the recorder's voice prints read it, so without the flag the key is
+// left out and nothing else in the sidecar changes.
 //
 // No network, ever. `ModelHub.offlineMode = true` is set before the models
 // are loaded — with it on, a missing or revision-mismatched cache throws a
@@ -107,6 +109,55 @@ if arguments.count == 2, arguments[1] == "--check-host-print-path" {
     exit(failures == 0 ? 0 : 1)
 }
 
+// Regression check for keepsVoiceEmbeddings and VoiceOut's encoding (SAA-243
+// item 7): no models, no audio.
+//
+// Usage: diarize --check-sidecar-embedding
+if arguments.count == 2, arguments[1] == "--check-sidecar-embedding" {
+    let flag = "CLIPWISE_SAVE_HOST_PRINT"
+    let gates: [(name: String, env: [String: String], expected: Bool)] = [
+        ("no flag: the embedding is left out", [:], false),
+        ("flag \"0\": left out", [flag: "0"], false),
+        ("flag \"true\": left out (only \"1\" counts, as for the host print)", [flag: "true"], false),
+        ("flag \"1\": kept", [flag: "1"], true),
+    ]
+    var failures = 0
+    for g in gates {
+        let got = keepsVoiceEmbeddings(g.env)
+        let ok = got == g.expected
+        print("\(ok ? "PASS" : "FAIL") \(g.name)\(ok ? "" : " — got \(got)")")
+        if !ok { failures += 1 }
+    }
+    // The sidecar's voice as the run builds it, encoded as writeSidecar does.
+    func encoded(_ env: [String: String]) -> [String: Any] {
+        let voice = VoiceOut(
+            voiceIndex: 1, sourceLabel: "S1", totalSeconds: 30,
+            embedding: keepsVoiceEmbeddings(env) ? [0.25, -0.5, 0.125] : nil,
+            clipRanges: [ClipRange(start: 1, end: 2)])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try! encoder.encode(voice)
+        return try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+    }
+    let off = encoded([:])
+    let on = encoded([flag: "1"])
+    let others = ["clipRanges", "sourceLabel", "totalSeconds", "voiceIndex"]
+    let shapes: [(name: String, ok: Bool)] = [
+        ("without the flag the encoded voice has no embedding key", off["embedding"] == nil),
+        ("control: with the flag the encoded voice has it, with its numbers", (on["embedding"] as? [Double]) == [0.25, -0.5, 0.125]),
+        ("every other key is there either way, with the same values",
+         Set(off.keys) == Set(others) && Set(on.keys) == Set(others + ["embedding"])
+            && others.allSatisfy { NSDictionary(dictionary: [$0: off[$0]!]).isEqual(to: [$0: on[$0]!]) }),
+    ]
+    for s in shapes {
+        print("\(s.ok ? "PASS" : "FAIL") \(s.name)")
+        if !s.ok { failures += 1 }
+    }
+    let total = gates.count + shapes.count
+    print("\n\(total - failures)/\(total) passed")
+    exit(failures == 0 ? 0 : 1)
+}
+
 #if arch(arm64)
 #else
 FileHandle.standardError.write(
@@ -194,8 +245,17 @@ struct VoiceOut: Codable {
     let voiceIndex: Int
     let sourceLabel: String  // FluidAudio's own "S1"/"S2"/... — kept for traceability only
     let totalSeconds: Double
-    let embedding: [Float]
+    // nil without CLIPWISE_SAVE_HOST_PRINT=1 (keepsVoiceEmbeddings), and then
+    // left out of the sidecar: the synthesized encoder skips a nil optional.
+    let embedding: [Float]?
     let clipRanges: [ClipRange]
+}
+
+// Whether the sidecar keeps each voice's embedding (SAA-243 item 7): only
+// while the recorder's voice prints are on, the same flag and the same "1" as
+// writeHostPrint's.
+func keepsVoiceEmbeddings(_ env: [String: String]) -> Bool {
+    return env["CLIPWISE_SAVE_HOST_PRINT"] == "1"
 }
 
 // voiceIndex is nil for a diarized segment that exists (FluidAudio found
@@ -724,7 +784,9 @@ do {
                 "diarize: voice \(label) — \(clipRanges.count) clip(s) selected for naming\n".data(using: .utf8)!)
             return VoiceOut(
                 voiceIndex: indexByLabel[label]!, sourceLabel: label,
-                totalSeconds: voice.totalSeconds, embedding: voice.embedding, clipRanges: clipRanges)
+                totalSeconds: voice.totalSeconds,
+                embedding: keepsVoiceEmbeddings(ProcessInfo.processInfo.environment) ? voice.embedding : nil,
+                clipRanges: clipRanges)
         }
         // Every diarized segment is emitted, including excluded voices' —
         // with voiceIndex nil for those, so the caller can tell "diarized
