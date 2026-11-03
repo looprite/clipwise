@@ -530,6 +530,15 @@ check('without the processing capture, the tray item is the newest ready meeting
     check('SAA-221: the ⋯ menu item reads "Change attendees…"',
         page.includes("el('button', null, 'Change attendees…')"));
     check('SAA-221: the old wording is gone from meetings.html', !page.includes(OLD));
+    {
+        // The window's files in the bundle: its page, the module main.js
+        // requires, and its script and preload (SAA-243 window hardening).
+        const build = fs.readFileSync(path.join(__dirname, 'build-app.sh'), 'utf8');
+        const files = ['meetings.html', 'meetings.js', 'meetings-page.js', 'meetings-preload.js'];
+        const missing = files.filter((f) => !build.includes(`cp "$APP_SRC/${f}" "$C/Resources/app/${f}"`));
+        check('build-app.sh copies meetings.html, meetings.js, meetings-page.js and meetings-preload.js into the bundle',
+            missing.length === 0, missing.join(', '));
+    }
     check('control: the same includes() finds the old wording planted in a copy of that text',
         `${page}\n          const c = el('button', null, 'Change who was on this call…');\n`.includes(OLD));
 

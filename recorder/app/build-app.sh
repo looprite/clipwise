@@ -157,9 +157,18 @@ cp "$APP_SRC/main.js" "$C/Resources/app/main.js"
 # The identity prompt's page (SAA-114). main.js loads it by path relative to
 # itself, so a bundle without it has a stop that silently identifies nothing.
 cp "$APP_SRC/identity.html" "$C/Resources/app/identity.html"
+# Its script and its preload (SAA-243 window hardening): the page loads
+# identity-page.js beside it, and main.js gives the window identity-preload.js
+# by path relative to itself. Without either the window opens and does nothing.
+cp "$APP_SRC/identity-page.js" "$C/Resources/app/identity-page.js"
+cp "$APP_SRC/identity-preload.js" "$C/Resources/app/identity-preload.js"
+# The answer's files on disk (main.js only) and the window's rules, which
+# main.js requires and the page loads as a script (SAA-243 window hardening).
 cp "$APP_SRC/identity-answer.js" "$C/Resources/app/identity-answer.js"
-# How names are compared (SAA-260 step 4): identity-answer.js requires it by
-# relative path, so a bundle without it opens a window that cannot load.
+cp "$APP_SRC/identity-rules.js" "$C/Resources/app/identity-rules.js"
+# How names are compared (SAA-260 step 4): identity-rules.js requires it by
+# relative path and the page loads it as a script before it, so a bundle
+# without it opens a window that cannot load.
 cp "$APP_SRC/people-name.js" "$C/Resources/app/people-name.js"
 # Step 2's stop-waiting decision (SAA-195). main.js requires this by
 # relative path; a bundle without it fails to launch, same as the others.
@@ -171,6 +180,9 @@ cp "$APP_SRC/last-meeting.js" "$C/Resources/app/last-meeting.js"
 # main.js requires meetings.js and loads meetings.html by path relative to itself.
 cp "$APP_SRC/meetings.js" "$C/Resources/app/meetings.js"
 cp "$APP_SRC/meetings.html" "$C/Resources/app/meetings.html"
+# Its script and its preload (SAA-243 window hardening), beside the page.
+cp "$APP_SRC/meetings-page.js" "$C/Resources/app/meetings-page.js"
+cp "$APP_SRC/meetings-preload.js" "$C/Resources/app/meetings-preload.js"
 # App -> scope inference (SAA-170). main.js requires this by relative path;
 # a bundle without it fails to launch at all, not just to infer scope.
 cp "$APP_SRC/app-scope.js" "$C/Resources/app/app-scope.js"
@@ -188,6 +200,9 @@ cp "$APP_SRC/silence-reminder.js" "$C/Resources/app/silence-reminder.js"
 cp "$APP_SRC/consent.js" "$C/Resources/app/consent.js"
 cp "$APP_SRC/setup.js" "$C/Resources/app/setup.js"
 cp "$APP_SRC/setup.html" "$C/Resources/app/setup.html"
+# Its script and its preload (SAA-243 window hardening), beside the page.
+cp "$APP_SRC/setup-page.js" "$C/Resources/app/setup-page.js"
+cp "$APP_SRC/setup-preload.js" "$C/Resources/app/setup-preload.js"
 # The tray's Sign out revokes on the server (SAA-198 step 5). main.js requires it
 # by relative path; a bundle without it fails to launch.
 cp "$APP_SRC/capture-sign-out.js" "$C/Resources/app/capture-sign-out.js"
@@ -210,6 +225,9 @@ cp "$APP_SRC/capture-payload.js" "$C/Resources/app/capture-payload.js"
 cp "$APP_SRC/voice-prints.js" "$C/Resources/app/voice-prints.js"
 cp "$APP_SRC/voice-match.js" "$C/Resources/app/voice-match.js"
 cp "$APP_SRC/voice-prints.html" "$C/Resources/app/voice-prints.html"
+# Its script and its preload (SAA-243 window hardening), beside the page.
+cp "$APP_SRC/voice-prints-page.js" "$C/Resources/app/voice-prints-page.js"
+cp "$APP_SRC/voice-prints-preload.js" "$C/Resources/app/voice-prints-preload.js"
 # Setup's FileVault warning (SAA-243 item 7). main.js requires it by relative
 # path; a bundle without it fails to launch.
 cp "$APP_SRC/filevault.js" "$C/Resources/app/filevault.js"

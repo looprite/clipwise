@@ -303,8 +303,8 @@ function main() {
             && /for \(const recovered of queueRecoveredCaptures\(triggeredAtMs\)\) voicePrintsAfterPipeline\(recovered\);\s*drainUploadQueue\('recovery exit'\);/.test(SRC)
             && /if \(reply\.people\) voicePrintsAfterSend\(stem, reply\.people\);/.test(SRC), ''];
     });
-    add('25. build-app.sh (text): copies capture-payload.js, voice-prints.js, voice-match.js and voice-prints.html into the bundle', () => {
-        const files = ['capture-payload.js', 'voice-prints.js', 'voice-match.js', 'voice-prints.html'];
+    add('25. build-app.sh (text): copies capture-payload.js, voice-prints.js, voice-match.js, voice-prints.html, voice-prints-page.js and voice-prints-preload.js into the bundle', () => {
+        const files = ['capture-payload.js', 'voice-prints.js', 'voice-match.js', 'voice-prints.html', 'voice-prints-page.js', 'voice-prints-preload.js'];
         const missing = files.filter((f) => !BUILD.includes(`cp "$APP_SRC/${f}" "$C/Resources/app/${f}"`));
         return [missing.length === 0, missing.join(', ')];
     });

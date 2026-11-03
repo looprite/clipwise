@@ -406,10 +406,15 @@ checkFn('v: the voice-names answer names each voice or leaves it null, nothing g
     const applyText = fnStart >= 0 && fnEnd > fnStart ? html.slice(fnStart, fnEnd) : '';
     check('t: identity.html applyCalendar never touches scope', applyText.length > 0 && !/scope/i.test(applyText), `${applyText.length} chars`);
     check('t: control: identity.html does handle scope elsewhere', /selectedScope\(\)/.test(html));
-    check('t: build-app.sh copies identity-answer.js beside identity.html (the page requires it)',
-        build.includes('cp "$APP_SRC/identity-answer.js" "$C/Resources/app/identity-answer.js"')
-        && build.includes('cp "$APP_SRC/identity.html" "$C/Resources/app/identity.html"'));
-    check('t: build-app.sh copies people-name.js beside them (identity-answer.js requires it)',
+    {
+        // identity.html, its script and preload, the rules the page loads and
+        // main.js requires, and the answer's files main.js requires (SAA-243).
+        const files = ['identity.html', 'identity-page.js', 'identity-preload.js', 'identity-rules.js', 'identity-answer.js'];
+        const missing = files.filter((f) => !build.includes(`cp "$APP_SRC/${f}" "$C/Resources/app/${f}"`));
+        check('t: build-app.sh copies identity.html, identity-page.js, identity-preload.js, identity-rules.js and identity-answer.js into the bundle',
+            missing.length === 0, missing.join(', '));
+    }
+    check('t: build-app.sh copies people-name.js beside them (identity-rules.js requires it, the page loads it)',
         build.includes('cp "$APP_SRC/people-name.js" "$C/Resources/app/people-name.js"'));
     check('t: identity.html sends inviteeNames from the people field, outside the identity answer fields',
         /inviteeNames: ia\.inviteePairs\(field\)/.test(html));

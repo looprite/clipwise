@@ -21,7 +21,11 @@ it in Linear.
 
 ## Recorder app (recorder/app/)
 The packaged app at `recorder/app/dist/Clipwise.app` runs a copy of `main.js`,
-`identity.html` and `identity-answer.js`, not the files in the checkout. After
+`identity.html` and `identity-answer.js`, not the files in the checkout. The
+same holds for each window's page script and preload (`identity-page.js`,
+`identity-preload.js`, `meetings-page.js`, `meetings-preload.js`,
+`setup-page.js`, `setup-preload.js`, `voice-prints-page.js`,
+`voice-prints-preload.js`) and for `identity-rules.js`. After
 any change to those, run `recorder/app/build-app.sh` AND relaunch the app —
 the running bundle keeps the code it was built from. Symptom of skipping it is
 an edit that changes nothing: the prompt, the stop path or the hotkeys behave
