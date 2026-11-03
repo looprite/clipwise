@@ -96,7 +96,7 @@ function build() {
     ]);
     const body = buildCapturePayload(outdir, STEM);
     return {
-        prints, vp, store, body, text: JSON.stringify(body),
+        prints, vp, store, body, text: JSON.stringify(body), outdir, buildCapturePayload,
         storeNumbers,
         hostNumbers: longNumbers(waiting.embedding),
         diarizeNumbers: longNumbers(voices.flatMap((x) => x.embedding)),
@@ -156,6 +156,15 @@ function main() {
             const planted = { ...f.body, voices: [{ ...f.body.voices[0], embedding: [0.5] }] };
             delete planted.identity;
             return [keysOf(planted).has('embedding'), ''];
+        }],
+        // Last: it rewrites the fixture's diarize file.
+        ['10. with the diarize file\'s embeddings removed (as prints off leaves it, SAA-243 item 7), the body is the same, byte for byte; control: the file held them before and holds none after', () => {
+            const file = path.join(f.outdir, `diarize-${STEM}.json`);
+            const had = keysOf(JSON.parse(fs.readFileSync(file, 'utf8'))).has('embedding');
+            const r = f.prints.removeDiarizeEmbeddings(f.outdir);
+            const has = keysOf(JSON.parse(fs.readFileSync(file, 'utf8'))).has('embedding');
+            const again = JSON.stringify(f.buildCapturePayload(f.outdir, STEM));
+            return [had && !has && r.changed === 1 && again === f.text, JSON.stringify({ had, has, r, same: again === f.text })];
         }],
     ];
     for (const [name, fn] of cases) {

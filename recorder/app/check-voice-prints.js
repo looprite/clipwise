@@ -9,8 +9,11 @@
 // holds no plaintext). Embeddings are made-up 256-number vectors: a person's
 // two calls are one base vector plus small noise; different people are
 // unrelated. Cases 22-25 read main.js and build-app.sh as text: they show the
-// wiring is there, not that it runs. The module is required inside main(), so
-// on code without it every case is reported as a FAIL.
+// wiring is there, not that it runs. Cases 26-34 run the removal of each
+// diarize file's per-voice embedding while prints are off (SAA-243 item 7)
+// against temporary folders, with files the shape diarize writes. The module
+// is required inside main(), so on code without it every case is reported as a
+// FAIL.
 
 const fs = require('fs');
 const os = require('os');
@@ -307,6 +310,135 @@ function main() {
         const files = ['capture-payload.js', 'voice-prints.js', 'voice-match.js', 'voice-prints.html', 'voice-prints-page.js', 'voice-prints-preload.js'];
         const missing = files.filter((f) => !BUILD.includes(`cp "$APP_SRC/${f}" "$C/Resources/app/${f}"`));
         return [missing.length === 0, missing.join(', ')];
+    });
+
+    // Each recording's diarize file keeps a per-voice embedding. With prints
+    // off none may stay (SAA-243 item 7): removed at turn-off, and by the pass
+    // that runs at launch and when a pipeline ends while off.
+    const diarizeDoc = (voices) => ({
+        clusteringThreshold: 0.6, error: null, hostVoiceRanges: [{ start: 0, end: 1 }], model: 'fluidaudio-community-1', modelRevision: 'r',
+        segments: [{ start: 1, end: 2, voiceIndex: 1 }, { start: 2, end: 3, voiceIndex: null }], voices,
+    });
+    const fullVoice = (voiceIndex, embedding) => ({ clipRanges: [{ start: 1, end: 2 }], embedding, sourceLabel: `S${voiceIndex}`, totalSeconds: 30, voiceIndex });
+    const readDoc = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
+    const hasEmbedding = (doc) => (doc.voices || []).some((x) => x && Object.prototype.hasOwnProperty.call(x, 'embedding'));
+    const fileHasEmbedding = (file) => hasEmbedding(readDoc(file));
+    const withoutEmbedding = (doc) => ({ ...doc, voices: doc.voices.map(({ embedding, ...rest }) => rest) });
+    // Prints on, two people enrolled from STEM1, and STEM2's file with the
+    // early run's copy beside it: three files, each holding embeddings.
+    function embeddingFixture() {
+        const fx = fixture();
+        const vp = on(fx);
+        fx.write(`diarize-${STEM1}.json`, diarizeDoc([fullVoice(1, ANN), fullVoice(2, BOB)]));
+        fx.write(`identity-${STEM1}.json`, { self: { name: 'Check Host' }, guests: [{ name: 'Ann Example' }, { name: 'Bob Example' }] });
+        vp.enrolFromMapping(STEM1, { voices: [{ voiceIndex: 1, personId: P_ANN }, { voiceIndex: 2, personId: P_BOB }], them: null });
+        fx.write(`diarize-${STEM2}.json`, diarizeDoc([fullVoice(1, annCall(2))]));
+        fx.write(`diarize-${STEM2}.json.early`, { ...diarizeDoc([fullVoice(1, annCall(3))]), early_run: { exit_code: 0 } });
+        fs.chmodSync(path.join(fx.outdir, `diarize-${STEM2}.json`), 0o644);
+        fs.chmodSync(path.join(fx.outdir, `diarize-${STEM2}.json.early`), 0o600);
+        const files = [`diarize-${STEM1}.json`, `diarize-${STEM2}.json`, `diarize-${STEM2}.json.early`].map((n) => path.join(fx.outdir, n));
+        return { fx, vp, files };
+    }
+    const offFixture = () => {
+        const fx = fixture();
+        fx.write(`diarize-${STEM1}.json`, diarizeDoc([fullVoice(1, ANN)]));
+        fx.write(`diarize-${STEM2}.json`, diarizeDoc([fullVoice(1, BOB)]));
+        fx.write(`diarize-${STEM2}.json.early`, { ...diarizeDoc([fullVoice(1, BOB)]), early_run: { exit_code: 0 } });
+        return { fx, at: (n) => path.join(fx.outdir, n) };
+    };
+    // fs.<name> replaced while fn runs, then put back.
+    const stubbing = (name, stub, fn) => {
+        const real = fs[name];
+        fs[name] = stub(real);
+        try { return fn(); } finally { fs[name] = real; }
+    };
+
+    add('26. control: the fixture\'s three diarize files (.json and .json.early) hold the planted embedding key, and the test for it tells a copy without the key apart', () => {
+        const { files } = embeddingFixture();
+        const docs = files.map(readDoc);
+        return [docs.every(hasEmbedding) && !hasEmbedding(withoutEmbedding(docs[0])), files.map((f) => `${path.basename(f)} ${fileHasEmbedding(f)}`).join(', ')];
+    });
+    add('27. turning off removes voices[].embedding from every diarize-<stem>.json and .json.early, and every file stays', () => {
+        const { vp, files } = embeddingFixture();
+        vp.disable();
+        const left = files.filter((f) => !fs.existsSync(f) || fileHasEmbedding(f));
+        return [left.length === 0, `still holding it or gone: ${left.map((f) => path.basename(f)).join(', ')}`];
+    });
+    add('28. the removal keeps everything else: each file is its old content less the key, in the same key order and mode; other files are byte for byte the same; no temp file is left; a file with no embedding is not rewritten', () => {
+        const { fx, vp, files } = embeddingFixture();
+        fx.write(`diarize-${STEM3}.json`, diarizeDoc([{ clipRanges: [], sourceLabel: 'S1', totalSeconds: 5, voiceIndex: 1 }]));
+        const plain = path.join(fx.outdir, `diarize-${STEM3}.json`);
+        const mode = (p) => fs.statSync(p).mode & 0o777;
+        const before = files.map((f) => ({ doc: readDoc(f), mode: mode(f) }));
+        const identity = fs.readFileSync(path.join(fx.outdir, `identity-${STEM1}.json`));
+        const plainStat = fs.statSync(plain, { bigint: true });
+        const names = fs.readdirSync(fx.outdir).sort().join(',');
+        vp.disable();
+        const after = files.map((f) => ({ doc: readDoc(f), mode: mode(f) }));
+        const same = before.every((b, i) => JSON.stringify(withoutEmbedding(b.doc)) === JSON.stringify(after[i].doc) && b.mode === after[i].mode);
+        const plainAfter = fs.statSync(plain, { bigint: true });
+        const ok = same
+            && identity.equals(fs.readFileSync(path.join(fx.outdir, `identity-${STEM1}.json`)))
+            && fs.readdirSync(fx.outdir).sort().join(',') === names
+            && plainAfter.ino === plainStat.ino && plainAfter.mtimeNs === plainStat.mtimeNs;
+        return [ok, JSON.stringify({ same, modes: after.map((a) => a.mode.toString(8)), names: fs.readdirSync(fx.outdir).sort() })];
+    });
+    add('29. with prints off, the pass for one stem (a pipeline ending) removes that stem\'s embeddings, .early included, and leaves another stem\'s', () => {
+        const { fx, at } = offFixture();
+        const r = open(fx).removeWhileOff({ stem: STEM2 });
+        return [!fileHasEmbedding(at(`diarize-${STEM2}.json`)) && !fileHasEmbedding(at(`diarize-${STEM2}.json.early`)) && fileHasEmbedding(at(`diarize-${STEM1}.json`)), JSON.stringify(r)];
+    });
+    add('30. control: with prints on, the same pass changes nothing and says so', () => {
+        const { fx, at } = offFixture();
+        const vp = on(fx);
+        const r = vp.removeWhileOff({ stem: STEM2 });
+        const r2 = vp.removeWhileOff();
+        return [r.skipped === 'on' && r2.skipped === 'on' && [`diarize-${STEM1}.json`, `diarize-${STEM2}.json`, `diarize-${STEM2}.json.early`].every((n) => fileHasEmbedding(at(n))), JSON.stringify({ r, r2 })];
+    });
+    add('31. the whole pass (launch) skips a stem it is told to (a running pipeline or recovery), and removes the rest', () => {
+        const { fx, at } = offFixture();
+        const r = open(fx).removeWhileOff({ skip: (stem) => stem === STEM2 });
+        return [!fileHasEmbedding(at(`diarize-${STEM1}.json`)) && fileHasEmbedding(at(`diarize-${STEM2}.json`)) && fileHasEmbedding(at(`diarize-${STEM2}.json.early`)), JSON.stringify(r)];
+    });
+    add('32. a turn-off cut short in the removal (the second rename fails): the setting reads off and the store is gone; the launch pass then finishes it, and a second pass changes nothing', () => {
+        const { fx, vp, files } = embeddingFixture();
+        let renames = 0;
+        let threw = null;
+        stubbing('renameSync', (real) => (a, b) => {
+            if (/diarize-/.test(path.basename(b)) && ++renames === 2) throw Object.assign(new Error('stub: rename failed'), { code: 'EIO' });
+            return real(a, b);
+        }, () => { try { vp.disable(); } catch (err) { threw = err.code; } });
+        const holding = files.filter(fileHasEmbedding).length;
+        const offNow = !open(fx).isEnabled() && !fs.existsSync(vp.profilesPath);
+        const noTemp = !fs.readdirSync(fx.outdir).some((n) => /\.tmp|\.strip/.test(n));
+        const first = open(fx).removeWhileOff();
+        const second = open(fx).removeWhileOff();
+        const ok = holding === 1 && offNow && noTemp && files.every((f) => !fileHasEmbedding(f))
+            && first.embeddings && first.embeddings.changed === 1 && second.embeddings && second.embeddings.changed === 0;
+        return [ok, JSON.stringify({ threw, holding, offNow, noTemp, first, second })];
+    });
+    add('33. a turn-off cut short before the store is deleted (its unlink fails): the setting already reads off, and the launch pass deletes the store and the embeddings', () => {
+        const { fx, vp, files } = embeddingFixture();
+        let threw = null;
+        stubbing('unlinkSync', (real) => (p) => {
+            if (p === vp.profilesPath) throw Object.assign(new Error('stub: unlink failed'), { code: 'EIO' });
+            return real(p);
+        }, () => { try { vp.disable(); } catch (err) { threw = err.code; } });
+        const offNow = !open(fx).isEnabled();
+        const r = open(fx).removeWhileOff();
+        const ok = threw === 'EIO' && offNow && !fs.existsSync(vp.profilesPath) && files.every((f) => !fileHasEmbedding(f));
+        return [ok, JSON.stringify({ threw, offNow, storeLeft: fs.existsSync(vp.profilesPath), r })];
+    });
+    add('34. turned back on, a correction on a call whose embeddings were removed refuses its voices (no_embedding) without an error; control: a call that kept them enrols', () => {
+        const { fx, vp } = embeddingFixture();
+        vp.disable();
+        vp.enable(mod.STATEMENT_VERSION);
+        const r1 = vp.enrolFromMapping(STEM1, { voices: [{ voiceIndex: 1, personId: P_ANN }, { voiceIndex: 2, personId: P_BOB }], them: null });
+        const reasons = vp.readScoreLines().filter((l) => l.stem === STEM1).map((l) => l.reason);
+        fx.write(`diarize-${STEM3}.json`, diarizeDoc([fullVoice(1, ANN)]));
+        fx.write(`identity-${STEM3}.json`, { self: { name: 'Check Host' }, guests: [{ name: 'Ann Example' }] });
+        const r3 = vp.enrolFromMapping(STEM3, { voices: [{ voiceIndex: 1, personId: P_ANN }], them: null });
+        return [r1.enrolled === 0 && r1.refused === 2 && reasons.length === 2 && reasons.every((x) => x === 'no_embedding') && r3.enrolled === 1, JSON.stringify({ r1, reasons, r3 })];
     });
 
     for (const [name, fn] of cases) {

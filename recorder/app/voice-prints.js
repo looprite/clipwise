@@ -2,11 +2,13 @@
 //
 // Off by default; turned on only from the opt-in screen (voice-prints.html),
 // which records the statement version the member agreed to. While off, nothing
-// here enrols, matches or logs. Turning it off deletes every print kept here
-// for recognising people (the store, the score log and any waiting host
-// print). It does not touch the per-voice embeddings each recording's diarize
-// file keeps until that recording is deleted; the screen says recordings
-// aren't affected.
+// here enrols, matches or logs. Turning it off writes the setting off first,
+// then deletes every print kept here for recognising people (the store, the
+// score log and any waiting host print), then removes the per-voice embedding
+// from each recording's diarize file (SAA-243 item 7). The recordings
+// themselves are otherwise untouched. While off, the same pass runs at launch,
+// so a turn-off cut short is finished, and for a capture's stem when its
+// pipeline ends, for a pipeline started while prints were still on.
 //
 // Everything lives in SUPPORT_DIR/voice-prints/ (folder mode 700, files 600):
 //   setting.json   { enabled, statementVersion, consentedAt | turnedOffAt },
@@ -153,6 +155,46 @@ function cleanName(x) {
     return typeof x === 'string' && x.trim() ? x.trim().replace(/\s+/g, ' ') : null;
 }
 
+// diarize-<stem>.json and the early run's diarize-<stem>.json.early.
+const DIARIZE_FILE = /^diarize-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)\.json(\.early)?$/;
+
+// Removes voices[].embedding from the recordings folder's diarize files,
+// keeping everything else: each file that holds one is written again, less
+// that key, to a temp file beside it (same mode), then renamed over it. A file
+// with no embedding is not written. Never throws: a file that cannot be read
+// or written is counted in `failed` and left as it was.
+//   stem  only that capture's files; otherwise every capture's
+//   skip  (stem) -> true for a capture to leave alone (its pipeline is running)
+// -> { files, changed, skipped, failed }
+function removeDiarizeEmbeddings(outdir, { stem = null, skip = () => false } = {}) {
+    const out = { files: 0, changed: 0, skipped: 0, failed: 0 };
+    let names = [];
+    try { names = fs.readdirSync(outdir); } catch { return out; }
+    for (const name of names) {
+        const m = DIARIZE_FILE.exec(name);
+        if (!m || (stem && m[1] !== stem)) continue;
+        out.files++;
+        if (skip(m[1])) { out.skipped++; continue; }
+        const file = path.join(outdir, name);
+        const tmp = `${file}.strip`;
+        try {
+            const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const voices = doc && Array.isArray(doc.voices) ? doc.voices : [];
+            if (!voices.some((v) => v && typeof v === 'object' && Object.prototype.hasOwnProperty.call(v, 'embedding'))) continue;
+            for (const v of voices) if (v && typeof v === 'object') delete v.embedding;
+            const mode = fs.statSync(file).mode & 0o777;
+            fs.writeFileSync(tmp, JSON.stringify(doc, null, 2) + '\n', { mode });
+            fs.chmodSync(tmp, mode);
+            fs.renameSync(tmp, file);
+            out.changed++;
+        } catch {
+            out.failed++;
+            try { fs.rmSync(tmp, { force: true }); } catch {}
+        }
+    }
+    return out;
+}
+
 // The store. encrypt(string) -> Buffer and decrypt(Buffer) -> string are
 // Electron safeStorage's in the app, and a stand-in in the checks.
 function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => new Date() }) {
@@ -226,28 +268,50 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
         }
     }
 
-    // Removes every host-print-<stem>.json in the recordings folder.
-    function removeHostPrints() {
+    // Removes every host-print-<stem>.json in the recordings folder, or only
+    // the given stem's.
+    function removeHostPrints(stem = null) {
         let removed = 0;
         let names = [];
         try { names = fs.readdirSync(outdir); } catch { return 0; }
         for (const n of names) {
-            if (!/^host-print-.+\.json$/.test(n)) continue;
+            if (stem ? n !== `host-print-${stem}.json` : !/^host-print-.+\.json$/.test(n)) continue;
             try { fs.unlinkSync(path.join(outdir, n)); removed++; } catch {}
         }
         return removed;
     }
 
-    // Turning prints off: every print, the score log and any waiting host
-    // print are deleted, and the setting says off.
-    function disable() {
-        const gone = { profiles: false, scores: false, hostPrints: 0 };
-        for (const [key, file] of [['profiles', profilesPath], ['scores', scoresPath]]) {
-            try { fs.unlinkSync(file); gone[key] = true; } catch (err) { if (err.code !== 'ENOENT') throw err; }
+    // With prints off: the store, the score log, waiting host prints and the
+    // diarize files' embeddings are deleted. With a stem, only that capture's
+    // host print and embeddings. Throws only if the store or score log is
+    // there and cannot be deleted.
+    function removeAllOff({ stem = null, skip = () => false } = {}) {
+        const gone = { profiles: false, scores: false, hostPrints: 0, embeddings: null };
+        if (!stem) {
+            for (const [key, file] of [['profiles', profilesPath], ['scores', scoresPath]]) {
+                try { fs.unlinkSync(file); gone[key] = true; } catch (err) { if (err.code !== 'ENOENT') throw err; }
+            }
         }
-        gone.hostPrints = removeHostPrints();
-        writePrivate(settingPath, JSON.stringify({ enabled: false, turnedOffAt: now().toISOString() }) + '\n');
+        gone.hostPrints = removeHostPrints(stem);
+        gone.embeddings = removeDiarizeEmbeddings(outdir, { stem, skip });
         return gone;
+    }
+
+    // Turning prints off: the setting says off first, so a turn-off cut short
+    // anywhere after it is finished by removeWhileOff at the next launch; then
+    // every print, the score log, any waiting host print and each diarize
+    // file's embeddings are deleted. skip as removeDiarizeEmbeddings's.
+    function disable({ skip } = {}) {
+        writePrivate(settingPath, JSON.stringify({ enabled: false, turnedOffAt: now().toISOString() }) + '\n');
+        return removeAllOff({ skip });
+    }
+
+    // The pass that runs while off: at launch (everything) and when a
+    // capture's pipeline ends (its stem). With prints on it does nothing.
+    function removeWhileOff({ stem = null, skip } = {}) {
+        if (isEnabled()) return { skipped: 'on' };
+        if (stem !== null && !STEM.test(stem)) return { skipped: 'bad_stem' };
+        return removeAllOff({ stem, skip });
     }
 
     // diarize's host-print-<stem>.json: the member's own print from this
@@ -385,9 +449,9 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
 
     return {
         dir, settingPath, profilesPath, scoresPath,
-        setting, isEnabled, enable, disable, load, ingestHostPrint, enrolFromMapping,
+        setting, isEnabled, enable, disable, removeWhileOff, load, ingestHostPrint, enrolFromMapping,
         deleteProfile, removeRecording, listProfiles, matchProfiles, appendScoreLines, readScoreLines,
     };
 }
 
-module.exports = { STATEMENT_VERSION, SELF_MATCH_CUTOFF, normalise, cosine, meanOf, decideEnrolment, createVoicePrints };
+module.exports = { STATEMENT_VERSION, SELF_MATCH_CUTOFF, normalise, cosine, meanOf, decideEnrolment, removeDiarizeEmbeddings, createVoicePrints };
