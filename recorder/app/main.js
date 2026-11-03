@@ -17,14 +17,20 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+// The identity window's rules (identity-rules.js, which the page loads too) and
+// the files its answers live in (identity-answer.js, main.js's only).
 const {
     IDENTITY_WINDOW, contentHeightFor, selfNameFrom,
-    buildAnswerDoc, writeAnswer, readAnswer, answerChanged, answerForPage, namingDataForPage, correctsFor,
-    CALENDAR_PREVIEW_WAIT_MS, calendarPrefillFrom, buildInviteeNamesDoc, writeInviteeNames,
+    buildAnswerDoc, answerChanged, answerForPage, namingDataForPage, correctsFor,
+    CALENDAR_PREVIEW_WAIT_MS, calendarPrefillFrom, buildInviteeNamesDoc,
+    buildVoiceNamesDoc, assignVoice,
+} = require('./identity-rules.js');
+const {
+    writeAnswer, readAnswer, writeInviteeNames,
     writeLaterMarker, readLaterMarker, deleteLaterMarker,
     recentPendingIdentityStems,
-    buildVoiceNamesDoc, writeVoiceNamesAnswer, readNamingData, recentPendingVoiceNamingStems,
-    readVoiceNamesAnswer, mostRecentNamedStem, mostRecentCaptureStem, assignVoice,
+    writeVoiceNamesAnswer, readNamingData, recentPendingVoiceNamingStems,
+    readVoiceNamesAnswer, mostRecentNamedStem, mostRecentCaptureStem,
 } = require('./identity-answer.js');
 const { stopMessageFor } = require('./voice-naming-wait.js');
 // Which meeting the tray's "Save transcript" item acts on (SAA-199).
@@ -3290,7 +3296,7 @@ function enqueueUpload(stem) {
             recordingId: prior ? prior.recordingId : null,
             sentAt: prior ? prior.sentAt : null,
             // The identity answer the server last accepted (sendQueuedCapture),
-            // which a correction corrects (identity-answer.js correctsFor).
+            // which a correction corrects (identity-rules.js correctsFor).
             identityAcceptedAt: prior ? prior.identityAcceptedAt || null : null,
         });
         console.error(`[clipwise-recorder] upload ${stem}: queued`);

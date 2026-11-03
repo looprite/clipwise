@@ -134,7 +134,7 @@ const identitySchema = z.object({
 });
 
 // The recorder's voice-naming answer (ingest/voice-names.ts VoiceNamesAnswer), as
-// identity-answer.js buildVoiceNamesDoc writes it. answered_at is required: it is
+// identity-rules.js buildVoiceNamesDoc builds it. answered_at is required: it is
 // what makes a repeat of the same answer a no-op (voiceNamesAlreadyApplied).
 const voiceNamesSchema = z.object({
   voice_names_version: z.number().int().optional(),
@@ -145,8 +145,8 @@ const voiceNamesSchema = z.object({
   rename: z.boolean().optional(),
 });
 
-// The invitees named once in the prompt (SAA-221), as identity-answer.js
-// buildInviteeNamesDoc writes them. Strict: an address and a name, nothing else.
+// The invitees named once in the prompt (SAA-221), as identity-rules.js
+// buildInviteeNamesDoc builds them. Strict: an address and a name, nothing else.
 const inviteeNameSchema = z.object({ email: z.string().email().max(320), name: z.string().min(1).max(256) }).strict();
 const inviteeNamesSchema = z.array(inviteeNameSchema).max(50);
 

@@ -108,7 +108,13 @@
 <div id="list"></div>
 <script>
   const { ipcRenderer } = require('electron');
-  const { filterRows } = require('./meetings.js');
+
+  // The All / Work / Personal switch. A row with no scope recorded matches
+  // neither Work nor Personal, so it shows under All only. The page's own, so it
+  // loads no module (SAA-243 window hardening); check-meetings.js runs this copy.
+  function filterRows(rows, filter) {
+    return filter === 'work' || filter === 'personal' ? rows.filter((r) => r.scope === filter) : rows;
+  }
   const listEl = document.getElementById('list');
   const filterEl = document.getElementById('filter');
   const viewEl = document.getElementById('view');
