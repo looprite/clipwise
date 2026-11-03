@@ -1758,7 +1758,14 @@ function renderTray() {
     tray.setTitle(trayTitle());
 
     const active = state !== 'stopped';
+    // A start waiting on the audio grants (SAA-124) comes first (SAA-259): one
+    // click brings the setup window forward at its permissions screen, so a
+    // window lost behind the meeting is never a dead end.
+    const blocked = blockedStartFresh();
     const items = [
+        ...(blocked && blocked.reason === 'permissions'
+            ? [{ label: 'Allow audio access…', click: () => showSetupWindow('permissions') }, { type: 'separator' }]
+            : []),
         { label: `Status: ${label}`, enabled: false },
     ];
     if (locationNote) items.push({ label: locationNote.tray, enabled: false });
@@ -4634,6 +4641,8 @@ function resumePermissionBlockedStart(source) {
         return;
     }
     blockedStart = null;
+    // The tray's "Allow audio access…" goes with it (SAA-259).
+    renderTray();
     console.error(`[clipwise-recorder] permissions: blocked start — ${decision} (${source})`);
     if (decision === 'drop-denied') {
         const denied = deniedServices({ micPerm: lastPermissions.mic, tapPerm: lastPermissions.tap });
@@ -4932,10 +4941,13 @@ function startRecording() {
         console.error(`[clipwise-recorder] start blocked until the audio permissions are answered `
             + `(mic_perm=${dev.micPerm} tap_perm=${dev.tapPerm}, ${trigger ? `triggered by ${trigger.key}` : 'manual start'})`);
         showSetupWindow('permissions');
+        renderTray();
         // A capture an app asked for would otherwise just not happen, silently.
+        // A click on it brings the setup window forward at permissions (SAA-259).
         if (trigger) {
             notify('permissions-start-blocked', 'Clipwise: allow audio access',
-                'Recording starts when you answer, if the call is still going.');
+                'Recording starts when you answer, if the call is still going.',
+                () => showSetupWindow('permissions'));
         }
         return;
     }
