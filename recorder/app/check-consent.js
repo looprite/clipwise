@@ -224,9 +224,11 @@ const CASES = [
         whenReadyBody.includes("showSetupWindow('launch');")
         && /if \(noticeOnly && consent\.isAcknowledged\(SUPPORT_DIR\)\) return;/.test(fnBody('showSetupWindow'))],
     ['build-app.sh copies consent.js into the bundle', () => /cp "\$APP_SRC\/consent\.js" "\$C\/Resources\/app\/consent\.js"/.test(BUILD)],
-    ['build-app.sh copies setup.js and setup.html into the bundle', () =>
+    ['build-app.sh copies setup.js, setup.html, its script setup-page.js and its preload setup-preload.js into the bundle', () =>
         /cp "\$APP_SRC\/setup\.js" "\$C\/Resources\/app\/setup\.js"/.test(BUILD)
-        && /cp "\$APP_SRC\/setup\.html" "\$C\/Resources\/app\/setup\.html"/.test(BUILD)],
+        && /cp "\$APP_SRC\/setup\.html" "\$C\/Resources\/app\/setup\.html"/.test(BUILD)
+        && /cp "\$APP_SRC\/setup-page\.js" "\$C\/Resources\/app\/setup-page\.js"/.test(BUILD)
+        && /cp "\$APP_SRC\/setup-preload\.js" "\$C\/Resources\/app\/setup-preload\.js"/.test(BUILD)],
 
     // 5. the notice stamp a capture carries (SAA-227 part I)
     ['stamp: agreed to -> version and acknowledged_at, equal to consent.json', () => withDir(d => {

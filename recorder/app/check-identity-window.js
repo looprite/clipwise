@@ -9,9 +9,13 @@
 // never uses the installed app's identity: not its app name
 // (clipwise-recorder), not its keychain item, not its support folder (project
 // CLAUDE.md). The built app is not run by this check: the release step's
-// file-by-file comparison of the bundled identity.html, identity-answer.js,
-// people-name.js and main.js with the source stands in for that, and the first
-// real call after release is the live test.
+// file-by-file comparison of the bundled files with the source stands in for
+// that, and the first real call after release is the live test. The files the
+// windows this check drives are made of: main.js; identity.html,
+// identity-page.js, identity-preload.js, identity-rules.js, identity-answer.js
+// and people-name.js; meetings.html, meetings-page.js and meetings-preload.js;
+// setup.html, setup-page.js and setup-preload.js; voice-prints.html,
+// voice-prints-page.js and voice-prints-preload.js (SAA-243 window hardening).
 //
 // What it sets up, all under one temporary folder:
 //   - the wrapper (package.json "name": "clipwise-window-check", and an entry
