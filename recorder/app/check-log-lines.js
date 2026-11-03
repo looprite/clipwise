@@ -25,7 +25,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { buildAnswerDoc, buildVoiceNamesDoc, calendarPrefillFrom, buildInviteeNamesDoc } = require('./identity-answer.js');
+const { buildAnswerDoc, buildVoiceNamesDoc, calendarPrefillFrom, buildInviteeNamesDoc } = require('./identity-rules.js');
 
 const REV = process.env.CLIPWISE_CHECK_SOURCE || '';
 const fromRev = (file) => execFileSync('git', ['show', `${REV}:recorder/app/${file}`], { cwd: __dirname, encoding: 'utf8' });

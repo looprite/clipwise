@@ -9,8 +9,19 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { listMeetings, filterRows } = require('./meetings.js');
+const { listMeetings } = require('./meetings.js');
 const { lastMeeting } = require('./last-meeting.js');
+
+// filterRows lives in the page's own script (SAA-243 window hardening). It is
+// taken from that file's text and run here, so the filter cases below exercise
+// the copy the window runs. Not found is a throw, and the run exits non-zero.
+function pageFunction(file, name) {
+    const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+    const m = new RegExp(`\\n( *)function ${name}\\([\\s\\S]*?\\n\\1\\}\\n`).exec(src);
+    if (!m) throw new Error(`${name} not found in ${file}`);
+    return new Function(`${m[0]}\nreturn ${name};`)();
+}
+const filterRows = pageFunction('meetings.html', 'filterRows');
 
 let failed = 0;
 function check(name, ok, detail = '') {
@@ -484,7 +495,7 @@ check('without the processing capture, the tray item is the newest ready meeting
 // corrects (correctsFor). The server holds A. B1 is a correction made offline
 // and never sent; B2 is made after it, and the queue sends only B2.
 {
-    const ia = require('./identity-answer.js');
+    const ia = require('./identity-rules.js');
     const c9 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-correct-identity-check-'));
     const q9 = path.join(c9, 'upload-queue');
     fs.mkdirSync(q9);
@@ -543,6 +554,7 @@ check('without the processing capture, the tray item is the newest ready meeting
 // one from before step 4 by name only, the host's own name never a chip.
 {
     const ia = require('./identity-answer.js');
+    const rules = require('./identity-rules.js');
     const P1 = '11111111-1111-4111-8111-111111111111';
     const P2 = '22222222-2222-4222-8222-222222222222';
     const c10 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-step4-meetings-check-'));
@@ -574,7 +586,7 @@ check('without the processing capture, the tray item is the newest ready meeting
     const chips = (f) => JSON.stringify(f.chips.map((c) => ({ name: c.name, personId: c.personId, tag: c.tag })));
     let f = null;
     try {
-        f = ia.peopleFieldFromAnswer(answer([{ name: 'Ann Example', personId: P1 }, { name: 'Bob Sample', personId: 'not-a-uuid' }, { name: ' jon  example ' }]), { hostNames: ['Jon Example'] });
+        f = rules.peopleFieldFromAnswer(answer([{ name: 'Ann Example', personId: P1 }, { name: 'Bob Sample', personId: 'not-a-uuid' }, { name: ' jon  example ' }]), { hostNames: ['Jon Example'] });
     } catch (err) {
         f = { error: err.message.split('\n')[0] };
     }
@@ -585,7 +597,7 @@ check('without the processing capture, the tray item is the newest ready meeting
         !!f && Array.isArray(f.chips) && !f.chips.some((c) => /jon/i.test(c.name || '')), f && f.chips ? chips(f) : JSON.stringify(f));
     let old = null;
     try {
-        old = ia.peopleFieldFromAnswer({ answered_at: 'A', self: { name: 'Jon Example', source: 'recorder_identity_prompt' }, guests: [{ name: 'Cy Person' }], scope: 'work' }, { hostNames: ['Jon Example'] });
+        old = rules.peopleFieldFromAnswer({ answered_at: 'A', self: { name: 'Jon Example', source: 'recorder_identity_prompt' }, guests: [{ name: 'Cy Person' }], scope: 'work' }, { hostNames: ['Jon Example'] });
     } catch (err) {
         old = { error: err.message.split('\n')[0] };
     }
@@ -594,7 +606,7 @@ check('without the processing capture, the tray item is the newest ready meeting
     check('SAA-260 step 4: a correction is sent with the same answer shape, guests with their personIds',
         (() => {
             try {
-                const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: ia.answerGuests(f), selfName: 'Jon Example', scope: 'work', corrects: 'A' });
+                const doc = rules.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: rules.answerGuests(f), selfName: 'Jon Example', scope: 'work', corrects: 'A' });
                 return doc.corrects === 'A' && JSON.stringify(doc.guests) === JSON.stringify([{ name: 'Ann Example', personId: P1 }, { name: 'Bob Sample' }]);
             } catch { return false; }
         })());
@@ -609,7 +621,7 @@ check('without the processing capture, the tray item is the newest ready meeting
         ])));
         const raw = ia.readAnswer(c11, S);
         let page = null;
-        try { page = ia.answerForPage(raw); } catch (err) { page = { error: err.message.split('\n')[0] }; }
+        try { page = rules.answerForPage(raw); } catch (err) { page = { error: err.message.split('\n')[0] }; }
         check('control: the fixture answer as read from disk does hold a guest named by an address',
             !!raw && raw.guests.some((g) => g.name.includes('@')), JSON.stringify(raw && raw.guests));
         check('SAA-260 step 4: the saved answer sent to the page drops the guest named by an address and keeps the others as saved',

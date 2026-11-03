@@ -54,7 +54,7 @@ export type DiarizeSegment = {
 // coverage. Absent a majority, the segment goes unnamed.
 export const ASSIGN_VOICE_MAJORITY_FRACTION = 0.5;
 // Called by diarize.ts's split and by the naming data below.
-// recorder/app/identity-answer.js carries a copy for the Mac's capture builder
+// recorder/app/identity-rules.js carries a copy for the Mac's capture builder
 // (SAA-227 decision 1); check-assign-voice.ts runs both over the same cases.
 export function assignVoice(
   segStart: number,

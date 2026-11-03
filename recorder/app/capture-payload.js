@@ -12,7 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { assignVoice } = require('./identity-answer.js');
+const { assignVoice } = require('./identity-rules.js');
 
 function buildCapturePayload(outdir, stem) {
     const readJson = (name) => {
@@ -42,7 +42,7 @@ function buildCapturePayload(outdir, stem) {
         if (err.code !== 'ENOENT') throw err;
     }
     // The prompt writes self.source: null when no name was given
-    // (identity-answer.js:138-141); the endpoint takes a string or nothing.
+    // (identity-rules.js buildAnswerDoc); the endpoint takes a string or nothing.
     if (identity && identity.self && identity.self.source === null) delete identity.self.source;
     let voiceNames;
     try {

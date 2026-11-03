@@ -2,7 +2,7 @@
 // The identity window's rules on the Mac, without a window (SAA-221, SAA-260
 // step 4). What the page keeps from the server's calendar preview
 // (calendarPrefillFrom); the people field the page runs (peopleField and
-// friends in identity-answer.js, which identity.html requires): invitee chips,
+// friends in identity-rules.js, which identity.html loads): invitee chips,
 // the large-call chip, search and typed names, the host's own name, and what
 // each chip sends on Save; the answer file (buildAnswerDoc) and the name-once
 // file (buildInviteeNamesDoc, writeInviteeNames); the footer and the host-name
@@ -17,7 +17,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const ia = require('./identity-answer.js');
+const ia = require('./identity-rules.js');
+const store = require('./identity-answer.js');
 
 let failures = 0;
 function check(name, ok, detail = '') {
@@ -315,10 +316,10 @@ checkFn('a: the host name is the account\'s when GET /captures/me answers, else 
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-check-calendar-prefill-'));
     const STEM = '2026-10-26T18-00-00Z';
-    const written = ia.writeInviteeNames(dir, { ...doc, stem: STEM });
+    const written = store.writeInviteeNames(dir, { ...doc, stem: STEM });
     check('i: written to invitee-names-<stem>.json', path.basename(written) === `invitee-names-${STEM}.json`, written);
-    check('i: read back as written', JSON.stringify(ia.readInviteeNames(dir, STEM).invitees) === JSON.stringify(doc.invitees));
-    ia.writeAnswer(dir, ia.buildAnswerDoc({ stem: STEM, recordingId: 'R', guests: [{ name: 'Carl Guest' }], selfName: 'Jon Example', scope: 'work' }));
+    check('i: read back as written', JSON.stringify(store.readInviteeNames(dir, STEM).invitees) === JSON.stringify(doc.invitees));
+    store.writeAnswer(dir, ia.buildAnswerDoc({ stem: STEM, recordingId: 'R', guests: [{ name: 'Carl Guest' }], selfName: 'Jon Example', scope: 'work' }));
     const identityText = fs.readFileSync(path.join(dir, `identity-${STEM}.json`), 'utf8');
     check('i: the identity file beside it holds no @ and no typed invitee name',
         !identityText.includes('@') && !identityText.includes('Anne Example'), identityText);
@@ -412,11 +413,13 @@ checkFn('v: the voice-names answer names each voice or leaves it null, nothing g
         /inviteeNames: ia\.inviteePairs\(field\)/.test(html));
     check('t: identity.html sends guests from the people field', /guests: ia\.answerGuests\(field\)/.test(html));
     // The step-1 checklist's functions, exported and internal, removed in SAA-260
-    // step 4: none is exported, defined in identity-answer.js, or named in main.js
-    // or identity.html.
+    // step 4: none is exported by either identity module, defined in
+    // identity-rules.js or identity-answer.js, or named in main.js or
+    // identity.html.
     const OLD_EXPORTS = ['parseNames', 'knownGuestNames', 'mergeGuestNames', 'guestList', 'applyCalendarNames', 'setGuestChecked',
         'touchGuests', 'nameInvitee', 'checkedGuestNames', 'inviteeEntries'];
     const OLD_INTERNAL = ['boxFor', 'borrowerOf', 'letGoOfBox'];
+    const rulesSrc = fs.readFileSync(path.join(__dirname, 'identity-rules.js'), 'utf8');
     const answerSrc = fs.readFileSync(path.join(__dirname, 'identity-answer.js'), 'utf8');
     const oldLeft = (mod, texts) => [
         ...OLD_EXPORTS.filter((n) => typeof mod[n] !== 'undefined').map((n) => `export ${n}`),
@@ -424,19 +427,20 @@ checkFn('v: the voice-names answer names each voice or leaves it null, nothing g
             .filter(([, text]) => new RegExp(`\\b${n}\\b`).test(text)).map(([file]) => `${n} in ${file}`)),
         ...(texts.some(([, text]) => /knownNames/.test(text)) ? ['knownNames'] : []),
     ];
-    const texts = [['identity-answer.js', answerSrc], ['main.js', main], ['identity.html', html]];
-    const left = oldLeft(ia, texts);
-    check('t: the old checklist is gone: none of its functions is exported, defined in identity-answer.js, or named in main.js or identity.html; no knownNames',
+    const texts = [['identity-rules.js', rulesSrc], ['identity-answer.js', answerSrc], ['main.js', main], ['identity.html', html]];
+    const left = oldLeft({ ...ia, ...store }, texts);
+    check('t: the old checklist is gone: none of its functions is exported, defined in identity-rules.js or identity-answer.js, or named in main.js or identity.html; no knownNames',
         left.length === 0, left.join(', '));
     check('t: control: the same scan finds knownNames planted in a copy of main.js', /knownNames/.test(`${main}\nknownNames: []`));
     {
-        const planted = oldLeft({ ...ia, checkedGuestNames: () => [] }, [
+        const planted = oldLeft({ ...ia, ...store, checkedGuestNames: () => [] }, [
+            ['identity-rules.js', `${rulesSrc}\nfunction boxFor(name) {}`],
             ['identity-answer.js', `${answerSrc}\nfunction letGoOfBox(list) {}`],
             ['main.js', main],
             ['identity.html', `${html}\nia.guestList([])`],
         ]);
-        check('t: control: the same scan finds an export, an internal function and a page call planted in copies',
-            JSON.stringify(planted) === JSON.stringify(['export checkedGuestNames', 'guestList in identity.html', 'letGoOfBox in identity-answer.js']),
+        check('t: control: the same scan finds an export, internal functions in either module and a page call planted in copies',
+            JSON.stringify(planted) === JSON.stringify(['export checkedGuestNames', 'guestList in identity.html', 'boxFor in identity-rules.js', 'letGoOfBox in identity-answer.js']),
             JSON.stringify(planted));
     }
     check('t: the host field is gone from identity.html', !/id="self"/.test(html));

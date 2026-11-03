@@ -87,7 +87,8 @@ const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
-const ia = require('./identity-answer.js');
+const { IDENTITY_WINDOW } = require('./identity-rules.js');
+const { pendingVoiceNamingStems } = require('./identity-answer.js');
 
 const HERE = __dirname;
 const RECORDER_DIR = path.resolve(HERE, '..');
@@ -783,7 +784,7 @@ async function runFixture(fx, n, ctx) {
         // No scrolling (B.13), and the height the real page asks for (A.2's fixtures).
         const fit = await ev(`__check.fit()`);
         check(t(`the window never scrolls (scrollHeight ${fit.scrollHeight} <= clientHeight ${fit.clientHeight}; page asks for ${fit.measured}, window ${fit.innerHeight})`),
-            fit.scrollHeight <= fit.clientHeight && fit.measured !== null && fit.measured <= ia.IDENTITY_WINDOW.maxHeight, JSON.stringify(fit));
+            fit.scrollHeight <= fit.clientHeight && fit.measured !== null && fit.measured <= IDENTITY_WINDOW.maxHeight, JSON.stringify(fit));
 
         // Nothing but this check wrote the pipeline record: the recovery pass
         // left it alone.
@@ -846,7 +847,7 @@ async function runFixture(fx, n, ctx) {
         }
         if (fx.expectFinding) {
             writeVoices(outdir, [600, 500]);
-            check(t('voices that arrive after Save are pending for the tray\'s reopen'), ia.pendingVoiceNamingStems(outdir).includes(STEM), JSON.stringify(ia.pendingVoiceNamingStems(outdir)));
+            check(t('voices that arrive after Save are pending for the tray\'s reopen'), pendingVoiceNamingStems(outdir).includes(STEM), JSON.stringify(pendingVoiceNamingStems(outdir)));
         }
         if (!fx.offline) {
             const cache = readJson(path.join(support, 'identity-self.json'));

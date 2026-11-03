@@ -11,7 +11,7 @@
      the search answered without it and "not checked" when it could not answer.
      More than six invitees are one chip, "N invited · not confirmed", and none of
      them is an attendee unless added from "Show the N". The host's own name never
-     becomes a chip. The rules are identity-answer.js's people field, so
+     becomes a chip. The rules are identity-rules.js's people field, so
      check-calendar-prefill.js runs them without a window; this page renders them.
 
      The same window opens at stop, from the tray's Later item, for Change
@@ -178,7 +178,7 @@
 
 <script>
   const { ipcRenderer } = require('electron');
-  const ia = require('./identity-answer.js');
+  const ia = require('./identity-rules.js');
   const params = new URLSearchParams(window.location.search);
   const token = params.get('token');
   const MODES = ['stop', 'later', 'correct', 'voices'];

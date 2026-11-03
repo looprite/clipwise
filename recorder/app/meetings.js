@@ -144,10 +144,4 @@ function listTrashed(dir) {
     return rows;
 }
 
-// The All / Work / Personal switch. A row with no scope recorded matches
-// neither Work nor Personal, so it shows under All only.
-function filterRows(rows, filter) {
-    return filter === 'work' || filter === 'personal' ? rows.filter((r) => r.scope === filter) : rows;
-}
-
-module.exports = { listMeetings, listTrashed, identifyingLine, filterRows, DAYS };
+module.exports = { listMeetings, listTrashed, identifyingLine, DAYS };

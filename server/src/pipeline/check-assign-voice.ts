@@ -3,7 +3,7 @@
 // Same plain-script/exit-code shape as check-match-calendar.ts.
 //
 // Also (SAA-227 decisions 1 and 2):
-//   - the Mac's copy of the rule (recorder/app/identity-answer.js) gives the same
+//   - the Mac's copy of the rule (recorder/app/identity-rules.js) gives the same
 //     answer as this one on every case;
 //   - with --capture <dir> <stem>, the naming data for a group capture's files is
 //     built with no database: run with DATABASE_URL unset, which the database
@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { assignVoice, generateVoiceNamingData, namingDataPathFor, type DiarizeSegment, type NamingData } from "./voice-clips.js";
 
-const macAssignVoice = (createRequire(import.meta.url)(resolve(import.meta.dirname, "..", "..", "..", "recorder", "app", "identity-answer.js")) as {
+const macAssignVoice = (createRequire(import.meta.url)(resolve(import.meta.dirname, "..", "..", "..", "recorder", "app", "identity-rules.js")) as {
   assignVoice: (start: number, end: number, diarized: DiarizeSegment[]) => number | null;
 }).assignVoice;
 

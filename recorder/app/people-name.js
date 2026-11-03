@@ -5,6 +5,15 @@
 // the member's own name out of the guests, and to tell a typed name from a
 // search result. check-capture-people.ts runs both copies over the same cases;
 // change both or neither.
+//
+// Loaded either way (SAA-243 window hardening): required, it exports through
+// module.exports; as a page script, loaded before identity-rules.js, it sets
+// window.peopleName.
+
+(function (root, factory) {
+    if (typeof module === 'object' && module && module.exports) module.exports = factory();
+    else root.peopleName = factory();
+}(globalThis, function () {
 
 const MAX_NAME_LENGTH = 256;
 
@@ -24,4 +33,5 @@ function nameKey(raw) {
     return name === null ? null : name.toLowerCase();
 }
 
-module.exports = { MAX_NAME_LENGTH, normalizeName, nameKey };
+return { MAX_NAME_LENGTH, normalizeName, nameKey };
+}));

@@ -50,7 +50,7 @@ import { isVoiceLabel } from "../pipeline/diarize.js";
 import { nameKey } from "../routes/capture-people.js";
 
 // Bumped 1 -> 2 for `scope` (SAA-153/SAA-169): the shape the recorder writes
-// changed, so per the header note in identity-answer.js this and that
+// changed, so per the header note in identity-rules.js this and that
 // constant move together. Nothing here gates on the number — it is a shared
 // marker for whoever next has to reconcile the two files, not a runtime
 // check.
@@ -121,7 +121,7 @@ export function readIdentityAnswer(
 //
 // A name with an @ is dropped (SAA-221): it is an address typed as a name, and
 // attendee names reach extraction, and so Anthropic. The prompt refuses one and
-// the recorder drops it at write time (identity-answer.js); this is the server's
+// the recorder drops it at write time (identity-rules.js buildAnswerDoc); this is the server's
 // backstop. A host name with one is treated as no name.
 export function attendeeRowsFrom(answer: IdentityAnswer): AttendeeRow[] {
   const rows: AttendeeRow[] = [];
