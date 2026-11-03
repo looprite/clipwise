@@ -63,7 +63,9 @@ const SRC = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
 // was consent.html. A missing file reads as empty, so the cases on it fail
 // rather than the whole run.
 const readOr = (name) => { try { return fs.readFileSync(path.join(__dirname, name), 'utf8'); } catch { return ''; } };
-const HTML = readOr('setup.html');
+// The page: its markup and its script (setup-page.js since SAA-243's CSP moved
+// it out), read as one text as it was before.
+const HTML = [readOr('setup.html'), readOr('setup-page.js')].join('\n');
 const BUILD = fs.readFileSync(path.join(__dirname, 'build-app.sh'), 'utf8');
 // Group 8, the notices (SAA-198 step 7): the repo's THIRD_PARTY_NOTICES, the
 // README, notarize.sh and ffmpeg's build script. Missing reads as empty.

@@ -394,7 +394,9 @@ checkFn('v: the voice-names answer names each voice or leaves it null, nothing g
 // --- t: text checks ---------------------------------------------------------
 {
     const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
-    const html = fs.readFileSync(path.join(__dirname, 'identity.html'), 'utf8');
+    // The page: its markup and its script (identity-page.js since SAA-243's CSP
+    // moved it out), read as one text as it was before.
+    const html = ['identity.html', 'identity-page.js'].map((f) => fs.readFileSync(path.join(__dirname, f), 'utf8')).join('\n');
     const build = fs.readFileSync(path.join(__dirname, 'build-app.sh'), 'utf8');
     const calls = main.split('\n').filter((l) => /requestCalendarPreview\(/.test(l) && !/^\s*(function|\/\/)/.test(l));
     check('t: main.js asks for a preview from one place only (promptForIdentity, at stop)',

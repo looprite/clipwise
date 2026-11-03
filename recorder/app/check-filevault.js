@@ -22,7 +22,11 @@ const REV = process.env.CLIPWISE_CHECK_SOURCE || '';
 const fromRev = (file) => execFileSync('git', ['show', `${REV}:recorder/app/${file}`], { cwd: __dirname, encoding: 'utf8' });
 const read = (file) => (REV ? fromRev(file) : fs.readFileSync(path.join(__dirname, file), 'utf8'));
 const SRC = read('main.js');
-const HTML = read('setup.html');
+// The page: its markup and its script (setup-page.js since SAA-243's CSP moved
+// it out), read as one text as it was before. A revision from before the move
+// has no setup-page.js, and its script is in setup.html.
+const readMaybe = (file) => { try { return read(file); } catch { return ''; } };
+const HTML = [read('setup.html'), readMaybe('setup-page.js')].join('\n');
 const SETUP_JS = read('setup.js');
 const BUILD = read('build-app.sh');
 const fv = REV
