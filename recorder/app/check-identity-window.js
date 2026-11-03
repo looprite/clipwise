@@ -43,6 +43,12 @@
 // functions stay as a second line of evidence. The switch* fixtures show that
 // unset it opens nothing and logs nothing, and that a value it can't use opens
 // nothing and logs one line.
+// The hardening fixture (SAA-243) opens all four windows' pages in one launch:
+// identity by that switch, setup by itself, and Recent meetings and Recognize
+// voices by main.js's other check-only switch, CLIPWISE_CHECK_OPEN_WINDOWS. In
+// each page it shows the page's own script ran, that require, process and
+// module are undefined, that an inserted inline script does not run, that its
+// own preload is in force, and what Electron applied (hardeningChecks).
 // The check refuses to start when the recorder's capture binaries are built in
 // this checkout (call detection could start a capture), or when the installed
 // app's name is the one it would run under.
@@ -98,6 +104,9 @@ const APP_NAME = 'clipwise-window-check';
 const KEYCHAIN_ITEM = `${APP_NAME} Safe Storage`;
 const INSTALLED_NAME = 'clipwise-recorder';
 const SWITCH = 'CLIPWISE_CHECK_PROMPT_STEM';
+// main.js's other check-only switch (openWindowsForCheck): Recent meetings and
+// Recognize voices, for the hardening fixture only.
+const OPEN_SWITCH = 'CLIPWISE_CHECK_OPEN_WINDOWS';
 const MODE = 'dev';
 const ONLY = process.env.CHECK_FIXTURE || null;
 const NO_PID = process.env.CHECK_FIXTURE_NO_PID === '1';
@@ -316,6 +325,11 @@ const FIXTURES = [
         expectSwitchLines: [`[clipwise-recorder] check switch: nothing opened — no saved answer for ${STEM} to correct`] },
     { name: 'switchVoicesNoData', switchValue: `${STEM}:voices`, expectNoWindow: true,
         expectSwitchLines: [`[clipwise-recorder] check switch: nothing opened — no voices for ${STEM} to name`] },
+    // SAA-243 window hardening: all four windows' pages, opened in one launch as
+    // the app opens them. The identity window by the switch, setup by itself
+    // (this support folder has no setup.json), Recent meetings and Recognize
+    // voices by OPEN_SWITCH. See hardeningChecks.
+    { name: 'hardening', hardening: true },
 ];
 
 // --- the stub server ------------------------------------------------------------
@@ -357,11 +371,11 @@ function freePort() {
 }
 
 // --- the DevTools protocol, minimal -----------------------------------------------
-async function connectPage(port, ms) {
+async function connectPage(port, ms, pagePattern = /identity\.html/) {
     const target = await waitFor(async () => {
         const res = await fetch(`http://127.0.0.1:${port}/json/list`);
         const list = await res.json();
-        return list.find((t) => t.type === 'page' && /identity\.html/.test(t.url)) || false;
+        return list.find((t) => t.type === 'page' && pagePattern.test(t.url)) || false;
     }, ms, 300);
     if (!target) return null;
     const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -411,6 +425,76 @@ const PAGE_HELPERS = `(() => {
   };
   return true;
 })()`;
+
+// --- SAA-243 window hardening, in each of the four pages ---------------------------
+// For each page as the app opens it:
+//   - a known-good action: something only the page's own script makes true, so
+//     a page that failed to load, or whose script was blocked, passes nothing
+//     below by accident
+//   - require, process and module are undefined in the page
+//   - an inline script the check inserts does not run (the page's CSP,
+//     script-src 'self'), and the known-good action still runs after it
+//   - its own preload is in force: window.clipwise exists, and sending on a
+//     channel of another window throws the preload's refusal (Electron does
+//     not report the preload in getLastWebPreferences, so this is shown from
+//     the page)
+//   - main.js's log line says what Electron applied: contextIsolation and
+//     sandbox on, nodeIntegration off, none of its worker, subframe or webview
+//     variants on
+// The expressions run in the page's main world over the DevTools protocol, as
+// the rest of this check does. voice-prints' action draws the "off" state the
+// page already shows, with no data from anywhere. Each foreign channel would
+// do nothing if the preload let it through: setup:ready and identity:skip
+// without their window's token are ignored, and the two ready messages only
+// redraw a window that is open.
+const HARDENED_PAGES = [
+    { page: 'identity.html', foreign: 'setup:ready',
+        good: `typeof measuredHeight === 'function' && measuredHeight() > 0 && document.querySelector('#call-line').textContent.trim().length > 0` },
+    { page: 'setup.html', foreign: 'meetings:ready',
+        good: `typeof draw === 'function' && !!document.querySelector('.screen.shown')` },
+    { page: 'meetings.html', foreign: 'voice-prints:ready',
+        good: `typeof filterRows === 'function' && filterRows([{ scope: 'work' }, { scope: null }], 'work').length === 1 && document.querySelectorAll('#view button').length === 2` },
+    { page: 'voice-prints.html', foreign: 'identity:skip',
+        good: `typeof render === 'function' && (render({ enabled: false }), document.querySelector('#on').hidden === false)` },
+];
+const foreignSend = (channel) => `(() => {
+  const c = window.clipwise;
+  if (!c || typeof c.send !== 'function' || typeof c.on !== 'function') return { exists: false };
+  try { c.send(${JSON.stringify(channel)}, { token: null }); return { exists: true, threw: false }; }
+  catch (err) { return { exists: true, threw: true, message: String(err && err.message) }; }
+})()`;
+const INSERT_INLINE = `(() => { window.__inlineRan = false; const s = document.createElement('script'); s.textContent = 'window.__inlineRan = true;'; document.head.appendChild(s); return window.__inlineRan; })()`;
+
+async function hardeningChecks(port, getLog, t) {
+    for (const p of HARDENED_PAGES) {
+        const file = p.page.replace('.', '\\.');
+        const page = await connectPage(port, 20000, new RegExp(`/${file}(\\?|$)`));
+        check(t(`${p.page}: the window opens`), !!page);
+        if (!page) continue;
+        try {
+            const good = !!(await waitFor(() => page.evaluate(p.good), 8000));
+            check(t(`${p.page}: its own script ran (known-good action)`), good);
+            const kinds = await page.evaluate('[typeof require, typeof process, typeof module]');
+            check(t(`${p.page}: require, process and module are undefined (${JSON.stringify(kinds)})`),
+                good && JSON.stringify(kinds) === '["undefined","undefined","undefined"]');
+            const ran = await page.evaluate(INSERT_INLINE);
+            const goodAfter = !!(await page.evaluate(p.good).catch(() => false));
+            check(t(`${p.page}: an inserted inline script does not run (ran: ${ran}), and the known-good action still runs after it`),
+                good && goodAfter && ran === false);
+            const bridge = await page.evaluate(foreignSend(p.foreign));
+            check(t(`${p.page}: its preload is in force: window.clipwise exists, and sending on ${p.foreign} throws (${JSON.stringify(bridge)})`),
+                good && bridge.exists === true && bridge.threw === true && /not a channel of this window/.test(bridge.message || ''));
+        } finally {
+            page.close();
+        }
+        const re = new RegExp(`\\[clipwise-recorder\\] window ${file}: applied ([^\\n]*)`);
+        const m = await waitFor(() => re.exec(getLog()), 5000);
+        const kv = m ? Object.fromEntries(m[1].trim().split(' ').map((s) => s.split('='))) : {};
+        const applied = kv.contextIsolation === 'true' && kv.sandbox === 'true' && kv.nodeIntegration === 'false'
+            && ['nodeIntegrationInWorker', 'nodeIntegrationInSubFrames', 'webviewTag'].every((k) => k in kv && kv[k] !== 'true');
+        check(t(`${p.page}: Electron applied: ${m ? m[1].trim() : '(no line)'}`), applied);
+    }
+}
 
 // --- fixture folders ----------------------------------------------------------------
 function silentWav(file) {
@@ -543,6 +627,8 @@ async function runFixture(fx, n, ctx) {
         env: (() => {
             const env = { ...process.env, CLIPWISE_SUPPORT_DIR: support, CHECK_USERDATA: path.join(root, 'userdata') };
             delete env[SWITCH];
+            delete env[OPEN_SWITCH];
+            if (fx.hardening) env[OPEN_SWITCH] = 'meetings,voice-prints';
             const value = fx.switchValue !== undefined ? fx.switchValue : fx.open ? `${STEM}:${fx.open}` : STEM;
             if (value !== null) env[SWITCH] = value;
             return env;
@@ -581,6 +667,11 @@ async function runFixture(fx, n, ctx) {
         check(t('the switch opens the identity window'), !!page, `exited=${exited}; log tail: ${log.split('\n').slice(-5).join(' | ')}`);
         if (!page) return;
         check(t('the wrapper was not turned away by a single-instance lock'), !/another Clipwise is already running/.test(log));
+        if (fx.hardening) {
+            page.close();
+            await hardeningChecks(port, () => log, t);
+            return;
+        }
         await page.evaluate(PAGE_HELPERS);
         const ev = (js) => page.evaluate(js);
         const windowOpen = async () => {
@@ -715,7 +806,7 @@ async function runFixture(fx, n, ctx) {
             if (fx.plantEmbedding) {
                 // A second listener on the page, beside the page's own, keeps
                 // what main.js sent exactly as it arrived.
-                await ev(`(() => { window.__voicesSent = null; require('electron').ipcRenderer.on('identity:voices', (_e, d) => { window.__voicesSent = JSON.stringify(d); }); return true; })()`);
+                await ev(`(() => { window.__voicesSent = null; window.clipwise.on('identity:voices', (_e, d) => { window.__voicesSent = JSON.stringify(d); }); return true; })()`);
             }
             writeVoices(outdir, fx.talk, { plant: !!fx.plantEmbedding });
             if (fx.plantEmbedding) {
