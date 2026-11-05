@@ -4589,6 +4589,9 @@ async function requestPermission(which) {
     if (setupWindow !== w) return;
     w.asking = null;
     sendSetupState();
+    // macOS's prompt has closed; an accessory app is not given focus back, so the
+    // window would be left behind whatever was in front (SAA-259).
+    try { w.win.show(); app.focus({ steal: true }); } catch {}
 }
 
 // There is no call that asks for system audio: macOS asks when a process of this
