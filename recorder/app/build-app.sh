@@ -209,6 +209,9 @@ cp "$APP_SRC/capture-sign-out.js" "$C/Resources/app/capture-sign-out.js"
 # The capture token's refresh. main.js requires it by relative path; a bundle
 # without it fails to launch.
 cp "$APP_SRC/capture-refresh.js" "$C/Resources/app/capture-refresh.js"
+# The sign-in's loopback listener (SAA-268). main.js requires it by relative
+# path; a bundle without it fails to launch.
+cp "$APP_SRC/capture-sign-in.js" "$C/Resources/app/capture-sign-in.js"
 # Delete from the trash (SAA-243 item 7). main.js requires it by relative path;
 # a bundle without it fails to launch.
 cp "$APP_SRC/capture-files.js" "$C/Resources/app/capture-files.js"
