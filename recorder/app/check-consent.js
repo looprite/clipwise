@@ -527,6 +527,13 @@ const CASES = [
     ['permissions: the microphone is asked for with macOS\'s own prompt; a denial opens its System Settings pane', () =>
         fnBody('requestPermission').includes("systemPreferences.askForMediaAccess('microphone')")
         && /ipcMain\.on\('setup:permission-settings'[\s\S]{0,300}SETTINGS_PANE\[/.test(SRC)],
+    ['permissions: after either prompt closes, the setup window is brought back to the front', () => {
+        const b = fnBody('requestPermission');
+        const after = b.indexOf('await promptForSystemAudio()');
+        const gone = b.indexOf('if (setupWindow !== w) return;', after);
+        const raise = b.indexOf('w.win.show(); app.focus({ steal: true });', gone);
+        return after >= 0 && gone > after && raise > gone;
+    }],
     ['window: a grant that is not granted, denied or notDetermined reads "Not available" in the muted style, never "Allowed" in green', () =>
         HTML.includes("const STATE_TEXT = { granted: 'Allowed', denied: 'Off', notDetermined: 'Not yet asked' };")
         && HTML.includes("(STATE_TEXT[state] || 'Not available')")
