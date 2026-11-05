@@ -14,7 +14,6 @@ const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID, randomBytes, createHash } = require('crypto');
 const zlib = require('zlib');
 const fs = require('fs');
-const http = require('http');
 const os = require('os');
 const path = require('path');
 // The identity window's rules (identity-rules.js, which the page loads too) and
@@ -77,6 +76,8 @@ const setup = require('./setup.js');
 const { revokeRefreshToken } = require('./capture-sign-out.js');
 // The capture token's form post to the token endpoint, and one refresh.
 const { postCaptureTokenForm, refreshCaptureTokens } = require('./capture-refresh.js');
+// The sign-in's loopback listener (SAA-268).
+const { createSignInListener } = require('./capture-sign-in.js');
 
 // --- constants ------------------------------------------------------------
 // All measurements come from 5-second captures on 2026-08-09. A long
@@ -3088,23 +3089,17 @@ function signInToCaptureServer() {
     const verifier = randomBytes(32).toString('base64url');
     const state = randomBytes(16).toString('base64url');
     let redirectUri = null;
-    const listener = http.createServer((req, res) => {
-        const url = new URL(req.url, 'http://127.0.0.1');
-        if (url.pathname !== '/callback' || url.searchParams.get('state') !== state) {
-            res.writeHead(404).end();
-            return;
-        }
-        const code = url.searchParams.get('code');
-        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
-            .end(code ? 'Signed in to Clipwise. You can close this tab.' : 'Sign-in did not finish. You can close this tab.');
-        listener.close();
-        if (captureSignIn === listener) captureSignIn = null;
-        if (!code) {
-            console.error(`[clipwise-recorder] sign-in: ${url.searchParams.get('error') || 'no_code'}`);
+    const listener = createSignInListener({
+        state,
+        onNoCode: (error) => {
+            if (captureSignIn === listener) captureSignIn = null;
+            console.error(`[clipwise-recorder] sign-in: ${error}`);
             setupSignInFinished(false);
-            return;
-        }
-        exchangeCaptureCode(server, code, redirectUri, verifier);
+        },
+        onCode: (code) => {
+            if (captureSignIn === listener) captureSignIn = null;
+            exchangeCaptureCode(server, code, redirectUri, verifier);
+        },
     });
     listener.listen(0, '127.0.0.1', () => {
         redirectUri = `http://127.0.0.1:${listener.address().port}/callback`;
