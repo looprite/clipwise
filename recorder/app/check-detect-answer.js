@@ -10,8 +10,8 @@
 // autostopFeed, autostopCheckHolders): capture_start, the trigger's in_stop,
 // the grace timer's expiry, then a holder check without the trigger's key.
 //
-// No Electron, no micwatch, no timers, no files: no app name, keychain item or
-// support folder.
+// No Electron, no micwatch, no timers. It reads main.js as text and writes
+// nothing: no app name, keychain item or support folder.
 //
 // Usage (the Node the app ships, then any Node):
 //   ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/Electron.app/Contents/MacOS/Electron check-detect-answer.js
@@ -21,6 +21,7 @@
 
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const { startForAnswer } = require(path.join(__dirname, 'detect-answer.js'));
 const autostop = require(path.join(__dirname, 'autostop.js'));
@@ -115,6 +116,62 @@ function main() {
         result(a.start === true && r.phase === 'watching' && stoppedAuto(r),
             'late "record", app on the mic: that capture is watched and auto-stops when the app lets go',
             `phase ${r.phase}, stops ${show(r.stops)}`);
+    }
+
+    // "Always record" while the prompt is live, but the app has already let go
+    // of the mic: the call is over, so nothing starts. Started anyway, the
+    // capture would begin with the trigger and no pids (autostopBegin reads them
+    // from detectActive, which the release emptied) and could never auto-stop.
+    {
+        const a = startForAnswer({ choice: 'record', live: true, holding: false, key: KEY, name: NAME });
+        result(a.start === false && a.trigger === null,
+            '"record" while the prompt is live but the app has let go of the mic: no start, trigger null',
+            `got ${show(a)}`);
+    }
+
+    // The "record" decision is still saved when nothing starts, so the app's
+    // next use of the mic goes through the allowed-app path, which starts with
+    // the trigger. main.js needs Electron, so this reads it as text (as
+    // check-consent and check-log-lines do): in answerDetectPrompt the decision
+    // is saved before startForAnswer decides; in handleDetectEvent the in_start's
+    // pid goes into detectActive, then an allowed app sets pendingStartTrigger to
+    // { key, name } and starts. Then that trigger, with the pid autostopBegin
+    // would read, runs through autostop.step.
+    {
+        const MAIN = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+        const body = (src, fn) => {
+            const i = src.indexOf(`function ${fn}(`);
+            if (i < 0) return '';
+            const j = src.indexOf('\n}\n', i);
+            return j < 0 ? '' : src.slice(i, j);
+        };
+        const inOrder = (text, parts) => {
+            let at = 0;
+            for (const p of parts) {
+                const k = text.indexOf(p, at);
+                if (k < 0) return false;
+                at = k + p.length;
+            }
+            return true;
+        };
+        const SAVED = ["if (choice === 'record') {", "setAppDecision(key, 'record', name);", 'startForAnswer('];
+        const ALLOWED = ['detectActive.get(key).set(ev.pid', 'const decision = appDecision(key);',
+            "if (decision === 'record') {", 'pendingStartTrigger = { key, name: detectName(ev) };', 'startRecording();'];
+        const saved = inOrder(body(MAIN, 'answerDetectPrompt'), SAVED);
+        const allowed = inOrder(body(MAIN, 'handleDetectEvent'), ALLOWED);
+        const MAIN_LINE = (needle) => MAIN.split('\n').findIndex((l) => l.includes(needle)) + 1;
+        console.log(`      allowed-app path: main.js:${MAIN_LINE("if (decision === 'record') {")} `
+            + `pendingStartTrigger at main.js:${MAIN_LINE('pendingStartTrigger = { key, name: detectName(ev) };')}; `
+            + `decision saved at main.js:${MAIN_LINE("setAppDecision(key, 'record', name);")}`);
+        // Control for the text read: the same order test on a copy with the
+        // trigger line taken out finds it missing.
+        const without = body(MAIN, 'handleDetectEvent').replace('pendingStartTrigger = { key, name: detectName(ev) };', '');
+        const controlCaught = !inOrder(without, ALLOWED);
+        const r = runAutostop({ key: KEY, name: NAME });
+        result(saved && allowed && controlCaught && r.phase === 'watching' && stoppedAuto(r),
+            '"record" saved, then the app takes the mic again: the allowed-app path starts with the trigger, and that capture auto-stops',
+            `decision saved first ${saved}, allowed path sets the trigger ${allowed}, control (trigger line removed) caught ${controlCaught}; `
+            + `phase ${r.phase}, stops ${show(r.stops)}`);
     }
 
     // Controls: answers that start nothing.
