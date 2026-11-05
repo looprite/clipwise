@@ -78,6 +78,8 @@ const { revokeRefreshToken } = require('./capture-sign-out.js');
 const { postCaptureTokenForm, refreshCaptureTokens } = require('./capture-refresh.js');
 // The sign-in's loopback listener (SAA-268).
 const { createSignInListener } = require('./capture-sign-in.js');
+// Whether a detection prompt's answer starts a capture, and its trigger (SAA-269).
+const { startForAnswer } = require('./detect-answer.js');
 
 // --- constants ------------------------------------------------------------
 // All measurements come from 5-second captures on 2026-08-09. A long
@@ -2406,15 +2408,17 @@ function answerDetectPrompt(key, choice) {
     }
     if (choice === 'record') {
         setAppDecision(key, 'record', name);
-        if (live) {
-            startRecording();
-            return;
-        }
-        // Late. If the application is still holding the microphone the call is
-        // still going, so the click means what it said and the capture starts.
-        if (detectActive.has(key)) {
-            notify('detect-lapsed-started', 'Clipwise: starting now',
-                `That prompt had lapsed, but ${displayName} is still using the microphone — recording now.`);
+        // Whether this starts a capture, and with which trigger app
+        // (detect-answer.js, SAA-269). Late, if the application is still holding
+        // the microphone the call is still going, so the click means what it
+        // said and the capture starts.
+        const answer = startForAnswer({ choice, live, holding: detectActive.has(key), key, name });
+        if (answer.start) {
+            if (!live) {
+                notify('detect-lapsed-started', 'Clipwise: starting now',
+                    `That prompt had lapsed, but ${displayName} is still using the microphone — recording now.`);
+            }
+            pendingStartTrigger = answer.trigger;
             startRecording();
             return;
         }

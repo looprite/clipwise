@@ -212,6 +212,10 @@ cp "$APP_SRC/capture-refresh.js" "$C/Resources/app/capture-refresh.js"
 # The sign-in's loopback listener (SAA-268). main.js requires it by relative
 # path; a bundle without it fails to launch.
 cp "$APP_SRC/capture-sign-in.js" "$C/Resources/app/capture-sign-in.js"
+# Whether a detection prompt's answer starts a capture, and its trigger
+# (SAA-269). main.js requires it by relative path; a bundle without it fails to
+# launch.
+cp "$APP_SRC/detect-answer.js" "$C/Resources/app/detect-answer.js"
 # Delete from the trash (SAA-243 item 7). main.js requires it by relative path;
 # a bundle without it fails to launch.
 cp "$APP_SRC/capture-files.js" "$C/Resources/app/capture-files.js"
