@@ -321,6 +321,9 @@ const CASES = [
     ['build-app.sh copies capture-refresh.js into the bundle (main.js requires it)', () =>
         /cp "\$APP_SRC\/capture-refresh\.js" "\$C\/Resources\/app\/capture-refresh\.js"/.test(BUILD)
         && SRC.includes("require('./capture-refresh.js')")],
+    ['build-app.sh copies capture-sign-in.js into the bundle (main.js requires it)', () =>
+        /cp "\$APP_SRC\/capture-sign-in\.js" "\$C\/Resources\/app\/capture-sign-in\.js"/.test(BUILD)
+        && SRC.includes("require('./capture-sign-in.js')")],
     ['wake from sleep: powerMonitor\'s resume logs and reschedules the capture-token refresh from the clock', () =>
         /const \{[^}]*\bpowerMonitor\b[^}]*\} = require\('electron'\);/.test(SRC)
         && /powerMonitor\.on\('resume', \(\) => \{\s*if \(!captureTokens\) return;\s*console\.error\(`\[clipwise-recorder\] capture token: resumed from sleep, refresh in \$\{captureRefreshDelay\(\)\} ms`\);\s*scheduleCaptureRefresh\(\);\s*\}\);/.test(SRC)
