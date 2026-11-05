@@ -31,21 +31,26 @@ function result(ok, name, detail) {
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
-// A fresh listener on 127.0.0.1, counting onCode runs and accepted connections.
+// A fresh listener on 127.0.0.1, counting onCode, onNoCode and onRepeat runs
+// (onRepeat by how many arguments it was given) and accepted connections.
 async function start() {
     const codes = [];
     const noCodes = [];
+    const repeats = [];
     const listener = createSignInListener({
         state: STATE,
         onCode: (code) => codes.push(code),
         onNoCode: (error) => noCodes.push(error),
+        onRepeat: (...args) => repeats.push(args.length),
     });
     let connections = 0;
     listener.on('connection', () => { connections++; });
     await new Promise((resolve) => listener.listen(0, '127.0.0.1', resolve));
     const port = listener.address().port;
-    return { listener, port, codes, noCodes, connections: () => connections };
+    return { listener, port, codes, noCodes, repeats, connections: () => connections };
 }
+// onRepeat ran exactly once, and was given nothing (so no code or state to log).
+const repeatedOnce = (s) => s.repeats.length === 1 && s.repeats[0] === 0;
 
 // Each case destroys its own agent or sockets first, so close() leaves nothing open.
 function stop(listener) {
@@ -108,11 +113,16 @@ async function main() {
         result(r.status === 200 && /Signed in to Clipwise/.test(r.body) && s.codes.length === 1 && s.codes[0] === 'code-one',
             'one matching request: 200, the page says signed in, onCode ran exactly once with its code',
             `status ${r.status ?? r.error}, onCode ran ${s.codes.length} time(s)`);
+        result(s.repeats.length === 0,
+            'one matching request: onRepeat never runs',
+            `onRepeat ran ${s.repeats.length} time(s)`);
         agent.destroy();
         stop(s.listener);
     }
 
-    // 2. Wrong state: 404, and onCode never runs (control).
+    // 2. Wrong state: 404, and onCode never runs (control). Then a matching
+    //    request on the same listener is still the first: a wrong state is not
+    //    an answer.
     {
         const s = await start();
         const agent = new http.Agent({ keepAlive: false });
@@ -121,6 +131,14 @@ async function main() {
         result(r.status === 404 && s.codes.length === 0 && s.noCodes.length === 0,
             'wrong state: 404, and neither onCode nor onNoCode runs',
             `status ${r.status ?? r.error}, onCode ran ${s.codes.length} time(s)`);
+        result(s.repeats.length === 0,
+            'wrong state: onRepeat never runs',
+            `onRepeat ran ${s.repeats.length} time(s)`);
+        const after = await get(s.port, callback('code-after'), agent);
+        await settle();
+        result(after.status === 200 && /Signed in to Clipwise/.test(after.body) && s.codes.length === 1 && s.codes[0] === 'code-after' && s.repeats.length === 0,
+            'wrong state sets nothing: a matching request after it is exchanged, not treated as a repeat',
+            `status ${after.status ?? after.error}, onCode ran ${s.codes.length} time(s), onRepeat ran ${s.repeats.length} time(s)`);
         agent.destroy();
         stop(s.listener);
     }
@@ -139,6 +157,9 @@ async function main() {
         result(s.codes.length === 1 && pages,
             'two matching GETs on one keep-alive connection: onCode runs once, and both replies are 200 with the signed-in page',
             `onCode ran ${s.codes.length} time(s); both signed-in pages: ${pages}; ${shape}`);
+        result(repeatedOnce(s),
+            'keep-alive repeat: onRepeat runs exactly once, given nothing',
+            `onRepeat ran ${s.repeats.length} time(s), arguments ${JSON.stringify(s.repeats)}`);
         agent.destroy();
         stop(s.listener);
     }
@@ -153,8 +174,28 @@ async function main() {
         result(s.codes.length === 1 && ra === 200 && rb === 200,
             'two matching GETs on two connections opened together: onCode runs once, and both replies are 200',
             `onCode ran ${s.codes.length} time(s); replies ${ra} and ${rb}, connections ${s.connections()}`);
+        result(repeatedOnce(s),
+            'two-connection repeat: onRepeat runs exactly once, given nothing',
+            `onRepeat ran ${s.repeats.length} time(s), arguments ${JSON.stringify(s.repeats)}`);
         a.destroy();
         b.destroy();
+        stop(s.listener);
+    }
+
+    // 5. A callback with no code is the answer too: a later one with a code on
+    //    the same keep-alive connection is a repeat, gets the first page, and is
+    //    not exchanged.
+    {
+        const s = await start();
+        const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+        const first = await get(s.port, `/callback?error=access_denied&state=${STATE}`, agent);
+        const second = await get(s.port, callback('code-late'), agent);
+        await settle();
+        result(first.status === 200 && /did not finish/.test(first.body) && s.noCodes.length === 1 && s.noCodes[0] === 'access_denied'
+            && second.status === 200 && /did not finish/.test(second.body) && s.codes.length === 0 && repeatedOnce(s),
+            'no-code callback, then one with a code: onNoCode once, onCode never, onRepeat once, both pages say it did not finish',
+            `first ${first.status ?? first.error}, second ${second.status ?? second.error}; onNoCode ${s.noCodes.length}, onCode ${s.codes.length}, onRepeat ${s.repeats.length}`);
+        agent.destroy();
         stop(s.listener);
     }
 

@@ -3100,6 +3100,11 @@ function signInToCaptureServer() {
             if (captureSignIn === listener) captureSignIn = null;
             exchangeCaptureCode(server, code, redirectUri, verifier);
         },
+        // The browser came back again with this sign-in's state (SAA-268): not
+        // exchanged. A fixed line: no code, state or token.
+        onRepeat: () => {
+            console.error('[clipwise-recorder] sign-in: repeat callback ignored');
+        },
     });
     listener.listen(0, '127.0.0.1', () => {
         redirectUri = `http://127.0.0.1:${listener.address().port}/callback`;
