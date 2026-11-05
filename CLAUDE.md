@@ -25,7 +25,7 @@ The packaged app at `recorder/app/dist/Clipwise.app` runs a copy of `main.js`,
 same holds for each window's page script and preload (`identity-page.js`,
 `identity-preload.js`, `meetings-page.js`, `meetings-preload.js`,
 `setup-page.js`, `setup-preload.js`, `voice-prints-page.js`,
-`voice-prints-preload.js`) and for `identity-rules.js` and `capture-sign-in.js`. After
+`voice-prints-preload.js`) and for `identity-rules.js`, `capture-sign-in.js` and `detect-answer.js`. After
 any change to those, run `recorder/app/build-app.sh` AND relaunch the app —
 the running bundle keeps the code it was built from. Symptom of skipping it is
 an edit that changes nothing: the prompt, the stop path or the hotkeys behave

@@ -2409,9 +2409,9 @@ function answerDetectPrompt(key, choice) {
     if (choice === 'record') {
         setAppDecision(key, 'record', name);
         // Whether this starts a capture, and with which trigger app
-        // (detect-answer.js, SAA-269). Late, if the application is still holding
-        // the microphone the call is still going, so the click means what it
-        // said and the capture starts.
+        // (detect-answer.js, SAA-269). If the application is still holding the
+        // microphone the call is still going, so the click means what it said
+        // and the capture starts, live or late.
         const answer = startForAnswer({ choice, live, holding: detectActive.has(key), key, name });
         if (answer.start) {
             if (!live) {
@@ -2422,10 +2422,12 @@ function answerDetectPrompt(key, choice) {
             startRecording();
             return;
         }
-        // The call is genuinely over, which is the case the expiry exists for.
-        // Nothing is recorded — there is nothing left to record — and the one
-        // thing that must not happen is silence about it.
-        notify('detect-lapsed-nothing', 'Clipwise: that prompt had lapsed',
+        // The call is genuinely over: after the prompt lapsed (the case the
+        // expiry exists for), or while it was still up (SAA-269). Nothing is
+        // recorded — there is nothing left to record — and the one thing that
+        // must not happen is silence about it. Only the title differs: a prompt
+        // still up had not lapsed.
+        notify('detect-lapsed-nothing', live ? 'Clipwise: nothing to record' : 'Clipwise: that prompt had lapsed',
             `${displayName} is no longer using the microphone, so nothing was recorded. `
             + 'Clipwise will record it automatically from now on.');
     }
