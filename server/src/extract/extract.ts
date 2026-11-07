@@ -52,7 +52,7 @@ Moment kinds:
 - decision — a conclusion reached, an action committed
 - discussion — a topic being worked through, without a firm decision
 - question — an open question or unknown flagged
-- commitment — someone commits to do something (name the person)
+- commitment — a person takes something on, or accepts a request, in their own words (name that person). A suggestion, or a request for someone else to act, is a discussion, not a commitment
 - initiative — a plan or project spanning beyond this meeting
 - observation — a factual claim about the world, the business, or a person
 - tangent — off-topic content worth recording (weekend plans, jokes, banter)
