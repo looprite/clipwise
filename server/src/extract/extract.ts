@@ -17,6 +17,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
+import { micSharedIn } from "../ingest/identity.js";
+import { nameKey } from "../routes/capture-people.js";
 import { runCollapse, type CollapseInput, type CollapseResult } from "./collapse.js";
 import { embedMomentsByIds, type Embedder } from "./embeddings.js";
 import { isApiPushback, runBoundedPool } from "./pass2-pool.js";
@@ -87,6 +89,40 @@ Never name a specific individual as the one who said, did, agreed to, committed 
 The one exception is naming someone strictly as the target or subject of an unnamed participant's action — someone a task is directed at or a fact is about, not someone credited with doing anything themselves in this call (e.g. "flagged the ask to Juan", "waiting on approval from Daniela and Mike"). Use an exact name from the attendee list above for this only when you are confident of the spelling; otherwise leave it out too.
 
 Set \`speakers\` to the raw track label(s) only ("me" and/or "them"), never a person's name. Never write a raw track label into the title or summary as if it were a person's name (e.g. never write "Speaker will...").`;
+}
+
+// A call whose identity answer marks the mic as shared (SAA-224 11-06: "Someone
+// else spoke into my mic"). `me` is left unnamed at ingest, so the model sees
+// "me" lines beside lines under people's names, and an attendee list that holds
+// the member. Without this it can credit a "me" line to the member, or to the
+// person beside them, from the roster alone. hostName is the host attendee's
+// name, or null when the answer gave none.
+type SharedMic = { hostName: string | null; otherNames: string[] };
+
+function sharedMicGuard(shared: SharedMic): string {
+  const host = shared.hostName ? ` That includes ${shared.hostName}, who recorded the call.` : "";
+  return `The person who recorded this call said someone else also spoke into their microphone. Every line labelled "me" may be either of them, and nothing in the transcript tells which. Never credit a "me" line to a named person as the one who said, agreed to, committed to or was asked to do something.${host} Write those without naming anyone ("someone on the recorder's side offered to...").
+
+Lines under a person's name are still that person's. In \`speakers\`, use "me" for the "me" lines, never a person's name.`;
+}
+
+function sharedMicSpanGuard(): string {
+  return `\n\nSomeone else also spoke into the recorder's microphone, so a "me" line may be the recorder or that person. Do not name a specific individual in a span label as the one who said or did something on a "me" line; describe the topic instead.`;
+}
+
+// The host's name, and their first name alone, out of `speakers` on a marked
+// call. The first name stays when another attendee on the call has the same
+// one: then it may be that person's.
+function withoutHost(speakers: string[], shared: SharedMic): string[] {
+  const full = nameKey(shared.hostName);
+  if (!full) return speakers;
+  const firstOf = (name: string | null | undefined) => nameKey((name ?? "").trim().split(/\s+/)[0]);
+  const first = firstOf(shared.hostName);
+  const firstShared = shared.otherNames.some((n) => firstOf(n) === first);
+  return speakers.filter((s) => {
+    const key = nameKey(s);
+    return key !== full && (firstShared || key !== first);
+  });
 }
 
 type Segment = {
@@ -219,6 +255,26 @@ async function loadAttendeeNames(recordingId: string): Promise<string[]> {
   return rows.map((r) => r.name).filter((n): n is string => !!n && n.trim().length > 0);
 }
 
+// Null unless the recording's stored answer marks the mic as shared; then the
+// host attendee's name and the other attendees' names.
+async function loadSharedMic(recordingId: string): Promise<SharedMic | null> {
+  const [rec] = await db
+    .select({ metadata: schema.recordings.metadata })
+    .from(schema.recordings)
+    .where(eq(schema.recordings.id, recordingId));
+  if (!rec || !micSharedIn(rec.metadata)) return null;
+  const rows = await db
+    .select({ name: schema.attendees.name, isHost: schema.attendees.isHost })
+    .from(schema.attendees)
+    .where(eq(schema.attendees.recordingId, recordingId));
+  const named = (r: { name: string | null }) => typeof r.name === "string" && r.name.trim().length > 0;
+  const host = rows.find((r) => r.isHost && named(r));
+  return {
+    hostName: host ? (host.name ?? "").trim() : null,
+    otherNames: rows.filter((r) => !r.isHost && named(r)).map((r) => (r.name ?? "").trim()),
+  };
+}
+
 async function loadRecording(recordingId: string): Promise<{ accountId: string; title: string | null }> {
   const [row] = await db
     .select({
@@ -268,6 +324,7 @@ async function runPass1(
   segCount: number,
   identityResolved: boolean,
   attendeeNames: string[],
+  sharedMic: SharedMic | null = null,
 ): Promise<Span[]> {
   const tool = {
     name: "emit_spans",
@@ -293,9 +350,9 @@ async function runPass1(
     },
   } as const;
 
-  const system = identityResolved
-    ? TOPIC_SEGMENTATION_SYSTEM
-    : TOPIC_SEGMENTATION_SYSTEM + unresolvedIdentitySpanGuard(attendeeNames);
+  const system =
+    (identityResolved ? TOPIC_SEGMENTATION_SYSTEM : TOPIC_SEGMENTATION_SYSTEM + unresolvedIdentitySpanGuard(attendeeNames)) +
+    (sharedMic ? sharedMicSpanGuard() : "");
 
   const resp = await client.messages.create({
     model: MODEL,
@@ -340,6 +397,7 @@ async function runPass2(
   identityResolved: boolean,
   attendeeNames: string[],
   signal?: AbortSignal,
+  sharedMic: SharedMic | null = null,
 ): Promise<ExtractedMoment[]> {
   const spanSegs = segs.filter(
     (s) =>
@@ -392,9 +450,9 @@ async function runPass2(
     },
   } as const;
 
-  const system = identityResolved
-    ? MOMENT_EXTRACTION_SYSTEM
-    : `${MOMENT_EXTRACTION_SYSTEM}\n\n${unresolvedIdentityGuard(attendeeNames)}`;
+  const system =
+    (identityResolved ? MOMENT_EXTRACTION_SYSTEM : `${MOMENT_EXTRACTION_SYSTEM}\n\n${unresolvedIdentityGuard(attendeeNames)}`) +
+    (sharedMic ? `\n\n${sharedMicGuard(sharedMic)}` : "");
 
   // SAA-193: the tool_use input's `moments` field has been observed in
   // production to come back not-an-array — the schema above requests one,
@@ -455,9 +513,12 @@ async function runPass2(
           // field we can enforce in code rather than trust to compliance —
           // drop anything that isn't literally "me" or "them" instead of
           // storing a name the mapping never verified.
-          const speakers = identityResolved
+          const tracksOnly = identityResolved
             ? (r.speakers ?? [])
             : (r.speakers ?? []).filter((s) => s === "me" || s === "them");
+          // On a marked call the host's name never lands in speakers either:
+          // a structured field, so enforced here rather than trusted.
+          const speakers = sharedMic ? withoutHost(tracksOnly, sharedMic) : tracksOnly;
           return {
             kind: r.kind,
             title: r.title,
@@ -758,8 +819,9 @@ export async function runExtraction(
   }
   const identityResolved = await loadIdentityResolved(recordingId);
   const attendeeNames = await loadAttendeeNames(recordingId);
+  const sharedMic = await loadSharedMic(recordingId);
   console.log(
-    `extract: identity resolved for this recording: ${identityResolved} (${attendeeNames.length} attendee(s))`,
+    `extract: identity resolved for this recording: ${identityResolved} (${attendeeNames.length} attendee(s)), mic shared: ${sharedMic !== null}`,
   );
   // SAA-197: same point in time loadSegments rendered speaker labels from —
   // see the comparison near promoteRecording below.
@@ -771,7 +833,7 @@ export async function runExtraction(
   console.log(`extract: recording ${recordingId} — ${segs.length} segments`);
   console.log(`extract: run uuid ${runUuid}`);
   console.log(`extract: pass 1 (topic segmentation) starting`);
-  const spans = await runPass1(client, rendered, segs.length, identityResolved, attendeeNames);
+  const spans = await runPass1(client, rendered, segs.length, identityResolved, attendeeNames, sharedMic);
   console.log(`extract: pass 1 emitted ${spans.length} spans`);
 
   // Assert spans tile [0, segCount-1]. Report gaps and overlaps loudly;
@@ -823,7 +885,7 @@ export async function runExtraction(
   const pass2Moments = await runBoundedPool(
     spans,
     (span, _i, signal) =>
-      runPass2(client, rendered, span, segs, identityResolved, attendeeNames, signal),
+      runPass2(client, rendered, span, segs, identityResolved, attendeeNames, signal, sharedMic),
     {
       cap: PASS2_CONCURRENCY,
       maxRequeues: PASS2_MAX_REQUEUES,

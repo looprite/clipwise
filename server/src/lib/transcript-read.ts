@@ -5,6 +5,7 @@
 
 import { and, asc, eq, isNotNull, isNull } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { micSharedIn } from "../ingest/identity.js";
 import { buildTurns, formatTranscriptFile, suggestedFileName, UNATTRIBUTED } from "./transcript-file.js";
 
 export type TranscriptSegmentRow = {
@@ -70,10 +71,12 @@ export async function buildTranscriptFile(recordingId: string, timeZone?: string
       title: schema.recordings.title,
       startedAt: schema.recordings.startedAt,
       durationSec: schema.recordings.durationSec,
+      metadata: schema.recordings.metadata,
     })
     .from(schema.recordings)
     .where(and(eq(schema.recordings.id, recordingId), isNull(schema.recordings.trashedAt)));
   if (!recording) return null;
+  const micShared = micSharedIn(recording.metadata);
 
   const [host] = await db
     .select({ name: schema.attendees.name })
@@ -91,11 +94,12 @@ export async function buildTranscriptFile(recordingId: string, timeZone?: string
   const input = {
     title: recording.title,
     hostName: host?.name ?? null,
+    micShared,
     startedAt: recording.startedAt,
     durationSec: recording.durationSec,
     segments,
   };
-  const turns = buildTurns(segments, host?.name ?? null);
+  const turns = buildTurns(segments, host?.name ?? null, micShared);
   return {
     text: segments.length > 0 ? formatTranscriptFile(input, timeZone) : "",
     suggestedFileName: suggestedFileName(input, timeZone),

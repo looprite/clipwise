@@ -6,6 +6,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { AccessContext } from "../access/context.js";
 import { recordingVisibleTo } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
+import { micSharedIn } from "../ingest/identity.js";
 import { HttpError } from "../lib/http.js";
 import { readTranscript } from "../lib/transcript-read.js";
 import { pageTranscript, type Page, type PageRequest } from "./transcript-page.js";
@@ -40,6 +41,7 @@ export async function getTranscriptPage(
       title: schema.recordings.title,
       startedAt: schema.recordings.startedAt,
       durationSec: schema.recordings.durationSec,
+      metadata: schema.recordings.metadata,
     })
     .from(schema.recordings)
     .where(
@@ -61,6 +63,7 @@ export async function getTranscriptPage(
     title: recording.title,
     startedAt: recording.startedAt,
     durationSec: recording.durationSec,
-    page: pageTranscript(segments, host?.name ?? null, req),
+    // A shared mic's `me` lines are unattributed (lib/transcript-file.ts).
+    page: pageTranscript(segments, host?.name ?? null, req, micSharedIn(recording.metadata)),
   };
 }

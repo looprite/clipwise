@@ -26,6 +26,10 @@
 //                                            host — Decision 5, and what
 //                                            applySpeakerNames does too); else
 //                                            "Unnamed voice N" (next free N)
+//   - `me` on a call whose answer marks   -> "Unattributed", whatever the row
+//     the mic as shared (SAA-224)            says: the mic carried the member
+//                                            and someone else, so no line of it
+//                                            is the member's for certain
 //   - no speaker row at all               -> "Unattributed"
 // Never "me", "them" or "Voice N" as a speaker, even if a display name was
 // typed as one of those.
@@ -43,6 +47,8 @@ export type FileInput = {
   // The recording's host attendee name, if it has one. Only used for a `me`
   // speaker row that carries no display name of its own.
   hostName?: string | null;
+  // The answer marks the mic as shared (ingest/identity.ts micSharedIn).
+  micShared?: boolean;
   startedAt: Date | null;
   durationSec: number | null;
   segments: FileSegment[];
@@ -68,7 +74,7 @@ function cleanName(name: string | null | undefined): string | null {
 }
 
 // One resolved name per speaker label present in the segments.
-export function resolveSpeakerNames(segments: FileSegment[], hostName?: string | null): Map<string | null, string> {
+export function resolveSpeakerNames(segments: FileSegment[], hostName?: string | null, micShared = false): Map<string | null, string> {
   const named = new Map<string | null, string | null>();
   for (const s of segments) {
     if (!named.has(s.speakerLabel)) named.set(s.speakerLabel, cleanName(s.speakerDisplayName));
@@ -92,6 +98,7 @@ export function resolveSpeakerNames(segments: FileSegment[], hostName?: string |
   // Voices first (their own numbers), then `them`, then `me`.
   const order = (l: string | null) => (l !== null && VOICE_LABEL.test(l) ? 0 : l === "them" ? 1 : l === "me" ? 2 : 3);
   for (const label of labels.sort((a, b) => order(a) - order(b))) {
+    if (micShared && label === "me") { out.set(label, UNATTRIBUTED); continue; }
     const name = named.get(label) ?? null;
     if (name) { out.set(label, name); continue; }
     const m = label === null ? null : VOICE_LABEL.exec(label);
@@ -116,8 +123,8 @@ export function formatTimestamp(sec: number): string {
 
 export type Turn = { startSec: number; name: string; text: string };
 
-export function buildTurns(segments: FileSegment[], hostName?: string | null): Turn[] {
-  const names = resolveSpeakerNames(segments, hostName);
+export function buildTurns(segments: FileSegment[], hostName?: string | null, micShared = false): Turn[] {
+  const names = resolveSpeakerNames(segments, hostName, micShared);
   // Both tracks interleaved by start time; ties keep the stored order.
   const ordered = segments
     .map((s, i) => ({ s, i }))
@@ -146,7 +153,7 @@ export function formatMinutes(durationSec: number): string {
 }
 
 export function formatTranscriptFile(input: FileInput, timeZone?: string): string {
-  const turns = buildTurns(input.segments, input.hostName);
+  const turns = buildTurns(input.segments, input.hostName, input.micShared === true);
   const lastEnd = input.segments.reduce((m, s) => Math.max(m, s.endSec), 0);
   const duration = input.durationSec && input.durationSec > 0 ? input.durationSec : lastEnd;
   const when = input.startedAt ? `${dateParts(input.startedAt, timeZone).long} · ` : "";
