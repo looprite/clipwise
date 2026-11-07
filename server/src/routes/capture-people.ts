@@ -16,6 +16,12 @@
 //                          No q is the most recent people. { people: [{ id,
 //                          name }] }: never an address, a date or a count, and
 //                          no person whose name holds an @.
+//                          ?scope=work|personal (SAA-260 11-07, the window's
+//                          Recent row): with no q, only people seen on a call
+//                          of that scope, most recently seen there first. A
+//                          call with no scope counts for neither. A typed q is
+//                          never narrowed by scope: the window searches
+//                          everyone the member can see. No scope: as before.
 //
 // Nothing here creates a person. A person is created where it is linked to a
 // recording (SAA-260 step 2, at ingest), because one created before that is
@@ -84,7 +90,9 @@ export const captureMeGet: RequestHandler = asyncHandler(async (req, res) => {
   res.json({ displayName: displayNameFor(row?.displayName) });
 });
 
-const searchQuerySchema = z.object({ q: z.string().max(MAX_NAME_LENGTH).optional() }).strict();
+const searchQuerySchema = z
+  .object({ q: z.string().max(MAX_NAME_LENGTH).optional(), scope: z.enum(["work", "personal"]).optional() })
+  .strict();
 
 export const capturePeopleGet: RequestHandler = asyncHandler(async (req, res) => {
   const ctx = accessOf(req);
@@ -97,6 +105,8 @@ export const capturePeopleGet: RequestHandler = asyncHandler(async (req, res) =>
   // The stored name NFC too, so a decomposed stored name matches a composed
   // typed one (SAA-260 step 2).
   const comparable = sql`lower(regexp_replace(btrim(normalize(${p.name}, NFC)), '\\s+', ' ', 'g'))`;
+  // Recent for one scope: an empty q with a scope.
+  const scope = !typed && query.scope ? query.scope : null;
   // Correlated on the outer people row. recordingVisibleTo names the recordings
   // table by its own name, so the join uses it unaliased.
   const seen = sql`(
@@ -107,7 +117,7 @@ export const capturePeopleGet: RequestHandler = asyncHandler(async (req, res) =>
       select ${schema.invitees.recordingId} as recording_id from ${schema.invitees} where ${schema.invitees.personId} = ${p.id}
     ) as linked
     join ${r} on ${r.id} = linked.recording_id
-    where ${r.trashedAt} is null and ${recordingVisibleTo(ctx)}
+    where ${r.trashedAt} is null and ${recordingVisibleTo(ctx)}${scope ? sql` and ${r.scope} = ${scope}` : sql``}
   )`;
   const rows = await db
     .select({ id: p.id, name: p.name })
@@ -119,6 +129,7 @@ export const capturePeopleGet: RequestHandler = asyncHandler(async (req, res) =>
         sql`btrim(${p.name}) <> ''`,
         sql`position('@' in ${p.name}) = 0`,
         typed ? sql`${comparable} like ${`%${escapeLike(typed)}%`} escape '\\'` : undefined,
+        scope ? sql`${seen} is not null` : undefined,
       ),
     )
     .orderBy(sql`${seen} desc nulls last`, sql`lower(btrim(${p.name}))`, p.id)
