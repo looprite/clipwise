@@ -93,6 +93,7 @@
     padding: 0 4px 0 8px; border-radius: 11px; background: var(--chip-bg); font-size: 12px; }
   .chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chip .tag { color: var(--muted); font-size: 10px; }
+  .chip .add-name { color: var(--accent); font-size: 10px; white-space: nowrap; }
   .chip[data-email]:not([data-named]) { cursor: pointer; }
   .chip input { width: 150px; height: 18px; padding: 0 4px; font-size: 12px;
     border: 1px solid var(--field-border); border-radius: 4px; background: var(--field-bg); user-select: text; }
@@ -134,6 +135,9 @@
     border: 1px solid var(--field-border); border-radius: 5px; background: var(--field-bg); }
   .voice-row .quote { color: var(--muted); font-size: 11px; margin-top: 2px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .voice-row .no-clip { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  #prints-nudge { margin: 0 0 6px; }
+  #prints-nudge[hidden] { display: none; }
   .voice-row .add input { width: 100%; margin-top: 4px; padding: 3px 6px; font-size: 12px;
     border: 1px solid var(--field-border); border-radius: 5px; background: var(--field-bg); user-select: text; }
   #voices-links { display: flex; gap: 10px; font-size: 12px; }
@@ -170,7 +174,8 @@
 
   <div class="section" id="voices-part" hidden>
     <span class="section-label">Voices on the call</span>
-    <div id="voices-finding">Finding voices…</div>
+    <p class="note" id="prints-nudge" hidden>Voice recognition is off. <button type="button" class="link" id="prints-nudge-open">Recognize voices…</button></p>
+    <div id="voices-finding">Finding voices… You can save now; Clipwise will ask you to name them from the menu bar.</div>
     <div id="voice-rows"></div>
     <div id="voices-links"></div>
   </div>

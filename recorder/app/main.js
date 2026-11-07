@@ -4111,7 +4111,8 @@ function registerIdentityIpc() {
 
     // What the page starts from: the saved answer when it reopens one (correct,
     // voices), with any guest or self name holding an @ dropped (answerForPage),
-    // the voice names already saved, and the cached host name.
+    // the voice names already saved, the cached host name, and whether voice
+    // prints are on (the voices part's "Recognize voices…" shows while off).
     ipcMain.handle('identity:init', (_event, payload) => {
         const capture = currentCapture(payload && payload.token);
         if (!capture) return null;
@@ -4121,6 +4122,7 @@ function registerIdentityIpc() {
             saved: mode === 'correct' || mode === 'voices' ? answerForPage(readAnswer(OUTDIR, capture.stem)) : null,
             voiceNames: readVoiceNamesAnswer(OUTDIR, capture.stem),
             cachedSelf: readSelfName(),
+            printsOn: voicePrintsOn(),
         };
     });
 
@@ -4158,15 +4160,19 @@ function registerIdentityIpc() {
     // (signed out, offline, a refused token), and the page tags a typed name
     // "not checked" instead of "new". Anything thrown on the way to the server
     // counts the same. Nothing about the query or the people is logged.
+    // Recent's scope (SAA-260 11-07): sent with an empty q only, and only a
+    // scope the member picked; a typed search is never scoped, and with no
+    // scope picked Recent is unfiltered, as before.
     ipcMain.handle('identity:search', async (_event, payload) => {
         const capture = currentCapture(payload && payload.token);
         if (!capture) return { searched: false, results: [] };
         const q = typeof payload.q === 'string' ? payload.q.slice(0, 256) : '';
+        const scope = !q.trim() && (payload.scope === 'work' || payload.scope === 'personal') ? payload.scope : null;
         const server = signedInServer();
         if (!server) return { searched: false, results: [] };
         let reply;
         try {
-            reply = await captureServerRequest(server, 'GET', `/captures/people?q=${encodeURIComponent(q)}`);
+            reply = await captureServerRequest(server, 'GET', `/captures/people?q=${encodeURIComponent(q)}${scope ? `&scope=${scope}` : ''}`);
         } catch {
             return { searched: false, results: [] };
         }
@@ -4175,6 +4181,18 @@ function registerIdentityIpc() {
             .filter((p) => p && typeof p.id === 'string' && typeof p.name === 'string')
             .map((p) => ({ id: p.id, name: p.name }));
         return { searched: true, results };
+    });
+
+    // The voices part's "Recognize voices…", shown while prints are off (SAA-260
+    // 11-07): the tray item's opt-in window, for this window's token only. The
+    // identity window is let go from on top, so the opt-in opens in front of it;
+    // it stays open behind.
+    ipcMain.on('identity:open-voice-prints', (_event, payload) => {
+        const capture = currentCapture(payload && payload.token);
+        if (!capture) return;
+        try { identityWindow.win.setAlwaysOnTop(false); } catch {}
+        console.error(`[clipwise-recorder] identity ${capture.stem}: opening Recognize voices from the voices part`);
+        openVoicePrintsWindow();
     });
 
     // Save: the people and the scope, and the voices if their rows were on

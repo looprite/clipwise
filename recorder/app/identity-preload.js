@@ -14,7 +14,7 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
-const SEND = ['identity:resize', 'identity:submit', 'identity:skip'];
+const SEND = ['identity:resize', 'identity:submit', 'identity:skip', 'identity:open-voice-prints'];
 const INVOKE = ['identity:init', 'identity:me', 'identity:search'];
 const ON = ['identity:calendar', 'identity:voices', 'identity:voices-stopped'];
 

@@ -67,6 +67,8 @@ let addingFor = null;          // { voiceIndex, text } while "Add someone…" is
 let savedVoiceNames = [];      // names a rename starts from (voice-names-<stem>.json)
 const choices = new Map();     // voiceIndex -> name | null
 let saving = false;
+let printsOff = false;         // voice prints are off (identity:init); unknown counts as on
+const FINDING_VOICES = 'Finding voices… You can save now; Clipwise will ask you to name them from the menu bar.';
 
 // --- search ---------------------------------------------------------------
 // The last answered search, so Enter uses what the member just saw. A search
@@ -205,6 +207,8 @@ function renderChips() {
       node.appendChild(el('span', { className: 'name', text: chip.name || chip.email }));
       if (chip.tag) node.appendChild(el('span', { className: 'tag', text: chip.tag }));
       if (chip.email && !chip.name) {
+        // Known only by address: say it can be named (SAA-260 11-07, item 5).
+        node.appendChild(el('span', { className: 'add-name', text: '· add name' }));
         node.title = 'Click to name them';
         node.addEventListener('click', (e) => {
           if (e.target.closest('.remove')) return;
@@ -256,10 +260,15 @@ function renderResults(result) {
   for (const p of ia.filterSuggestions(field, result.results, 4)) box.appendChild(personButton(p));
   resizeSoon();
 }
+// The calendar filled the field: its invitees are chips, or the large-call chip
+// stands for them. Recent shows nothing then (SAA-260 11-07, item 1).
+function calendarFilled() {
+  return calendarApplied && (!!field.large || field.chips.some((c) => c.tag === 'invited'));
+}
 function renderRecent() {
   const box = $('recent');
   box.innerHTML = '';
-  if (!field || input.value.trim() || addressBox) return;
+  if (!field || input.value.trim() || addressBox || calendarFilled()) return;
   const people = ia.filterSuggestions(field, recentPeople, 4);
   if (people.length === 0) return;
   box.appendChild(el('span', { className: 'label', text: 'Recent:' }));
@@ -286,10 +295,11 @@ function renderVoices() {
   links.innerHTML = '';
   const ready = voicesReady();
   part.hidden = !(ready || groupCall());
+  $('prints-nudge').hidden = !printsOff;
   if (!ready) {
     finding.hidden = false;
     finding.textContent = voicesMessage
-      || (voices ? 'Only one other voice on this call — nothing to name.' : 'Finding voices…');
+      || (voices ? 'Only one other voice on this call — nothing to name.' : FINDING_VOICES);
     return;
   }
   finding.hidden = true;
@@ -300,7 +310,7 @@ function renderVoices() {
   const { rows, hidden } = ia.voiceRows(voices.namingData, voices.diarize, voicesExpanded ? Infinity : 2);
   for (const row of rows) rowsBox.appendChild(voiceRow(row));
   if (hidden > 0) {
-    const more = el('button', { type: 'button', id: 'voices-more', className: 'link', text: `Show them (${hidden} more)` });
+    const more = el('button', { type: 'button', id: 'voices-more', className: 'link', text: hidden === 1 ? '+1 more voice — show' : `+${hidden} more voices — show` });
     more.addEventListener('click', () => { voicesExpanded = true; render(); });
     links.appendChild(more);
   }
@@ -329,10 +339,13 @@ function voiceRow(row) {
   const idx = row.voiceIndex;
   const node = el('div', { className: 'voice-row', dataset: { voice: String(idx) } });
   const top = el('div', { className: 'top' });
-  const play = el('button', { type: 'button', className: 'play', text: '▶', title: 'Play a clip' });
-  play.disabled = row.clipPaths.length === 0;
-  play.addEventListener('click', () => playClip(idx, row.clipPaths));
-  top.appendChild(play);
+  // A voice diarize found no clean stretch for has no clip: the row says so
+  // under its name instead of a grey button (SAA-260 11-07, item 8).
+  if (row.clipPaths.length > 0) {
+    const play = el('button', { type: 'button', className: 'play', text: '▶', title: 'Play a clip' });
+    play.addEventListener('click', () => playClip(idx, row.clipPaths));
+    top.appendChild(play);
+  }
   top.appendChild(el('span', { className: 'label', text: `Voice ${idx}` }));
   top.appendChild(el('span', { className: 'talk', text: row.talk }));
 
@@ -355,6 +368,7 @@ function voiceRow(row) {
   });
   top.appendChild(select);
   node.appendChild(top);
+  if (row.clipPaths.length === 0) node.appendChild(el('div', { className: 'no-clip', text: 'No clear clip for this voice' }));
 
   const line = (row.lines || [])[0];
   if (line && typeof line.text === 'string' && line.text.trim()) {
@@ -422,6 +436,7 @@ scopeEl.addEventListener('click', (e) => {
   if (!button) return;
   setScope(button.dataset.value);
   $('scope-label').textContent = 'Personal or work?';
+  loadRecent();
   resizeSoon();
 });
 // SAA-170: only a button actually active counts; nothing is assumed.
@@ -430,6 +445,22 @@ function selectedScope() {
   if (!active) return null;
   return active.dataset.value === 'personal' ? 'personal' : 'work';
 }
+
+// The Recent row (SAA-260 11-07, item 1): GET /captures/people with an empty q
+// and the scope picked, none when none is (unfiltered, as before). Asked at
+// open and again on each scope change; a reply to an older ask is dropped.
+let recentAsk = 0;
+async function loadRecent() {
+  const ask = ++recentAsk;
+  let result = null;
+  try { result = await ipcRenderer.invoke('identity:search', { token, q: '', scope: selectedScope() }); } catch { result = null; }
+  if (ask !== recentAsk) return;
+  recentPeople = result && result.searched && Array.isArray(result.results) ? result.results : [];
+  render();
+}
+
+// "Recognize voices…" in the voices part, while prints are off.
+$('prints-nudge-open').addEventListener('click', () => ipcRenderer.send('identity:open-voice-prints', { token }));
 
 // --- size -----------------------------------------------------------------
 // The page's whole height, sent to main.js, which sizes the window to it
@@ -547,6 +578,7 @@ updateAtBlock();
     ]);
   } catch {}
   hostName = (me && me.displayName) || null;
+  printsOff = !!init && init.printsOn === false;
   const saved = init && init.saved;
   // Change attendees… with no saved answer to start from (it could not be
   // read, or init failed): nothing to correct. The field is replaced by the
@@ -578,7 +610,5 @@ updateAtBlock();
   if (pendingPrefill) applyCalendar(pendingPrefill);
   render();
   input.focus();
-  const recent = await runSearch('');
-  recentPeople = recent.searched ? recent.results : [];
-  render();
+  await loadRecent();
 })();

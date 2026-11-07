@@ -66,14 +66,17 @@
 //   #chips .chip               one per person: data-tag ("invited", "new",
 //                              "not checked" or ""), data-person-id,
 //                              data-email (an address-only invitee);
-//                              .remove; an address chip's input names it
+//                              .remove; an address chip's input names it,
+//                              and its .add-name reads "· add name"
 //   #new-line                  "<Name> is someone new. …"
 //   #recent button[data-person-id]    the Recent row
 //   #large-chip, #show-large, #large-suggestions button
-//   #voices-part, .voice-row[data-voice] (select, .talk), #voices-more,
-//   #leave-all
-//   #voices-finding            "Finding voices…" until the voices are ready,
-//                              or the reason there will be none (main.js
+//   #voices-part, .voice-row[data-voice] (select, .talk, .play, .no-clip),
+//   #voices-more ("+N more voices — show"), #leave-all
+//   #prints-nudge, #prints-nudge-open   "Recognize voices…", while prints
+//                              are off
+//   #voices-finding            FINDING until the voices are ready, or the
+//                              reason there will be none (main.js
 //                              identity:voices-stopped, stopMessageFor)
 //   #recorded-by, #skip, #save
 //
@@ -99,6 +102,7 @@ const os = require('os');
 const path = require('path');
 const { IDENTITY_WINDOW } = require('./identity-rules.js');
 const { pendingVoiceNamingStems } = require('./identity-answer.js');
+const { STATEMENT_VERSION } = require('./voice-prints.js');
 
 const HERE = __dirname;
 const RECORDER_DIR = path.resolve(HERE, '..');
@@ -146,14 +150,19 @@ const P = {
 };
 const HOST = 'Jon Example';
 const STEM = '2026-11-01T15-09-12Z';
+// The voices part while diarize runs (SAA-260 11-07 item 2).
+const FINDING = 'Finding voices… You can save now; Clipwise will ask you to name them from the menu bar.';
+// scopes: the scopes of the calls each was seen on, for the stub's answer to
+// Recent's ?scope= (server capture-people.ts: with an empty q and a scope, only
+// people seen on a call of that scope). The page never sees this field.
 const PEOPLE = [
-    { id: P.host, name: HOST },
-    { id: P.gus, name: 'Gus Holt' },
-    { id: P.hana, name: 'Hana Ito' },
-    { id: P.cy, name: 'Cy Person' },
-    { id: P.ann, name: 'Ann Example' },
-    { id: P.bob, name: 'Bob Sample' },
-    { id: P.dana, name: 'Dana Lee' },
+    { id: P.host, name: HOST, scopes: ['work'] },
+    { id: P.gus, name: 'Gus Holt', scopes: ['work'] },
+    { id: P.hana, name: 'Hana Ito', scopes: ['personal'] },
+    { id: P.cy, name: 'Cy Person', scopes: ['work'] },
+    { id: P.ann, name: 'Ann Example', scopes: ['work', 'personal'] },
+    { id: P.bob, name: 'Bob Sample', scopes: ['work'] },
+    { id: P.dana, name: 'Dana Lee', scopes: ['personal'] },
 ];
 
 // --- fixtures: the six measured in A.2, plus offline, correct, voices, the two
@@ -165,6 +174,7 @@ const FIXTURES = [
         name: 'group6',
         preview: { matched: true, title: 'Weekly sync', named: ['Ann Example', 'Bob Sample', 'Dana Lee'], unnamed: ['eve@example.test'] },
         voices: 'late', talk: [1080, 660], plantEmbedding: true,
+        expectNudge: 'shown',
         drive: [
             { pick: 'Cy', id: P.cy },
             { nameAddress: 'eve@example.test', text: 'Eve Moreno' },
@@ -200,10 +210,26 @@ const FIXTURES = [
         expectLargeLabel: '9 invited · not confirmed',
         expectGuests: [],
         expectNoPairsFile: true,
-        expectVoicesMore: true,
+        expectVoicesMore: '+2 more voices — show',
         // Rows the member didn't touch are saved unnamed (decided 2026-11-01),
-        // the two behind "Show them" included.
+        // the two behind "+2 more voices — show" included.
         expectVoiceNames: [{ voiceIndex: 1, name: null }, { voiceIndex: 2, name: null }, { voiceIndex: 3, name: null }, { voiceIndex: 4, name: null }],
+    },
+    // Three voices, the second with no clip (SAA-260 11-07 items 3, 4 and 8):
+    // one row behind "+1 more voice — show", which expands the list; the
+    // clipless row says so; prints are off, so the voices part offers
+    // Recognize voices…, which opens the opt-in window.
+    {
+        name: 'threeVoices',
+        preview: { matched: true, title: 'Sync', named: ['Ann Example', 'Bob Sample'], unnamed: [] },
+        voices: 'ready', talk: [600, 500, 400], noClip: [2],
+        drive: [],
+        expectGuests: [{ name: 'Ann Example' }, { name: 'Bob Sample' }],
+        expectVoicesMore: '+1 more voice — show',
+        expandVoices: 3,
+        expectNoClip: { without: 2, with: 1 },
+        expectNudge: 'click',
+        expectVoiceNames: [{ voiceIndex: 1, name: null }, { voiceIndex: 2, name: null }, { voiceIndex: 3, name: null }],
     },
     {
         name: 'group2noRecent',
@@ -248,6 +274,10 @@ const FIXTURES = [
         },
         voices: 'none',
         expectOpenChips: [{ text: 'Ann Example', personId: P.ann }, { text: 'Bob Sample', personId: '' }],
+        // Recent follows the scope (SAA-260 11-07 item 1): opened on the saved
+        // "work", then Personal, then Work again. Ann and Bob are chips and the
+        // host is never offered, so work is Gus and Cy, personal Hana and Dana.
+        expectRecentScope: { work: [P.gus, P.cy], personal: [P.hana, P.dana] },
         drive: [{ remove: 'Bob Sample' }, { pick: 'Cy', id: P.cy }],
         expectGuests: [{ name: 'Ann Example', personId: P.ann }, { name: 'Cy Person', personId: P.cy }],
         expectCorrects: '2026-11-01T15:40:00.000Z',
@@ -269,6 +299,38 @@ const FIXTURES = [
         expectIdentityUnchanged: true,
         expectGuests: [{ name: 'Ann Example', personId: P.ann }, { name: 'Bob Sample', personId: P.bob }],
         expectVoiceNames: [{ voiceIndex: 1, name: 'Ann Example' }, { voiceIndex: 2, name: null }],
+    },
+    // The same with voice prints on: the voices part has no Recognize voices…
+    // (control: the line shows only while prints are off).
+    {
+        name: 'printsOn',
+        open: 'voices',
+        printsOn: true,
+        preview: null,
+        saved: {
+            identity_version: 2, recording_id: 'CHECK-WINDOW-PO', stem: STEM, answered_at: '2026-11-01T15:43:00.000Z',
+            self: { name: HOST, source: 'account_display_name' },
+            guests: [{ name: 'Ann Example', personId: P.ann }, { name: 'Bob Sample', personId: P.bob }],
+            scope: 'work',
+        },
+        voices: 'ready', talk: [900, 400],
+        drive: [],
+        expectNudge: 'absent',
+        expectIdentityUnchanged: true,
+        expectGuests: [{ name: 'Ann Example', personId: P.ann }, { name: 'Bob Sample', personId: P.bob }],
+        expectVoiceNames: [{ voiceIndex: 1, name: null }, { voiceIndex: 2, name: null }],
+    },
+    // A stop with no calendar match and no scope the app implies: nothing is
+    // picked, so Recent is asked with no scope and offers everyone, as before
+    // (SAA-260 11-07: "Recent with no scope picked shows as today").
+    {
+        name: 'noScope',
+        preview: null,
+        triggerApp: null,
+        voices: 'none',
+        drive: [],
+        expectNoScopePicked: true,
+        expectGuests: [],
     },
     // Diarize finishes after the window is up and finds fewer than two voices,
     // or cannot run: the voices part says so instead of waiting to the cap.
@@ -338,7 +400,7 @@ const FIXTURES = [
 
 // --- the stub server ------------------------------------------------------------
 function startStub() {
-    const state = { offline: false, people: PEOPLE, preview: null, me: { displayName: HOST }, posts: [], requests: [] };
+    const state = { offline: false, people: PEOPLE, preview: null, me: { displayName: HOST }, posts: [], requests: [], peopleAsks: [] };
     const send = (res, status, json) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(json)); };
     const server = http.createServer((req, res) => {
         let body = '';
@@ -351,8 +413,11 @@ function startStub() {
             if (req.method === 'GET' && url.pathname === '/captures/me') return send(res, 200, state.me);
             if (req.method === 'GET' && url.pathname === '/captures/people') {
                 const q = (url.searchParams.get('q') || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
-                const hits = state.people.filter((p) => p.name.normalize('NFC').toLowerCase().includes(q)).slice(0, 10);
-                return send(res, 200, { people: hits });
+                const scope = url.searchParams.get('scope');
+                state.peopleAsks.push({ q: url.searchParams.get('q'), scope });
+                const hits = state.people.filter((p) => p.name.normalize('NFC').toLowerCase().includes(q))
+                    .filter((p) => q || !scope || (p.scopes || []).includes(scope)).slice(0, 10);
+                return send(res, 200, { people: hits.map((p) => ({ id: p.id, name: p.name })) });
             }
             if (req.method === 'POST' && url.pathname === '/captures/calendar-preview') {
                 return send(res, 200, state.preview || { matched: false, title: null, named: [], unnamed: [] });
@@ -509,12 +574,12 @@ function silentWav(file) {
     b.writeUInt32LE(32000, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(samples * 2, 40);
     fs.writeFileSync(file, b);
 }
-function writeCapture(outdir, n) {
+function writeCapture(outdir, n, { triggerApp = { key: 'zoom', name: 'zoom.us' } } = {}) {
     const w = (name, doc) => fs.writeFileSync(path.join(outdir, name), JSON.stringify(doc, null, 2) + '\n');
     w(`manifest-${STEM}.json`, {
         recording_id: `CHECK-WINDOW-${n}`,
         started_at: '2026-11-01T15:09:12.000Z',
-        trigger_app: { key: 'zoom', name: 'zoom.us' },
+        trigger_app: triggerApp,
         tracks: [
             { track: 'mic', file: `mic-${STEM}.wav`, encoding: 'pcm_s16le', container: 'wav', sample_rate: 16000, sample_rate_source: 'check', duration_s: 1800 },
             { track: 'system', file: `system-${STEM}.wav`, encoding: 'pcm_s16le', container: 'wav', sample_rate: 16000, sample_rate_source: 'check', duration_s: 1800 },
@@ -539,10 +604,12 @@ function writeCapture(outdir, n) {
 }
 // plant: an embedding field on every voice in both files, and at the top of the
 // naming data, as a real diarize file holds embeddings (the window check's
-// control that none reaches the page).
-function writeVoices(outdir, talk, { plant = false } = {}) {
+// control that none reaches the page). noClip: voice indexes with no clip, as
+// diarize leaves a voice it found no clean stretch for.
+function writeVoices(outdir, talk, { plant = false, noClip = [] } = {}) {
     const emb = plant ? { embedding: [0.125, -0.5, 0.75] } : {};
     const voices = talk.map((secs, i) => {
+        if (noClip.includes(i + 1)) return { voiceIndex: i + 1, clipPaths: [], lines: [{ text: `line from voice ${i + 1}`, start: 10 * i + 1.5, end: 10 * i + 4.25 }], ...emb };
         const clip = path.join(outdir, `clip-${STEM}-v${i + 1}.wav`);
         silentWav(clip);
         return { voiceIndex: i + 1, clipPaths: [clip], lines: [{ text: `line from voice ${i + 1}`, start: 10 * i + 1.5, end: 10 * i + 4.25 }], ...emb };
@@ -611,11 +678,18 @@ async function runFixture(fx, n, ctx) {
     fs.writeFileSync(path.join(support, 'capture-server.json'), JSON.stringify({ url: ctx.stub.url }) + '\n');
     fs.copyFileSync(ctx.tokenFile, path.join(support, 'capture-token.bin'));
     if (fx.cachedSelf) fs.writeFileSync(path.join(support, 'identity-self.json'), JSON.stringify({ name: fx.cachedSelf, set_at: new Date().toISOString() }) + '\n');
-    writeCapture(outdir, n);
+    writeCapture(outdir, n, fx.triggerApp !== undefined ? { triggerApp: fx.triggerApp } : {});
     const pipelinePath = path.join(outdir, `pipeline-${STEM}.json`);
     let pipelineWritten = fs.readFileSync(pipelinePath, 'utf8');
     const failuresBefore = failures;
-    if (fx.voices === 'ready') writeVoices(outdir, fx.talk);
+    if (fx.voices === 'ready') writeVoices(outdir, fx.talk, { noClip: fx.noClip || [] });
+    // Voice prints on: the setting the opt-in screen writes (voice-prints.js
+    // enable), and nothing else; no store.
+    if (fx.printsOn) {
+        const vpDir = path.join(support, 'voice-prints');
+        fs.mkdirSync(vpDir, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(vpDir, 'setting.json'), JSON.stringify({ enabled: true, statementVersion: STATEMENT_VERSION, consentedAt: new Date().toISOString() }) + '\n', { mode: 0o600 });
+    }
     const identityFile = path.join(outdir, `identity-${STEM}.json`);
     if (fx.saved) fs.writeFileSync(identityFile, JSON.stringify(fx.saved, null, 2) + '\n');
 
@@ -624,6 +698,7 @@ async function runFixture(fx, n, ctx) {
     stub.people = fx.people || PEOPLE;
     stub.preview = fx.preview;
     stub.posts = [];
+    stub.peopleAsks = [];
 
     const port = await freePort();
     let log = '';
@@ -746,12 +821,43 @@ async function runFixture(fx, n, ctx) {
             check(t('no invitee chips on a large call'), chips.length === 0, JSON.stringify(chips));
         }
         if (!fx.offline) {
+            // Recent's ask has been answered before the row is read, so an
+            // empty row is the page's doing, not a reply still on its way.
+            const recentAsks = () => stub.peopleAsks.filter((a) => !(a.q || '').trim());
+            const asked = await waitFor(() => recentAsks().length > 0, 8000);
+            await pause(400);
+            const recentIds = () => ev(`__check.qa('#recent button[data-person-id]').map((b) => b.dataset.personId)`);
             const recent = await ev(`__check.qa('#recent button[data-person-id]').map((b) => ({ id: b.dataset.personId, text: b.textContent.trim() }))`);
             if (fx.expectNoRecent) {
                 check(t('no Recent row when nobody is known'), recent.length === 0, JSON.stringify(recent));
+            } else if (fx.preview) {
+                // SAA-260 11-07 item 1: the calendar filled the field.
+                check(t(`with the calendar's invitees in the field, the Recent row is empty (Recent was asked: ${!!asked}; the stub knows ${stub.people.length} people)`),
+                    !!asked && stub.people.length > 0 && recent.length === 0, JSON.stringify(recent));
             } else {
                 check(t('the Recent row offers known people, at most four, never the host'),
                     recent.length > 0 && recent.length <= 4 && !recent.some((r) => r.id === P.host || /Jon Example/.test(r.text)), JSON.stringify(recent));
+            }
+            if (fx.expectNoScopePicked) {
+                const active = await ev(`__check.qa('#scope button.active').map((b) => b.dataset.value)`);
+                check(t('control: no scope is picked'), active.length === 0, JSON.stringify(active));
+                check(t('with no scope picked, Recent is asked with no scope, as before'),
+                    recentAsks().length > 0 && recentAsks().every((a) => a.scope === null), JSON.stringify(stub.peopleAsks));
+            }
+            if (fx.expectRecentScope) {
+                const want = fx.expectRecentScope;
+                const lastScope = () => { const a = recentAsks(); return a.length ? a[a.length - 1].scope : undefined; };
+                check(t(`opened on the saved scope, Recent is asked for "work" and offers ${JSON.stringify(want.work)}`),
+                    lastScope() === 'work' && JSON.stringify(await recentIds()) === JSON.stringify(want.work),
+                    `${JSON.stringify(stub.peopleAsks)} ${JSON.stringify(await recentIds())}`);
+                for (const scope of ['personal', 'work']) {
+                    const before = recentAsks().length;
+                    await ev(`__check.q('#scope button[data-value="${scope}"]').click()`);
+                    const got = await waitFor(async () => recentAsks().length > before && lastScope() === scope
+                        && JSON.stringify(await recentIds()) === JSON.stringify(want[scope]), 5000);
+                    check(t(`switching to ${scope} asks Recent again for "${scope}" and the row offers ${JSON.stringify(want[scope])}`), !!got,
+                        `${JSON.stringify(stub.peopleAsks)} ${JSON.stringify(await recentIds())}`);
+                }
             }
             // Typing the host's name: no result for the backfill person, and Enter adds nothing.
             await ev(`__check.type('Jon Ex')`);
@@ -784,6 +890,12 @@ async function runFixture(fx, n, ctx) {
                 await pause(300);
             } else if (step.nameAddress) {
                 const sel = `#chips .chip[data-email="${step.nameAddress}"]`;
+                // SAA-260 11-07 item 5: an address-only chip says it can be named;
+                // a chip with a name never does.
+                const marks = await ev(`__check.qa('#chips .chip').map((c) => ({ email: c.dataset.email || '', named: !!c.dataset.named, add: !!c.querySelector('.add-name') && c.querySelector('.add-name').textContent }))`);
+                const addr = marks.find((m) => m.email === step.nameAddress);
+                check(t(`the address chip ${step.nameAddress} shows "· add name"`), !!addr && addr.add === '· add name', JSON.stringify(marks));
+                check(t('control: no chip with a name shows "· add name"'), marks.some((m) => m.named) && marks.filter((m) => m.named).every((m) => !m.add), JSON.stringify(marks));
                 await ev(`__check.q('${sel}').click()`);
                 const ok = await waitFor(() => ev(`!!__check.q('${sel} input')`), 3000);
                 check(t(`the address chip ${step.nameAddress} opens a name box`), !!ok);
@@ -792,6 +904,8 @@ async function runFixture(fx, n, ctx) {
                     await pause(900);
                     await ev(`__check.enter(__check.q('${sel} input'))`);
                     await pause(300);
+                    const after = await ev(`(() => { const c = __check.q('${sel}'); return c ? { named: !!c.dataset.named, add: !!c.querySelector('.add-name') } : null; })()`);
+                    check(t(`control: once named, ${step.nameAddress}'s chip does not show "· add name"`), !!after && after.named && !after.add, JSON.stringify(after));
                 }
             } else if (step.showLarge) {
                 await ev(`__check.q('#show-large').click()`);
@@ -806,7 +920,7 @@ async function runFixture(fx, n, ctx) {
         // Voices.
         if (fx.voices === 'late') {
             const before = await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`);
-            check(t('before the voices are ready, the voices part reads "Finding voices…"'), before === 'Finding voices…', JSON.stringify(before));
+            check(t(`before the voices are ready, the voices part reads "${FINDING}"`), before === FINDING, JSON.stringify(before));
             if (fx.plantEmbedding) {
                 // A second listener on the page, beside the page's own, keeps
                 // what main.js sent exactly as it arrived.
@@ -830,7 +944,21 @@ async function runFixture(fx, n, ctx) {
             check(t('each voice row shows its talk time, longest first'), talk.length >= 2 && talk[0] === `${Math.round(Math.max(...fx.talk) / 60)} min`, JSON.stringify(talk));
             if (fx.expectVoicesMore) {
                 const more = await ev(`__check.q('#voices-more') ? __check.q('#voices-more').textContent : null`);
-                check(t('past two voices, the rest are behind "Show them"'), !!more && /Show them/.test(more) && rows === 2, `${JSON.stringify(more)} rows=${rows}`);
+                check(t(`past two voices, the rest are behind "${fx.expectVoicesMore}"`), more === fx.expectVoicesMore && rows === 2, `${JSON.stringify(more)} rows=${rows}`);
+            }
+            if (fx.expandVoices) {
+                await ev(`__check.q('#voices-more') && __check.q('#voices-more').click()`);
+                const all = await waitFor(() => ev(`__check.qa('.voice-row[data-voice]').length === ${fx.expandVoices} && !__check.q('#voices-more')`), 3000);
+                check(t(`control: clicking it shows all ${fx.expandVoices} voices`), !!all, String(await ev(`__check.qa('.voice-row[data-voice]').length`)));
+            }
+            if (fx.expectNoClip) {
+                const row = (i) => ev(`(() => { const r = __check.q('.voice-row[data-voice="${i}"]'); if (!r) return null; const p = r.querySelector('.play'); return { play: !!p, disabled: !!p && p.disabled, note: r.querySelector('.no-clip') ? r.querySelector('.no-clip').textContent.trim() : null }; })()`);
+                const without = await row(fx.expectNoClip.without);
+                const withClip = await row(fx.expectNoClip.with);
+                check(t(`Voice ${fx.expectNoClip.without}, with no clip, says "No clear clip for this voice" and has no Play button`),
+                    !!without && without.note === 'No clear clip for this voice' && !without.play, JSON.stringify(without));
+                check(t(`control: Voice ${fx.expectNoClip.with}, with a clip, has an enabled Play button and no such line`),
+                    !!withClip && withClip.play && !withClip.disabled && withClip.note === null, JSON.stringify(withClip));
             }
             const options = await ev(`[...(__check.q('.voice-row[data-voice] select') || { options: [] }).options].map((o) => o.textContent.trim())`);
             check(t('a voice\'s choices are the people on chips, then "Leave unnamed" and "Add someone…"'),
@@ -841,7 +969,7 @@ async function runFixture(fx, n, ctx) {
         }
         if (fx.voices === 'outcome') {
             const before = await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`);
-            check(t('before diarize finishes, the voices part reads "Finding voices…"'), before === 'Finding voices…', JSON.stringify(before));
+            check(t(`before diarize finishes, the voices part reads "${FINDING}"`), before === FINDING, JSON.stringify(before));
             const sidecarPath = path.join(outdir, `pipeline-${STEM}.json`);
             const sidecar = readJson(sidecarPath);
             sidecar.steps.diarize = fx.diarizeOutcome;
@@ -851,14 +979,38 @@ async function runFixture(fx, n, ctx) {
                 const text = await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`);
                 return text === fx.expectVoicesMessage ? text : false;
             }, 10000);
-            check(t(`then it reads "${fx.expectVoicesMessage}", not "Finding voices…" until the cap`), !!shown,
+            check(t(`then it reads "${fx.expectVoicesMessage}", not "${FINDING}" until the cap`), !!shown,
                 JSON.stringify(await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`)));
             const rows = await ev(`__check.qa('.voice-row[data-voice]').length`);
             check(t('and shows no voice rows'), rows === 0, String(rows));
         }
         if (fx.expectFinding) {
             const finding = await ev(`__check.q('#voices-finding') ? __check.q('#voices-finding').textContent.trim() : null`);
-            check(t('the voices part reads "Finding voices…" and Save is not held back'), finding === 'Finding voices…' && (await ev(`!__check.q('#save').disabled`)), JSON.stringify(finding));
+            check(t(`the voices part reads "${FINDING}" and Save is not held back`), finding === FINDING && (await ev(`!__check.q('#save').disabled`)), JSON.stringify(finding));
+        }
+        // SAA-260 11-07 item 3: while prints are off, the voices part offers
+        // Recognize voices…, which opens the opt-in window through the
+        // window's own channel; with prints on there is no such line.
+        if (fx.expectNudge) {
+            const nudge = await ev(`(() => { const n = __check.q('#prints-nudge'); const b = __check.q('#prints-nudge-open'); return { exists: !!n, shown: !!n && !n.hidden && n.offsetParent !== null, link: b ? b.textContent.trim() : null }; })()`);
+            if (fx.expectNudge === 'absent') {
+                const part = await ev(`!!__check.q('#voices-part') && __check.q('#voices-part').offsetParent !== null`);
+                check(t('with prints on, the voices part shows no Recognize voices… line'), part && !nudge.shown, JSON.stringify({ part, nudge }));
+            } else {
+                check(t('with prints off, the voices part shows "Recognize voices…"'), nudge.shown && nudge.link === 'Recognize voices…', JSON.stringify(nudge));
+            }
+            if (fx.expectNudge === 'click') {
+                const listed = async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).some((x) => x.type === 'page' && /voice-prints\.html/.test(x.url));
+                const before = await listed();
+                await ev(`__check.q('#prints-nudge-open') && __check.q('#prints-nudge-open').click()`);
+                const opened = await waitFor(listed, 8000);
+                check(t(`clicking it opens the opt-in window, voice-prints.html (open before the click: ${before})`), !before && !!opened);
+                check(t('and main.js logs that it opened it from the voices part'), /identity [^:]+: opening Recognize voices from the voices part/.test(log));
+                const sent = await ev(`(() => { try { window.clipwise.send('identity:open-voice-prints', { token: 'not-this-window' }); return 'sent'; } catch (err) { return String(err && err.message); } })()`);
+                await pause(800);
+                check(t(`a send on that channel with another window's token opens nothing more and logs nothing (${sent})`),
+                    sent === 'sent' && (log.match(/opening Recognize voices from the voices part/g) || []).length === 1);
+            }
         }
         if (fx.expectNoVoicesPart) {
             const shown = await ev(`!!__check.q('#voices-part') && __check.q('#voices-part').offsetParent !== null`);
