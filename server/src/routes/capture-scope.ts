@@ -19,6 +19,7 @@ import { normalizeEmail } from "../auth/membership.js";
 import { db, schema } from "../db/index.js";
 import { dropReleasedPeople } from "../ingest/attendee-people.js";
 import { CLIPWISE_SOURCE, titlePlaceholderFor } from "../ingest/clipwise.js";
+import { ownerAddressesFor } from "../ingest/invitee-names.js";
 import { asyncHandler, HttpError, parseBody, parseQuery, uuidParam } from "../lib/http.js";
 import { buildTranscriptFile } from "../lib/transcript-read.js";
 
@@ -126,10 +127,14 @@ captureScopeRouter.delete(
 // And its calendar match, once a match job is done and found one (SAA-227
 // decisions 15 and 29), for Recent Meetings: the event's title, if it replaced
 // the placeholder, and each invitee by name, or by address when Google has no
-// name. The owner's own address is left out (who else was on the call). Only the
-// owner's own capture is served, and those addresses were on the owner's invite.
+// name. Every address of the owner's is left out (who else was on the call), by
+// the rule ingest uses (invitee-names.ts ownerAddressesFor): the sign-in address,
+// the calendar connection's address, and each searched calendar whose id is an
+// address (SAA-260 11-07: a calendar shared into the grant showed the owner's
+// work address as a guest). Only the owner's own capture is served, and those
+// addresses were on the owner's invite.
 // null until then, and when the match found nothing.
-async function calendarOf(recordingId: string, ownerEmail: string): Promise<{ title: string | null; invitees: { name: string }[] } | null> {
+async function calendarOf(recordingId: string, owner: Set<string>): Promise<{ title: string | null; invitees: { name: string }[] } | null> {
   const [rec] = await db
     .select({ title: schema.recordings.title, stem: sql<string | null>`${schema.recordings.metadata}->'capture'->>'stem'` })
     .from(schema.recordings)
@@ -141,7 +146,7 @@ async function calendarOf(recordingId: string, ownerEmail: string): Promise<{ ti
     .where(eq(schema.invitees.recordingId, recordingId))
     .orderBy(asc(schema.invitees.email));
   const invitees = rows
-    .filter((r) => normalizeEmail(r.email) !== ownerEmail)
+    .filter((r) => !owner.has(normalizeEmail(r.email)))
     .map((r) => ({ name: r.name?.trim() || r.email }));
   const title = rec.title && rec.title !== titlePlaceholderFor(rec.stem ?? "") ? rec.title : null;
   return title || invitees.length > 0 ? { title, invitees } : null;
@@ -157,6 +162,7 @@ captureScopeRouter.get(
       .where(eq(schema.jobs.recordingId, id))
       .orderBy(asc(schema.jobs.createdAt));
     const matched = jobs.some((j) => j.kind === "match" && j.state === "done");
-    res.json({ jobs, calendar: matched ? await calendarOf(id, accessOf(req).email) : null });
+    const ctx = accessOf(req);
+    res.json({ jobs, calendar: matched ? await calendarOf(id, await ownerAddressesFor(db, ctx.memberId, ctx.email)) : null });
   }),
 );
