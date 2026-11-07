@@ -542,6 +542,7 @@ async function save() {
     guests: ia.answerGuests(field),
     inviteeNames: ia.inviteePairs(field),
     scope: selectedScope(),
+    micShared: $('mic-shared').checked === true,
     voices: voicesForSave(),
   });
 }
@@ -552,9 +553,11 @@ $('save').addEventListener('click', save);
 $('skip').addEventListener('click', skip);
 $('skip').textContent = mode === 'correct' ? 'Cancel' : mode === 'voices' ? 'Later' : 'Skip';
 // Escape skips only with focus on nothing editable: a text box clears itself
-// instead (its own handler), and a menu closes itself.
+// instead (its own handler), and a menu closes itself. The mic checkbox is not
+// editable text: Escape there skips, as on a button.
 function editableFocused() {
   const a = document.activeElement;
+  if (a && a.tagName === 'INPUT' && a.type === 'checkbox') return false;
   return !!a && (['INPUT', 'SELECT', 'TEXTAREA'].includes(a.tagName) || a.isContentEditable);
 }
 document.addEventListener('keydown', (e) => {
@@ -588,6 +591,7 @@ updateAtBlock();
     $('field-box').replaceWith(el('p', { id: 'load-failed', className: 'note warn', text: "Couldn't load this call's attendees. Close and try again." }));
     for (const id of ['results', 'recent', 'new-line', 'field-hint']) $(id).remove();
     $('scope').closest('.section').remove();
+    $('mic-section').remove();
     $('recorded-by').textContent = ia.recordedByLine(hostName);
     updateAtBlock();
     resizeSoon();
@@ -607,6 +611,8 @@ updateAtBlock();
     setScope(inferred);
     $('scope-label').textContent = 'Personal or work? (guessed from the app — change if wrong)';
   }
+  // The mic box starts unticked, or from the saved answer when reopening one.
+  $('mic-shared').checked = (mode === 'correct' || mode === 'voices') && !!saved && saved.mic_shared === true;
   if (pendingPrefill) applyCalendar(pendingPrefill);
   render();
   input.focus();

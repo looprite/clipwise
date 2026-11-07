@@ -20,7 +20,8 @@
 //                  voice, vec }] }: embedding is the normalised mean of its
 //                  sources' normalised vectors, count is how many there are.
 //                  self is the member's own print, from diarize's
-//                  host-print-<stem>.json
+//                  host-print-<stem>.json, never from a call whose answer
+//                  says someone else spoke into the member's mic
 //   scores.jsonl   the matcher's log (voice-match.js), plain: person ids,
 //                  scores and stems only, never a name or an embedding
 //
@@ -348,9 +349,22 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
         return removeAllOff({ stem, skip });
     }
 
+    // Whether the capture's answer says someone else spoke into the member's
+    // mic (SAA-260 11-07): identity-<stem>.json's mic_shared, true only. An
+    // answer that is missing or cannot be read says nothing.
+    function micSharedFor(stem) {
+        try {
+            const identity = readJsonIn(outdir, `identity-${stem}.json`);
+            return !!identity && identity.mic_shared === true;
+        } catch {
+            return false;
+        }
+    }
+
     // diarize's host-print-<stem>.json: the member's own print from this
     // capture, into `self`, then the file is deleted. While off, the file is
-    // only deleted.
+    // only deleted. On a call whose answer says the mic was shared, the print
+    // holds a second voice by the member's own word, so it too is only deleted.
     function ingestHostPrint(stem) {
         if (!STEM.test(stem)) return 'bad_stem';
         const file = path.join(outdir, `host-print-${stem}.json`);
@@ -358,6 +372,10 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
         if (!isEnabled()) {
             fs.unlinkSync(file);
             return 'deleted_off';
+        }
+        if (micSharedFor(stem)) {
+            fs.unlinkSync(file);
+            return 'skipped_mic_shared';
         }
         let doc = null;
         try { doc = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
@@ -456,6 +474,23 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
         return { contributions: changed, scoreLines: lines.length - kept.length };
     }
 
+    // One capture's contribution to the member's own print, taken out: an
+    // answer, first or a correction, that says the mic was shared (SAA-260
+    // 11-07). The other captures' contributions stay. With no store, nothing is
+    // read or written. -> how many contributions were removed (0 or 1).
+    function removeSelfContribution(stem) {
+        if (!STEM.test(stem) || !fs.existsSync(profilesPath)) return 0;
+        const store = load();
+        if (!store.self) return 0;
+        const before = store.self.sources.length;
+        store.self.sources = store.self.sources.filter((s) => s.stem !== stem);
+        const removed = before - store.self.sources.length;
+        if (removed === 0) return 0;
+        store.self = store.self.sources.length ? withTotals(store.self) : null;
+        save(store);
+        return removed;
+    }
+
     // For the opt-in screen: who has a print, by the last confirmed name.
     function listProfiles() {
         if (!fs.existsSync(profilesPath)) return { self: null, people: [] };
@@ -484,7 +519,7 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
     return {
         dir, settingPath, profilesPath, scoresPath,
         setting, isEnabled, enable, disable, removeWhileOff, load, ingestHostPrint, enrolFromMapping,
-        deleteProfile, removeRecording, listProfiles, matchProfiles, appendScoreLines, readScoreLines,
+        deleteProfile, removeRecording, removeSelfContribution, listProfiles, matchProfiles, appendScoreLines, readScoreLines,
     };
 }
 

@@ -78,7 +78,12 @@
 //   #voices-finding            FINDING until the voices are ready, or the
 //                              reason there will be none (main.js
 //                              identity:voices-stopped, stopMessageFor)
+//   #mic-shared                "Someone else spoke into my mic"
 //   #recorded-by, #skip, #save
+//
+// A fixture with plantSelf writes a voice-prints store encrypted by the
+// wrapper's own safeStorage (CHECK_MODE=encrypt), and reads it back the same
+// way (CHECK_MODE=decrypt), as main.js encrypts it.
 //
 //   node check-identity-window.js
 //   CHECK_FIXTURE=group6 node check-identity-window.js      one fixture only
@@ -175,6 +180,8 @@ const FIXTURES = [
         preview: { matched: true, title: 'Weekly sync', named: ['Ann Example', 'Bob Sample', 'Dana Lee'], unnamed: ['eve@example.test'] },
         voices: 'late', talk: [1080, 660], plantEmbedding: true,
         expectNudge: 'shown',
+        expectMicOpen: false,
+        expectMicShared: false,
         drive: [
             { pick: 'Cy', id: P.cy },
             { nameAddress: 'eve@example.test', text: 'Eve Moreno' },
@@ -331,6 +338,66 @@ const FIXTURES = [
         drive: [],
         expectNoScopePicked: true,
         expectGuests: [],
+    },
+    // The mic box (SAA-260 11-07 items 6 and 7). At a stop, ticked: the answer
+    // and the POST carry mic_shared: true. Prints are off, so there is no store
+    // and nothing to take out of it.
+    {
+        name: 'micStop',
+        preview: { matched: true, title: 'Sync', named: ['Ann Example', 'Bob Sample'], unnamed: [] },
+        voices: 'none',
+        expectMicOpen: false,
+        drive: [{ mic: true }],
+        expectGuests: [{ name: 'Ann Example' }, { name: 'Bob Sample' }],
+        expectMicShared: true,
+        expectMicLog: 0,
+    },
+    // Change attendees… on an answer saved with the box ticked: it opens
+    // ticked; unticked, the correction carries no mic_shared, which the server
+    // reads as not shared (the stored answer is replaced whole).
+    {
+        name: 'micCorrectUntick',
+        open: 'correct',
+        preview: null,
+        saved: {
+            identity_version: 2, recording_id: 'CHECK-WINDOW-MU', stem: STEM, answered_at: '2026-11-01T15:44:00.000Z',
+            self: { name: HOST, source: 'account_display_name' },
+            guests: [{ name: 'Ann Example', personId: P.ann }],
+            scope: 'work',
+            mic_shared: true,
+        },
+        voices: 'none',
+        expectMicOpen: true,
+        drive: [{ mic: false }],
+        expectGuests: [{ name: 'Ann Example', personId: P.ann }],
+        expectCorrects: '2026-11-01T15:44:00.000Z',
+        expectMicShared: false,
+    },
+    // Name voices on a saved answer, prints on, the member's own print holding
+    // this call and an earlier one. Ticking the box alone is a change: a
+    // correction is written, and this call's contribution comes out of the
+    // print; the earlier call's stays.
+    {
+        name: 'micVoicesTick',
+        open: 'voices',
+        printsOn: true,
+        plantSelf: [STEM, '2026-10-30T09-00-00Z'],
+        preview: null,
+        saved: {
+            identity_version: 2, recording_id: 'CHECK-WINDOW-MV', stem: STEM, answered_at: '2026-11-01T15:45:00.000Z',
+            self: { name: HOST, source: 'account_display_name' },
+            guests: [{ name: 'Ann Example', personId: P.ann }, { name: 'Bob Sample', personId: P.bob }],
+            scope: 'work',
+        },
+        voices: 'ready', talk: [900, 400],
+        expectMicOpen: false,
+        drive: [{ mic: true }],
+        expectGuests: [{ name: 'Ann Example', personId: P.ann }, { name: 'Bob Sample', personId: P.bob }],
+        expectCorrects: '2026-11-01T15:45:00.000Z',
+        expectVoiceNames: [{ voiceIndex: 1, name: null }, { voiceIndex: 2, name: null }],
+        expectMicShared: true,
+        expectMicLog: 1,
+        expectSelfAfter: ['2026-10-30T09-00-00Z'],
     },
     // Diarize finishes after the window is up and finds fewer than two voices,
     // or cannot run: the voices part says so instead of waiting to the cap.
@@ -634,6 +701,11 @@ if (process.env.CHECK_MODE === 'encrypt') {
     fs.writeFileSync(process.env.CHECK_TOKEN_FILE, safeStorage.encryptString(process.env.CHECK_TOKEN_JSON), { mode: 0o600 });
     app.quit();
   });
+} else if (process.env.CHECK_MODE === 'decrypt') {
+  app.whenReady().then(() => {
+    fs.writeFileSync(process.env.CHECK_OUT_FILE, safeStorage.decryptString(fs.readFileSync(process.env.CHECK_TOKEN_FILE)), { mode: 0o600 });
+    app.quit();
+  });
 } else {
   require(${JSON.stringify(MAIN_JS)});
 }
@@ -665,6 +737,25 @@ function recoveryWouldFinish(root) {
     try { return { ok: true, lists: JSON.parse(r.stdout) }; } catch { return { ok: false, detail: `${r.status} ${(r.stderr || '').split('\n').slice(0, 3).join(' | ')}` }; }
 }
 
+// A voice-prints store, encrypted and read back by the wrapper's own
+// safeStorage (the keychain item this run creates and deletes), as main.js
+// encrypts and reads it. Made-up three-number vectors.
+function wrapperCrypt(ctx, mode, file, { json = null, out = null } = {}) {
+    const r = spawnSync(ELECTRON, [ctx.wrapper], {
+        encoding: 'utf8', timeout: 60000,
+        env: { ...process.env, CHECK_MODE: mode, CHECK_USERDATA: path.join(ctx.root, `userdata-${mode}`), CHECK_TOKEN_FILE: file,
+            ...(json !== null ? { CHECK_TOKEN_JSON: json } : {}), ...(out ? { CHECK_OUT_FILE: out } : {}) },
+    });
+    return r.status;
+}
+function readStore(ctx, file) {
+    const out = path.join(ctx.root, `store-read-${Date.now()}.json`);
+    const status = wrapperCrypt(ctx, 'decrypt', file, { out });
+    const doc = status === 0 ? readJson(out) : null;
+    fs.rmSync(out, { force: true });
+    return doc;
+}
+
 function keychainHas(item) {
     return spawnSync('security', ['find-generic-password', '-s', item], { encoding: 'utf8' }).status === 0;
 }
@@ -689,6 +780,16 @@ async function runFixture(fx, n, ctx) {
         const vpDir = path.join(support, 'voice-prints');
         fs.mkdirSync(vpDir, { recursive: true, mode: 0o700 });
         fs.writeFileSync(path.join(vpDir, 'setting.json'), JSON.stringify({ enabled: true, statementVersion: STATEMENT_VERSION, consentedAt: new Date().toISOString() }) + '\n', { mode: 0o600 });
+    }
+    // A store whose own print has a contribution from each stem in plantSelf.
+    const storeFile = path.join(support, 'voice-prints', 'profiles.json');
+    if (fx.plantSelf) {
+        const vecs = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+        const sources = fx.plantSelf.map((stem, i) => ({ stem, vec: vecs[i], seconds: 10 }));
+        const sum = [0, 1, 2].map((d) => sources.reduce((s, x) => s + x.vec[d], 0));
+        const len = Math.sqrt(sum.reduce((s, x) => s + x * x, 0));
+        const store = { version: 1, self: { sources, embedding: sum.map((x) => x / len), count: sources.length }, people: {} };
+        wrapperCrypt(ctx, 'encrypt', storeFile, { json: JSON.stringify(store) });
     }
     const identityFile = path.join(outdir, `identity-${STEM}.json`);
     if (fx.saved) fs.writeFileSync(identityFile, JSON.stringify(fx.saved, null, 2) + '\n');
@@ -800,6 +901,19 @@ async function runFixture(fx, n, ctx) {
         check(t(`the footer reads "${wantFooter}"`), footer === wantFooter, JSON.stringify(footer));
         check(t('the footer never says "Voice 1 is you"'), !/Voice 1 is you/.test(footer || ''), JSON.stringify(footer));
 
+        // SAA-260 11-07 item 6: the mic box, unticked at a stop, and as saved
+        // when an answer is reopened.
+        if (fx.expectMicOpen !== undefined) {
+            const box = await ev(`(() => { const b = __check.q('#mic-shared'); return b ? { checked: b.checked, label: b.closest('label') ? b.closest('label').textContent.trim() : null } : null; })()`);
+            check(t(`the window has the box "Someone else spoke into my mic", ${fx.expectMicOpen ? 'ticked, as saved' : 'unticked'}`),
+                !!box && box.label === 'Someone else spoke into my mic' && box.checked === fx.expectMicOpen, JSON.stringify(box));
+        }
+        if (fx.plantSelf) {
+            const planted = readStore(ctx, storeFile);
+            check(t(`control: the planted store reads back through the wrapper's safeStorage with own-print contributions from ${JSON.stringify(fx.plantSelf)}`),
+                !!planted && JSON.stringify(planted.self.sources.map((s) => s.stem)) === JSON.stringify(fx.plantSelf), JSON.stringify(planted && planted.self));
+        }
+
         if (fx.preview) {
             const callLine = await ev(`__check.q('#call-line') ? __check.q('#call-line').textContent : ''`);
             check(t('the call line carries the calendar title'), callLine.includes(fx.preview.title), JSON.stringify(callLine));
@@ -907,6 +1021,9 @@ async function runFixture(fx, n, ctx) {
                     const after = await ev(`(() => { const c = __check.q('${sel}'); return c ? { named: !!c.dataset.named, add: !!c.querySelector('.add-name') } : null; })()`);
                     check(t(`control: once named, ${step.nameAddress}'s chip does not show "· add name"`), !!after && after.named && !after.add, JSON.stringify(after));
                 }
+            } else if (step.mic !== undefined) {
+                const now = await ev(`(() => { const b = __check.q('#mic-shared'); if (!b) return null; if (b.checked !== ${!!step.mic}) b.click(); return b.checked; })()`);
+                check(t(`clicking the mic box ${step.mic ? 'ticks' : 'unticks'} it`), now === !!step.mic, JSON.stringify(now));
             } else if (step.showLarge) {
                 await ev(`__check.q('#show-large').click()`);
                 await pause(300);
@@ -1119,6 +1236,31 @@ async function runFixture(fx, n, ctx) {
         check(t('POST /captures carries the same identity guests'), !!post && JSON.stringify(post.identity.guests) === JSON.stringify(fx.expectGuests), JSON.stringify(post && post.identity));
         if (fx.expectCorrects) {
             check(t('POST /captures carries the correction (corrects)'), !!post && post.identity.corrects === fx.expectCorrects, JSON.stringify(post && post.identity));
+        }
+        // SAA-260 11-07 item 6: mic_shared: true only when ticked; absent, never
+        // false, when not.
+        if (fx.expectMicShared !== undefined) {
+            const has = (d) => !!d && Object.prototype.hasOwnProperty.call(d, 'mic_shared');
+            if (fx.expectMicShared) {
+                check(t('the answer file carries mic_shared: true'), !!saved && saved.mic_shared === true, JSON.stringify(saved));
+                check(t('POST /captures carries mic_shared: true'), !!post && post.identity.mic_shared === true, JSON.stringify(post && post.identity));
+            } else {
+                check(t('control: with the box unticked, neither the answer file nor POST /captures carries mic_shared'),
+                    !!saved && !has(saved) && !!post && !has(post.identity), JSON.stringify({ saved, identity: post && post.identity }));
+            }
+        }
+        // SAA-260 11-07 item 7: an answer with the box ticked takes that call's
+        // contribution out of the member's own print.
+        if (fx.expectMicLog !== undefined) {
+            const line = `[clipwise-recorder] voice prints ${STEM}: mic shared — removed ${fx.expectMicLog} own-print contribution(s)`;
+            check(t(`main.js logs "${line.replace('[clipwise-recorder] ', '')}"`), log.includes(line),
+                log.split('\n').filter((l) => /voice prints/.test(l)).join(' | '));
+        }
+        if (fx.expectSelfAfter) {
+            const after = readStore(ctx, storeFile);
+            check(t(`the member's own print keeps only ${JSON.stringify(fx.expectSelfAfter)}: this call's contribution is gone`),
+                !!after && !!after.self && JSON.stringify(after.self.sources.map((s) => s.stem)) === JSON.stringify(fx.expectSelfAfter) && after.self.count === fx.expectSelfAfter.length,
+                JSON.stringify(after && after.self));
         }
         if (fx.expectVoiceNames) {
             const vpost = await waitFor(() => stub.posts.find((p) => p.voiceNames) || false, 10000);

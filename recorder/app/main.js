@@ -1335,6 +1335,21 @@ function voicePrintsAfterSend(stem, people) {
     }
 }
 
+// An answer saying someone else spoke into the member's mic (SAA-260 11-07):
+// that call's contribution to the member's own print comes out, whenever it
+// was taken (a pipeline that finished before the answer, or a correction that
+// ticks the box later). A host print still waiting is skipped by
+// ingestHostPrint itself, which reads the same answer.
+function voicePrintsMicShared(stem) {
+    try {
+        const removed = voicePrints().removeSelfContribution(stem);
+        console.error(`[clipwise-recorder] voice prints ${stem}: mic shared — removed ${removed} own-print contribution(s)`);
+        sendVoicePrintsData();
+    } catch (err) {
+        console.error(`[clipwise-recorder] voice prints ${stem}: own-print removal failed (${err.code || err.name})`);
+    }
+}
+
 // While prints are off (SAA-243 item 7): at launch and at a recovery exit, every
 // capture's diarize embeddings, plus a store or waiting host print a turn-off
 // cut short left; at a pipeline exit, that capture's. Never throws
@@ -3806,6 +3821,7 @@ function writeIdentityAnswer(capture, answer) {
         selfName: answer.selfName,
         scope: answer.scope,
         corrects: answer.corrects,
+        micShared: answer.micShared,
     });
     const finalPath = writeAnswer(OUTDIR, doc);
     console.error(logLines.identityLine(capture.stem, !!doc.self.name, doc.guests.length, doc.scope, finalPath));
@@ -4200,9 +4216,9 @@ function registerIdentityIpc() {
     //   stop, later  the answer is written (and invitee names typed for
     //                addresses, stop only, SAA-221)
     //   correct      a correction of the saved answer is written (SAA-258)
-    //   voices       a correction only if a chip or the scope changed; with no
-    //                saved answer (the call was skipped), an answer only if it
-    //                names anyone or a scope
+    //   voices       a correction only if a chip, the scope or the mic box
+    //                changed; with no saved answer (the call was skipped), an
+    //                answer only if it names anyone, a scope or a shared mic
     // Rows the member didn't touch are saved as null, which settles the naming
     // (decided 2026-11-01).
     ipcMain.on('identity:submit', (_event, payload) => {
@@ -4212,17 +4228,19 @@ function registerIdentityIpc() {
         const guests = guestsFromPage(payload.guests);
         // SAA-170: no default. Only a button actually active counts.
         const scope = payload.scope === 'personal' || payload.scope === 'work' ? payload.scope : null;
+        // "Someone else spoke into my mic" (SAA-260 11-07): ticked or not.
+        const micShared = payload.micShared === true;
         const selfName = identityWindow.selfName !== undefined ? identityWindow.selfName : readSelfName();
         const saved = readAnswer(OUTDIR, capture.stem);
         let writeIdentity = true;
         let corrects;
         if (mode === 'correct' || (mode === 'voices' && saved)) {
-            writeIdentity = mode === 'correct' || answerChanged(saved, guests, scope);
+            writeIdentity = mode === 'correct' || answerChanged(saved, guests, scope, micShared);
             // A correction corrects the answer the server holds, which is not
             // always the one on disk (correctsFor, SAA-258).
             if (writeIdentity) corrects = correctsFor(saved, (readUploadEntry(capture.stem) || {}).identityAcceptedAt || null);
         } else if (mode === 'voices') {
-            writeIdentity = guests.length > 0 || scope !== null;
+            writeIdentity = guests.length > 0 || scope !== null || micShared;
         }
         let wrote = false;
 
@@ -4248,11 +4266,12 @@ function registerIdentityIpc() {
         }
         if (writeIdentity) {
             try {
-                writeIdentityAnswer(capture, { guests, selfName, scope, corrects });
+                writeIdentityAnswer(capture, { guests, selfName, scope, corrects, micShared });
                 wrote = true;
                 // Answered now, deferred or not (SAA-197): a marker left from an
                 // earlier close no longer describes this capture.
                 deleteLaterMarker(OUTDIR, capture.stem);
+                if (micShared) voicePrintsMicShared(capture.stem);
             } catch (err) {
                 // The answer is lost; the capture is not. Say so where it can be
                 // read rather than pretending it was written.
@@ -4261,7 +4280,7 @@ function registerIdentityIpc() {
                     `Who was on ${capture.stem} could not be written — the recording is unidentified.`);
             }
         } else {
-            console.error(`[clipwise-recorder] identity ${capture.stem}: people and scope unchanged — no correction sent`);
+            console.error(`[clipwise-recorder] identity ${capture.stem}: people, scope and mic unchanged — no correction sent`);
         }
 
         // The voice rows, when they were on screen. An empty list is never sent

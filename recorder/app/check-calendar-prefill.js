@@ -277,6 +277,31 @@ checkFn('a: control: the same scan finds an @ planted in a copy', () => {
         return [JSON.stringify(got) === JSON.stringify([true, true, true, true, true]), JSON.stringify(got)];
     });
 }
+// The mic box (SAA-260 11-07): written as mic_shared: true when ticked, never
+// as false; counted as a change on its own.
+checkFn('a: a ticked mic box writes mic_shared: true', () => {
+    const doc = ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: [{ name: 'Ann Example' }], selfName: HOST, scope: 'work', micShared: true });
+    return [doc.mic_shared === true, JSON.stringify(doc)];
+});
+checkFn('a: control: an unticked box, or none given, writes no mic_shared key at all', () => {
+    const docs = [false, undefined, 'yes'].map((micShared) => ia.buildAnswerDoc({ stem: 's', recordingId: 'r', guests: [], selfName: HOST, scope: 'work', micShared }));
+    return [docs.every((d) => !Object.prototype.hasOwnProperty.call(d, 'mic_shared')), JSON.stringify(docs)];
+});
+{
+    const saved = { guests: [{ name: 'Ann Example', personId: P1 }], scope: 'work' };
+    const savedShared = { ...saved, mic_shared: true };
+    checkFn('a: ticking the mic box alone, or unticking it alone, is a change', () => {
+        const got = [ia.answerChanged(saved, saved.guests, 'work', true), ia.answerChanged(savedShared, saved.guests, 'work', false)];
+        return [JSON.stringify(got) === JSON.stringify([true, true]), JSON.stringify(got)];
+    });
+    checkFn('a: control: the box as saved, ticked or not, is no change', () => {
+        const got = [ia.answerChanged(saved, saved.guests, 'work', false), ia.answerChanged(savedShared, saved.guests, 'work', true)];
+        return [JSON.stringify(got) === JSON.stringify([false, false]), JSON.stringify(got)];
+    });
+    checkFn('a: control: the page is given mic_shared as saved (answerForPage)', () => {
+        return [ia.answerForPage(savedShared).mic_shared === true, JSON.stringify(ia.answerForPage(savedShared))];
+    });
+}
 checkFn('a: the footer reads "Recorded by <name> (you)", and "Recorded by you" with no name or an address', () => {
     const got = [ia.recordedByLine(HOST), ia.recordedByLine(null), ia.recordedByLine('jd@example.test')];
     return [JSON.stringify(got) === JSON.stringify(['Recorded by Jon Example (you)', 'Recorded by you', 'Recorded by you']), JSON.stringify(got)];

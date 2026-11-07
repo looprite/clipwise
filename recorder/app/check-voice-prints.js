@@ -11,7 +11,9 @@
 // unrelated. Cases 22-25 read main.js and build-app.sh as text: they show the
 // wiring is there, not that it runs. Cases 26-34 run the removal of each
 // diarize file's per-voice embedding while prints are off (SAA-243 item 7)
-// against temporary folders, with files the shape diarize writes. The module
+// against temporary folders, with files the shape diarize writes. Cases 43-47
+// run the mic box's two effects on the member's own print (SAA-260 11-07): a
+// shared call's host print skipped, and a call's contribution removed. The module
 // is required inside main(), so on code without it every case is reported as a
 // FAIL.
 
@@ -528,6 +530,55 @@ function main() {
         const ok = /voicePrints\(\)\.disable\(\{ skip: voicePrintsModule\.removalSkip\(\{ pipeline, recovering: !!recoveryProc \}\) \}\)/.test(disable)
             && reasons.length === 3 && reasons.every((r) => ['launch', 'pipeline exit', 'recovery exit'].includes(r));
         return [ok, reasons.join(', ')];
+    });
+
+    // The mic box (SAA-260 11-07): a call whose answer says someone else spoke
+    // into the member's mic gives nothing to the member's own print.
+    const sharedAnswer = (fx, stem, micShared) => fx.write(`identity-${stem}.json`, { self: { name: 'Check Host' }, guests: [{ name: 'Ann Example' }], ...(micShared ? { mic_shared: true } : {}) });
+    add('43. on, a host print from a call whose answer says the mic was shared is deleted and not taken into `self`', () => {
+        const fx = fixture();
+        const vp = on(fx);
+        const f = path.join(fx.outdir, `host-print-${STEM1}.json`);
+        sharedAnswer(fx, STEM1, true);
+        fx.write(`host-print-${STEM1}.json`, { model: 'm', modelRevision: 'r', seconds: 20, embedding: SELF });
+        const r = vp.ingestHostPrint(STEM1);
+        return [r === 'skipped_mic_shared' && !fs.existsSync(f) && vp.load().self === null, r];
+    });
+    add('44. control: the same call answered without it is taken into `self`', () => {
+        const fx = fixture();
+        const vp = on(fx);
+        sharedAnswer(fx, STEM1, false);
+        fx.write(`host-print-${STEM1}.json`, { model: 'm', modelRevision: 'r', seconds: 20, embedding: SELF });
+        const r = vp.ingestHostPrint(STEM1);
+        return [r === 'ingested' && vp.load().self && vp.load().self.count === 1, r];
+    });
+    add('45. removing one call\'s own-print contribution (a correction that ticks the box) leaves the other calls\'; the print is their mean again', () => {
+        const fx = fixture();
+        const vp = on(fx);
+        const other = plus(SELF, vector(9, 0.2));
+        fx.write(`host-print-${STEM1}.json`, { embedding: vector(44) });
+        vp.ingestHostPrint(STEM1);
+        fx.write(`host-print-${STEM2}.json`, { embedding: other });
+        vp.ingestHostPrint(STEM2);
+        const before = vp.load().self.count;
+        const removed = vp.removeSelfContribution(STEM1);
+        const self = vp.load().self;
+        return [before === 2 && removed === 1 && self.count === 1 && self.sources[0].stem === STEM2 && mod.cosine(self.embedding, other) > 0.9999,
+            JSON.stringify({ before, removed, count: self.count, stems: self.sources.map((s) => s.stem) })];
+    });
+    add('46. removing the only contribution leaves no own print; a second removal and an unknown call remove nothing', () => {
+        const fx = fixture();
+        const vp = on(fx);
+        fx.write(`host-print-${STEM1}.json`, { embedding: SELF });
+        vp.ingestHostPrint(STEM1);
+        const got = [vp.removeSelfContribution(STEM1), vp.removeSelfContribution(STEM1), vp.removeSelfContribution(STEM3)];
+        return [JSON.stringify(got) === '[1,0,0]' && vp.load().self === null, JSON.stringify(got)];
+    });
+    add('47. with no store (prints off, or nothing kept yet), the removal reads and writes nothing', () => {
+        const fx = fixture();
+        const vp = open(fx);
+        const r = vp.removeSelfContribution(STEM1);
+        return [r === 0 && !fs.existsSync(vp.dir), String(r)];
     });
 
     for (const [name, fn] of cases) {

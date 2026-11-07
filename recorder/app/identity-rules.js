@@ -84,7 +84,12 @@ function contentHeightFor(measured) {
 // name comes from the account (GET /captures/me, or its cache), hence
 // account_display_name. IDENTITY_VERSION stays 2: the server takes personId at
 // that version (captures.ts:126), and nothing compares the number.
-function buildAnswerDoc({ stem, recordingId, guests, selfName, scope, answeredAt, corrects }) {
+//
+// `mic_shared` (SAA-260 11-07) is written only when the member ticked "Someone
+// else spoke into my mic", and then as true. Absent means not shared: the
+// server stores a correction's answer whole, so a correction without it
+// unticks the box (ingest/identity.ts micSharedIn).
+function buildAnswerDoc({ stem, recordingId, guests, selfName, scope, answeredAt, corrects, micShared }) {
     const self = selfName && !hasAt(selfName) ? String(selfName).trim() || null : null;
     const out = [];
     for (const guest of guests || []) {
@@ -105,6 +110,7 @@ function buildAnswerDoc({ stem, recordingId, guests, selfName, scope, answeredAt
         },
         guests: out,
         scope: scope === 'work' || scope === 'personal' ? scope : null,
+        ...(micShared === true ? { mic_shared: true } : {}),
         ...(corrects ? { corrects } : {}),
     };
 }
@@ -116,18 +122,20 @@ function isUuid(value) {
     return typeof value === 'string' && UUID_PATTERN.test(value);
 }
 
-// Whether the people or the scope on Save differ from a saved answer (SAA-260
-// step 4). Guests are compared as a set, each by its name key and personId as
-// the answer file writes them (buildAnswerDoc: names normalised, a personId only
-// when it is a uuid), so the same people in another order are no change.
-function answerChanged(saved, guests, scope) {
+// Whether the people, the scope or the mic box on Save differ from a saved
+// answer (SAA-260 step 4; the box, 11-07). Guests are compared as a set, each by
+// its name key and personId as the answer file writes them (buildAnswerDoc:
+// names normalised, a personId only when it is a uuid), so the same people in
+// another order are no change.
+function answerChanged(saved, guests, scope, micShared = false) {
     const keys = (list) => [...new Set(
         buildAnswerDoc({ stem: '', guests: list || [], selfName: null, scope: null }).guests
             .map((g) => JSON.stringify([peopleName.nameKey(g.name), g.personId || null])),
     )].sort();
     const scopeOf = (s) => (s === 'work' || s === 'personal' ? s : null);
     return JSON.stringify(keys(saved && saved.guests)) !== JSON.stringify(keys(guests))
-        || scopeOf(saved && saved.scope) !== scopeOf(scope);
+        || scopeOf(saved && saved.scope) !== scopeOf(scope)
+        || (!!saved && saved.mic_shared === true) !== (micShared === true);
 }
 
 // A saved answer as the identity window may see it (identity:init): a guest

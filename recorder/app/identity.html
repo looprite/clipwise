@@ -119,6 +119,8 @@
   .segmented button { flex: 1 1 0; border: none; border-radius: 0; }
   .segmented button + button { border-left: 1px solid var(--field-border); }
   .segmented button.active { background: var(--accent); color: #fff; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .check input { margin: 0; }
 
   /* The voices part. While it reads "Finding voices…" it keeps the height of
      two rows, so the window does not grow when they arrive. */
@@ -170,6 +172,11 @@
       <button type="button" data-value="work">Work</button>
       <button type="button" data-value="personal">Personal</button>
     </div>
+  </div>
+
+  <!-- SAA-260 11-07: unticked unless the saved answer says so (correct, voices). -->
+  <div class="section" id="mic-section">
+    <label class="check"><input type="checkbox" id="mic-shared"> Someone else spoke into my mic</label>
   </div>
 
   <div class="section" id="voices-part" hidden>
