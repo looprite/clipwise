@@ -131,6 +131,8 @@ const identitySchema = z.object({
     .optional(),
   scope: z.enum(["work", "personal"]).nullable().optional(),
   corrects: z.string().max(64).optional(),
+  // "Someone else spoke into my mic" (ingest/identity.ts IdentityAnswer).
+  mic_shared: z.boolean().optional(),
 });
 
 // The recorder's voice-naming answer (ingest/voice-names.ts VoiceNamesAnswer), as

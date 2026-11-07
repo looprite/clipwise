@@ -77,7 +77,17 @@ export type IdentityAnswer = {
   // Set on a correction made from Recent meetings (SAA-258): the answered_at of
   // the answer it replaces. See applyIdentityCorrection.
   corrects?: string;
+  // "Someone else spoke into my mic" (SAA-224 11-06, SAA-260 11-07): ticked in
+  // the identity window. `me` then gets no name, on the first answer and on a
+  // correction, since the mic carried more than the member; the host's
+  // attendee row stays. Absent or false: as before.
+  mic_shared?: boolean;
 };
+
+// Whether a stored answer (recordings.metadata) marks the call's mic as shared.
+export function micSharedIn(metadata: unknown): boolean {
+  return (metadata as { identity?: IdentityAnswer } | null | undefined)?.identity?.mic_shared === true;
+}
 
 export type AttendeeRow = { name: string | null; isHost: boolean };
 
@@ -414,8 +424,9 @@ export async function applySpeakerNames(
   // other, unnamed one.
   if (oneGuestNamed) speakers = await mergeVoicesIntoThem(executor, recordingId, speakers);
 
+  const micShared = answer.mic_shared === true;
   const wanted = new Map<string, string | null>([
-    [HOST_LABEL, host?.name ?? null],
+    [HOST_LABEL, micShared ? null : host?.name ?? null],
     [GUEST_LABEL, oneGuestNamed ? guests[0].name : null],
   ]);
 
@@ -428,7 +439,10 @@ export async function applySpeakerNames(
       continue;
     }
     if (!name) {
-      mapping.skipped.push({ label, reason: "the answer supplies no name for this track" });
+      mapping.skipped.push({
+        label,
+        reason: label === HOST_LABEL && micShared ? "the answer marks the mic as shared" : "the answer supplies no name for this track",
+      });
       continue;
     }
     if (speaker.displayName) {
@@ -509,7 +523,8 @@ export type CorrectionApplication = {
 // applySpeakerNames and applyScope add to what is there and never overwrite,
 // this replaces it: the corrected answer is the better one by definition.
 //   attendees  all of the recording's rows deleted, then the answer's inserted
-//   me         the answer's own name, or none
+//   me         the answer's own name, or none (none when it marks the mic as
+//              shared)
 //   them       the one guest's name; with none or two or more guests, unnamed
 //              (a mixed track, as in applySpeakerNames). Voice N rows are merged
 //              into it first when there is one guest
@@ -572,8 +587,9 @@ export async function applyIdentityCorrection(
     .from(schema.speakers)
     .where(eq(schema.speakers.recordingId, recordingId));
   if (guests.length === 1) speakers = await mergeVoicesIntoThem(executor, recordingId, speakers);
+  // A shared mic leaves `me` unnamed; unticked, the host's name comes back.
   const names = new Map<string, string | null>([
-    [HOST_LABEL, host?.name ?? null],
+    [HOST_LABEL, answer.mic_shared === true ? null : host?.name ?? null],
     [GUEST_LABEL, guests.length === 1 ? guests[0].name : null],
   ]);
   for (const [label, name] of names) {

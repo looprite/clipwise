@@ -57,8 +57,8 @@ export function clampPageChars(requested: number | undefined): number {
   return Math.min(MAX_PAGE_CHARS, Math.max(MIN_PAGE_CHARS, Math.floor(requested)));
 }
 
-export function pageTranscript(segments: FileSegment[], hostName: string | null, req: PageRequest = {}): Page {
-  const names = resolveSpeakerNames(segments, hostName);
+export function pageTranscript(segments: FileSegment[], hostName: string | null, req: PageRequest = {}, micShared = false): Page {
+  const names = resolveSpeakerNames(segments, hostName, micShared);
   const lines: (string | null)[] = segments.map((s, i) => {
     const text = collapse(s.text);
     if (text === "") return null;
