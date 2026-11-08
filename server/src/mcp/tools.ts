@@ -10,6 +10,7 @@
 
 import { z } from "zod";
 import type { AccessContext } from "../access/context.js";
+import { logAccess, logSearchAccess } from "../lib/access-line.js";
 import { HttpError } from "../lib/http.js";
 import { logError } from "../lib/safe-error.js";
 import { displayTitle, formatMinutes, formatTimestamp } from "../lib/transcript-file.js";
@@ -145,7 +146,10 @@ export const TOOLS: ToolDef[] = [
         dateFrom: input.dateFrom,
         dateTo: input.dateTo,
       });
-      return fitToBudget((await searchMoments(ctx, query)) as Record<string, unknown>, SEARCH_RESULT_CHARS);
+      const sent = fitToBudget((await searchMoments(ctx, query)) as Record<string, unknown>, SEARCH_RESULT_CHARS);
+      // What was sent, after any cut for size: those are the recordings read.
+      logSearchAccess(ctx.memberId, "mcp.search_moments", JSON.parse(sent));
+      return sent;
     },
   },
   {
@@ -166,6 +170,7 @@ export const TOOLS: ToolDef[] = [
     run: async (ctx, args) => {
       const input = transcriptInput.parse(args ?? {});
       const { title, startedAt, durationSec, page } = await getTranscriptPage(ctx, input.recordingId, input);
+      logAccess(ctx.memberId, "mcp.get_transcript", input.recordingId);
       const lastEnd = durationSec && durationSec > 0 ? durationSec : null;
       const head = [
         `Transcript: ${displayTitle(title)} — ${describeWhen(startedAt)}${lastEnd ? ` · ${formatMinutes(lastEnd)}` : ""}`,

@@ -20,6 +20,7 @@ import { db, schema } from "../db/index.js";
 import { dropReleasedPeople } from "../ingest/attendee-people.js";
 import { CLIPWISE_SOURCE, titlePlaceholderFor } from "../ingest/clipwise.js";
 import { ownerAddressesFor } from "../ingest/invitee-names.js";
+import { logAccess } from "../lib/access-line.js";
 import { asyncHandler, HttpError, parseBody, parseQuery, uuidParam } from "../lib/http.js";
 import { buildTranscriptFile } from "../lib/transcript-read.js";
 
@@ -64,6 +65,7 @@ captureScopeRouter.get(
     const file = await buildTranscriptFile(id, tz);
     if (!file) throw new HttpError(404, "capture_not_found");
     if (file.lines === 0) throw new HttpError(422, "transcript_empty");
+    logAccess(accessOf(req).memberId, "capture.transcript", id);
     res.json(file);
   }),
 );

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { recordingOwnedBy } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
+import { logAccess, logSearchAccess } from "../lib/access-line.js";
 import { asyncHandler, HttpError, parseBody, parseQuery, uuidParam } from "../lib/http.js";
 import { getMoment, searchMoments, searchMomentsQuerySchema } from "../services/search-moments.js";
 
@@ -58,13 +59,18 @@ momentsRouter.get(
   asyncHandler(async (req, res) => {
     const ctx = accessOf(req);
     const query = parseQuery(searchMomentsQuerySchema, req);
-    res.json(await searchMoments(ctx, query));
+    const result = await searchMoments(ctx, query);
+    logSearchAccess(ctx.memberId, "moments.search", result);
+    res.json(result);
   }),
 );
 
 momentsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
-    res.json(await getMoment(accessOf(req), req.params.id));
+    const ctx = accessOf(req);
+    const result = await getMoment(ctx, req.params.id);
+    logAccess(ctx.memberId, "moment", result.moment.recordingId);
+    res.json(result);
   }),
 );
