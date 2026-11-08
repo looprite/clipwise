@@ -41,6 +41,12 @@ kill_timeout = 15
   # user.create.before).
   AUTH_PASSWORD_ENABLED = "false"
   AUTH_ALLOWED_EMAIL_DOMAIN = "looprite.ai"
+  # The id of the call-text key production must hold (SAA-277): the first 8 hex
+  # characters of SHA-256 over the key's bytes. Not secret; the key itself is the
+  # CALL_TEXT_KEY secret. The server refuses to start in production without this,
+  # or with a key whose id differs (src/server.ts), and scratch-db.sh refuses a
+  # test key with this id.
+  CALL_TEXT_KEY_ID = "a15bc5b5"
 
 [http_service]
   # The server listens on 3000 (Fly's default would be 8080).
