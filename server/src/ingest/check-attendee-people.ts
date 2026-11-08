@@ -25,7 +25,11 @@
 //       person (voice-names.ts copies it)
 //   m   (SAA-260 step 3) the reply's `people`: each Voice N's person, ids only;
 //       `them` the one guest's person on a call with no Voice rows, and no one
-//       with two guests or an unlinked guest; the same on a repeat (200)
+//       with two guests or an unlinked guest; the same on a repeat (200).
+//       SAA-272: with the mic marked shared, `them` keeps the guest's name but
+//       maps to no one, on a first answer and on a correction that ticks the
+//       box (m5, m7); unmarked, and on a correction that unticks it, it maps to
+//       the guest's person as before (m6, m8)
 //   k   two captures sent at once naming the same new person: one person
 //   h   the host line: the host row is never linked; a guest named as the
 //       member's display name stays unlinked even though a person with that
@@ -281,6 +285,46 @@ async function main(): Promise<void> {
     const r14 = await post(pmerge);
     const ola = (await guestRow(String(r14.json.recordingId), "Ola Merge"))?.person_id ?? null;
     check("m: a call whose voices were never split (one guest named) maps `them` to that guest; the Mac refuses it (check-voice-prints 7)", !!ola && peopleOf(r14)?.them === ola && peopleOf(r14)?.voices.length === 0, JSON.stringify(r14.json.people));
+
+    // m5-m8 (SAA-272): the mic marked shared. The guest may be the person beside
+    // the member, on the mic, so the one call-audio voice maps to no one and the
+    // Mac builds no print from it. Naming is unchanged: `them` keeps the name.
+    const themName = async (rec: string): Promise<string | null> =>
+      (await pool.query(`select display_name from speakers where recording_id = $1 and label = 'them'`, [rec])).rows[0]?.display_name ?? null;
+    const shared = { mic_shared: true };
+    const r15 = await post(payload(ONE_TO_ONE, { identity: { ...answer(["Sal Shared"]), ...shared } }));
+    const rec15 = String(r15.json.recordingId);
+    const sal = (await guestRow(rec15, "Sal Shared"))?.person_id ?? null;
+    check(
+      "m5: mic marked shared, one guest, no voices: `them` is named the guest, the guest's row is linked to a person, and `them` maps to no one",
+      r15.status === 201 && (await themName(rec15)) === "Sal Shared" && !!sal && peopleOf(r15)?.them === null && peopleOf(r15)?.voices.length === 0,
+      `${r15.status}; them ${JSON.stringify(await themName(rec15))}; person ${sal}; people ${JSON.stringify(r15.json.people)}`,
+    );
+    const A6 = "2026-10-31T17:10:00.000Z";
+    const B6 = "2026-10-31T17:20:00.000Z";
+    const C6 = "2026-10-31T17:30:00.000Z";
+    const p16 = payload(ONE_TO_ONE, { identity: { ...answer(["Ute Unshared"]), answered_at: A6 } });
+    const r16 = await post(p16);
+    const rec16 = String(r16.json.recordingId);
+    const ute = (await guestRow(rec16, "Ute Unshared"))?.person_id ?? null;
+    check(
+      "m6: control: the same unmarked maps `them` to the guest's person",
+      r16.status === 201 && !!ute && peopleOf(r16)?.them === ute && (await themName(rec16)) === "Ute Unshared",
+      `${r16.status}; them ${JSON.stringify(await themName(rec16))}; person ${ute}; people ${JSON.stringify(r16.json.people)}`,
+    );
+    const r17 = await post({ ...p16, identity: { ...answer(["Ute Unshared"]), answered_at: B6, corrects: A6, ...shared } });
+    check(
+      "m7: a correction ticking the box on m6's call: `them` maps to no one, and keeps the guest's name",
+      r17.status === 200 && r17.json.identityApplied === true && peopleOf(r17)?.them === null && (await themName(rec16)) === "Ute Unshared",
+      `${r17.status} applied ${JSON.stringify(r17.json.identityApplied)}; them ${JSON.stringify(await themName(rec16))}; people ${JSON.stringify(r17.json.people)}`,
+    );
+    const r18 = await post({ ...p16, identity: { ...answer(["Ute Unshared"]), answered_at: C6, corrects: B6 } });
+    const ute18 = (await guestRow(rec16, "Ute Unshared"))?.person_id ?? null;
+    check(
+      "m8: a correction unticking it: `them` maps to the guest's person again",
+      r18.status === 200 && r18.json.identityApplied === true && !!ute18 && peopleOf(r18)?.them === ute18,
+      `${r18.status} applied ${JSON.stringify(r18.json.identityApplied)}; person ${ute18}; people ${JSON.stringify(r18.json.people)}`,
+    );
 
     // k. two captures at once naming the same new person.
     const [k1, k2] = await Promise.all([post(payload(ONE_TO_ONE, { identity: answer(["Kit Example"]) })), post(payload(ONE_TO_ONE, { identity: answer(["Kit Example"]) }))]);

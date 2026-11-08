@@ -36,7 +36,7 @@ import { personVisibleTo } from "../access/visibility.js";
 import { normalizeEmail } from "../auth/membership.js";
 import { db, schema } from "../db/index.js";
 import { decideCreate, nameKey, normalizeName } from "../routes/capture-people.js";
-import type { IdentityAnswer } from "./identity.js";
+import { micSharedIn, type IdentityAnswer } from "./identity.js";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -229,6 +229,10 @@ export async function dropReleasedPeople(tx: Tx, accountId: string, personIds: s
 //           guest attendee, when there is exactly one guest and that guest is
 //           linked; otherwise null. Whether `them` is one voice is the Mac's
 //           to judge from its diarize file (it refuses a merged `them`).
+//           Null too when the stored answer marks the mic as shared (SAA-272):
+//           the one guest may be the person beside the member, on the mic, and
+//           the call-audio voice someone else, so no print is built from it.
+//           `them` keeps the guest's name; only the person sent back changes.
 export type VoicePeople = { voices: Array<{ voiceIndex: number; personId: string }>; them: string | null };
 const VOICE_INDEX = /^Voice (\d+)$/;
 export async function voicePeopleFor(executor: typeof db | Tx, recordingId: string): Promise<VoicePeople> {
@@ -246,7 +250,11 @@ export async function voicePeopleFor(executor: typeof db | Tx, recordingId: stri
   }
   voices.sort((a, b) => a.voiceIndex - b.voiceIndex);
   let them: string | null = null;
-  if (!anyVoiceRow && speakers.some((s) => s.label === "them")) {
+  const [recording] = await executor
+    .select({ metadata: schema.recordings.metadata })
+    .from(schema.recordings)
+    .where(eq(schema.recordings.id, recordingId));
+  if (!anyVoiceRow && speakers.some((s) => s.label === "them") && !micSharedIn(recording?.metadata)) {
     const guests = await executor
       .select({ name: schema.attendees.name, personId: schema.attendees.personId })
       .from(schema.attendees)
