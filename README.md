@@ -76,6 +76,8 @@ Clipwise needs an Apple silicon Mac with macOS 14.2 or later. It doesn't open on
 
 Open the Clipwise .dmg from the link you were sent, drag Clipwise to Applications, and open it from there.
 
+New members: [docs/member-setup.md](docs/member-setup.md) walks through setup, your first call, and fixing or deleting a call.
+
 ## Recorder setup
 
 Covers the Mac recorder only; the server, which serves MCP itself, has its own setup.
