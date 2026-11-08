@@ -575,8 +575,13 @@ cmd_run() {
     || refuse "usage: scratch-db.sh run <check>: check-access | check-auth | check-trash, or the file name of one src/**/check-*.ts (got '$check')"
   scratch_ready
   if [ "$MODE" = data ]; then
-    # The write checks assume the empty branch their own setup made.
-    [ "$check" = check-unique-index ] || refuse "this scratch branch has main's data; only check-unique-index runs on it"
+    # The write checks assume the empty branch their own setup made. Two read-only
+    # ones run on main's copied rows: the unique index, and the call-text totals
+    # read back through the ORM after a backfill rehearsal (SAA-277).
+    case "$check" in
+      check-unique-index | check-call-text-lengths) ;;
+      *) refuse "this scratch branch has main's data; only check-unique-index and check-call-text-lengths run on it" ;;
+    esac
   fi
 
   say "run: $check"
