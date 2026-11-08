@@ -56,6 +56,11 @@
 #   scratch-db.sh sql < file      psql on the scratch branch after the guard, the
 #                                 statements from stdin inside BEGIN READ ONLY
 #                                 ... ROLLBACK
+#   scratch-db.sh backfill [--apply]
+#                                 src/db/encrypt-call-text.ts (SAA-277) after the
+#                                 guard: a dry run, or --apply to encrypt the plain
+#                                 call text with the branch's test key. Runs on a
+#                                 --with-data branch too (the rehearsal for main)
 #   scratch-db.sh down            delete the branch and its files, then read back
 #
 # Exit codes: 0 ok, 1 a step failed (the branch is left up), 2 refused before
@@ -254,6 +259,8 @@ clean_exec() {
         GOOGLE_OAUTH_REDIRECT_URI) [ -z "${GOOGLE_REDIRECT_VALUE:-}" ] || export GOOGLE_OAUTH_REDIRECT_URI="$GOOGLE_REDIRECT_VALUE" ;;
         CALENDAR_TOKEN_ENCRYPTION_KEY) [ -z "${CALENDAR_KEY_VALUE:-}" ] || export CALENDAR_TOKEN_ENCRYPTION_KEY="$CALENDAR_KEY_VALUE" ;;
         PROBE_HOST) export PROBE_HOST="$PROBE_HOST_VALUE" ;;
+        # The branch's test key's id, worked out from the settings file (see cmd_backfill).
+        CALL_TEXT_KEY_ID) export CALL_TEXT_KEY_ID="$TEST_KEY_ID_VALUE" ;;
         *) export "$v=$(envval "$v" "$f")" ;;
       esac
     done
@@ -681,6 +688,26 @@ cmd_demo_produce() {
   exit "${PIPESTATUS[0]}"
 }
 
+# The call-text backfill (SAA-277 step 6, src/db/encrypt-call-text.ts) on the
+# scratch branch, after the guard: a dry run by default, --apply to encrypt. The
+# one command besides check-unique-index allowed on a --with-data branch, where it
+# is the rehearsal for main: main's rows, copied, encrypted with the branch's test
+# key. It gets that key and its id as CALL_TEXT_KEY_ID (--apply requires the id),
+# and the database, nothing else. It prints counts and ids only.
+cmd_backfill() {
+  case "${1:-}" in
+    "") ;;
+    --apply) [ $# -eq 1 ] || refuse "usage: scratch-db.sh backfill [--apply]" ;;
+    *) refuse "usage: scratch-db.sh backfill [--apply]" ;;
+  esac
+  scratch_ready
+  TEST_KEY_ID_VALUE="$(key_id_of_file "$F")"
+  say "backfill: src/db/encrypt-call-text.ts ${1:-(dry run)} on the $MODE branch, test key $TEST_KEY_ID_VALUE"
+  clean_exec "$F" DATABASE_URL CALL_TEXT_KEY CALL_TEXT_KEY_ID -- \
+    npx --no-install tsx src/db/encrypt-call-text.ts ${1:+"$1"} 2>&1 | scrub
+  exit "${PIPESTATUS[0]}"
+}
+
 # psql against the scratch branch, the connection given as PG* variables taken
 # apart from DATABASE_URL, so the URL is on no command line.
 PSQL_JS='
@@ -874,8 +901,9 @@ case "${1:-}" in
   jobs) shift; cmd_jobs "$@" ;;
   demo-produce) shift; cmd_demo_produce "$@" ;;
   sql) shift; cmd_sql "$@" ;;
+  backfill) shift; cmd_backfill "$@" ;;
   push) shift; cmd_push "$@" ;;
   push-check) shift; cmd_push_check "$@" ;;
   down) cmd_down ;;
-  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | cli <command> | jobs <command> | demo-produce | sql | down" >&2; exit 2 ;;
+  *) say "usage: scratch-db.sh up [--with-data] | push [--apply] | run <check> | serve | cli <command> | jobs <command> | demo-produce | sql | backfill [--apply] | down" >&2; exit 2 ;;
 esac

@@ -31,6 +31,15 @@ const STORED = /^cw1:([0-9a-f]{8}):([A-Za-z0-9+/]+={0,2})$/;
 
 export type CallTextKey = { readonly id: string; readonly bytes: Buffer };
 
+// Every refusal below: a missing or malformed key, a key id that is not the one
+// expected, a value under another key, or one that fails authentication. Its
+// message names variables and key ids only, never text or a key, so a caller
+// that prints errors with care (db/encrypt-call-text.ts) can print this class's
+// message and nothing else's.
+export class CallTextKeyError extends Error {
+  override name = "CallTextKeyError";
+}
+
 export function keyIdOf(raw: Buffer): string {
   return createHash("sha256").update(raw).digest("hex").slice(0, 8);
 }
@@ -40,13 +49,13 @@ export function keyIdOf(raw: Buffer): string {
 // variable exists.
 export function loadCallTextKey(env: Record<string, string | undefined> = process.env): CallTextKey {
   const encoded = (env.CALL_TEXT_KEY ?? "").trim();
-  if (!encoded) throw new Error("CALL_TEXT_KEY not set. Generate one with: openssl rand -base64 32");
+  if (!encoded) throw new CallTextKeyError("CALL_TEXT_KEY not set. Generate one with: openssl rand -base64 32");
   const bytes = Buffer.from(encoded, "base64");
-  if (bytes.toString("base64") !== encoded) throw new Error("CALL_TEXT_KEY is not base64. Generate one with: openssl rand -base64 32");
-  if (bytes.length !== KEY_BYTES) throw new Error(`CALL_TEXT_KEY must decode to ${KEY_BYTES} bytes; got ${bytes.length}`);
+  if (bytes.toString("base64") !== encoded) throw new CallTextKeyError("CALL_TEXT_KEY is not base64. Generate one with: openssl rand -base64 32");
+  if (bytes.length !== KEY_BYTES) throw new CallTextKeyError(`CALL_TEXT_KEY must decode to ${KEY_BYTES} bytes; got ${bytes.length}`);
   const id = keyIdOf(bytes);
   const expected = (env.CALL_TEXT_KEY_ID ?? "").trim();
-  if (expected && expected !== id) throw new Error(`CALL_TEXT_KEY has id ${id}, but CALL_TEXT_KEY_ID expects ${expected}`);
+  if (expected && expected !== id) throw new CallTextKeyError(`CALL_TEXT_KEY has id ${id}, but CALL_TEXT_KEY_ID expects ${expected}`);
   return { id, bytes };
 }
 
@@ -69,9 +78,9 @@ export function encryptCallText(plaintext: string, key: CallTextKey = loadCallTe
 export function decryptCallText(stored: string, key: CallTextKey = loadCallTextKey()): string {
   if (!isEncryptedCallText(stored)) return stored;
   const [, id, body] = STORED.exec(stored)!;
-  if (id !== key.id) throw new Error(`call text was encrypted with key ${id}; the key loaded is ${key.id}`);
+  if (id !== key.id) throw new CallTextKeyError(`call text was encrypted with key ${id}; the key loaded is ${key.id}`);
   const raw = Buffer.from(body, "base64");
-  if (raw.length < IV_BYTES + TAG_BYTES) throw new Error(`call text under key ${id} is too short to hold its IV and tag (truncated)`);
+  if (raw.length < IV_BYTES + TAG_BYTES) throw new CallTextKeyError(`call text under key ${id} is too short to hold its IV and tag (truncated)`);
   const decipher = createDecipheriv(ALGORITHM, key.bytes, raw.subarray(0, IV_BYTES));
   // No associated data: the id is derived from the key, so a value relabelled
   // with another key's id opens with that key's bytes and fails on the tag.
@@ -79,6 +88,6 @@ export function decryptCallText(stored: string, key: CallTextKey = loadCallTextK
   try {
     return Buffer.concat([decipher.update(raw.subarray(IV_BYTES + TAG_BYTES)), decipher.final()]).toString("utf8");
   } catch {
-    throw new Error(`call text under key ${id} failed authentication (altered or truncated)`);
+    throw new CallTextKeyError(`call text under key ${id} failed authentication (altered or truncated)`);
   }
 }

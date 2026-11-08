@@ -31,7 +31,7 @@
 // writes back metadata it got from raw SQL.
 
 import { customType } from "drizzle-orm/pg-core";
-import { decryptCallText, encryptCallText, isEncryptedCallText } from "../lib/call-text.js";
+import { decryptCallText, encryptCallText, isEncryptedCallText, type CallTextKey } from "../lib/call-text.js";
 
 export const encryptedText = customType<{ data: string; driverData: string }>({
   dataType() {
@@ -47,17 +47,19 @@ export const encryptedText = customType<{ data: string; driverData: string }>({
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
-const sealString = (v: string): string => (isEncryptedCallText(v) ? v : encryptCallText(v));
+// The seal functions take the key from the environment unless given one (the
+// backfill passes the key it loaded).
+const sealString = (v: string, key?: CallTextKey): string => (isEncryptedCallText(v) ? v : encryptCallText(v, key));
 
 // ---- moments.metadata ----
 
-export function sealMomentMetadata(meta: unknown): unknown {
+export function sealMomentMetadata(meta: unknown, key?: CallTextKey): unknown {
   if (!isObj(meta)) return meta;
   const out: Obj = { ...meta };
-  if (typeof out.span_label === "string") out.span_label = sealString(out.span_label);
+  if (typeof out.span_label === "string") out.span_label = sealString(out.span_label, key);
   // Any JSON value, sealed as its JSON text; a string already sealed is kept.
   if (out.speakers !== undefined && out.speakers !== null && !(typeof out.speakers === "string" && isEncryptedCallText(out.speakers))) {
-    out.speakers = encryptCallText(JSON.stringify(out.speakers));
+    out.speakers = encryptCallText(JSON.stringify(out.speakers), key);
   }
   return out;
 }
@@ -80,7 +82,7 @@ function mapDropped(meta: unknown, fn: (text: string) => string): unknown {
   return { ...meta, capture_quality: { ...meta.capture_quality, dropped_segments: dropped } };
 }
 
-export const sealRecordingMetadata = (meta: unknown): unknown => mapDropped(meta, sealString);
+export const sealRecordingMetadata = (meta: unknown, key?: CallTextKey): unknown => mapDropped(meta, (v) => sealString(v, key));
 export const openRecordingMetadata = (meta: unknown): unknown => mapDropped(meta, decryptCallText);
 
 // ---- the two jsonb columns ----
