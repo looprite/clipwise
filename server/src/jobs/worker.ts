@@ -47,7 +47,9 @@ import { readExtractionCompletion, runExtraction, speakerFingerprintHash, LeaseL
 import { embedMomentsByIds, type Embedder } from "../extract/embeddings.js";
 import { describeCalendarMatchApplication } from "../ingest/calendar-match.js";
 import { matchRecording } from "../pipeline/match-calendar.js";
+import { decryptCallText } from "../lib/call-text.js";
 import { describeErrorLine, errorClassOf, logError, passingApiCondition } from "../lib/safe-error.js";
+import { momentEmbedText } from "../lib/voyage.js";
 import { abortableFetch } from "./abort.js";
 import type { Wakeable } from "./registry.js";
 
@@ -412,18 +414,22 @@ export class JobWorker implements Wakeable {
     if (r.rowCount) console.log(`jobs: ${job.id} recording=${job.recording_id} removed ${r.rowCount} unpromoted moment(s)`);
   }
 
-  // The current run's visible moments that have text and no embedding.
+  // The current run's visible moments that have text and no embedding. Title and
+  // summary are encrypted at rest (SAA-277), so "has text" is decided here, after
+  // decrypting, by the embedder's own rule (momentEmbedText): a blank test in SQL
+  // would see ciphertext, never blank, and a moment the embedder skips would be
+  // counted as missing forever.
   private async missingEmbeddings(recordingId: string): Promise<string[]> {
-    const r = await this.query<{ id: string }>(
-      `select m.id from moments m join recordings r on r.id = m.recording_id
+    const r = await this.query<{ id: string; title: string | null; summary: string | null }>(
+      `select m.id, m.title, m.summary from moments m join recordings r on r.id = m.recording_id
        where m.recording_id = $1
          and (m.metadata->>'extraction_run') = (r.metadata->>'current_extraction_run')
          and (m.metadata->>'collapsed_into') is null
-         and m.embedding is null
-         and (btrim(coalesce(m.title, '')) <> '' or btrim(coalesce(m.summary, '')) <> '')`,
+         and m.embedding is null`,
       [recordingId],
     );
-    return r.rows.map((x) => x.id);
+    const open = (v: string | null) => (v === null ? null : decryptCallText(v));
+    return r.rows.filter((x) => momentEmbedText(open(x.title), open(x.summary)) !== null).map((x) => x.id);
   }
 
   private async embedMissing(job: JobRow, signal: AbortSignal): Promise<void> {

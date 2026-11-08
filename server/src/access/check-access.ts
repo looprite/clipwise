@@ -61,6 +61,11 @@ import { resolveCalendarConnection } from "../pipeline/match-calendar.js";
 import { MCP_TOOLS, ROUTES } from "./classification.js";
 import { listRoutes } from "./route-list.js";
 
+// A value a raw query returned, through the column's own mapping, as drizzle reads
+// it: call text is stored encrypted (SAA-277), so a raw read sees the stored shape.
+// Null stays null, as drizzle leaves it.
+const viaColumn = (col: { mapFromDriverValue(v: unknown): unknown }, v: unknown): unknown => (v === null || v === undefined ? null : col.mapFromDriverValue(v));
+
 const CONTROL = process.env.CLIPWISE_CHECK_CONTROL ?? "";
 if (CONTROL !== "" && CONTROL !== "requires-dropped" && CONTROL !== "no-registration-defaults" && CONTROL !== "jobs-edge-dropped") {
   process.stderr.write(`check-access: unknown CLIPWISE_CHECK_CONTROL ${JSON.stringify(CONTROL)}\n`);
@@ -562,8 +567,11 @@ async function main(): Promise<void> {
       };
     };
     const capPost = (who: Who, payload: unknown) => http("POST", "/captures", { token: capToken(who), json: payload });
+    // title and metadata through their columns' own mapping: stored encrypted (SAA-277).
     const capRows = async (id: string) =>
-      (await pool.query(`select id, account_id, owner_member_id, source, source_id, title, slug, status, visibility, scope, metadata, updated_at from recordings where account_id = $1 and source_id = $2`, [acc, id])).rows;
+      (await pool.query(`select id, account_id, owner_member_id, source, source_id, title, slug, status, visibility, scope, metadata, updated_at from recordings where account_id = $1 and source_id = $2`, [acc, id])).rows.map(
+        (r) => ({ ...r, title: viaColumn(schema.recordings.title, r.title), metadata: viaColumn(schema.recordings.metadata, r.metadata) }),
+      );
     const capCount = async (rid: string, table: "segments" | "transcripts" | "attendees") =>
       (await pool.query(`select count(*)::int as n from ${table} where recording_id = $1`, [rid])).rows[0].n as number;
     const allRecordings = async () => (await pool.query(`select count(*)::int as n from recordings where account_id = $1`, [acc])).rows[0].n as number;
@@ -1877,7 +1885,7 @@ async function main(): Promise<void> {
           `select id, title, source_id, visibility, status, scope, started_at, trashed_at from recordings where owner_member_id = $1 and source = 'clipwise-demo' order by started_at`,
           [memberId],
         )
-      ).rows;
+      ).rows.map((r) => ({ ...r, title: viaColumn(schema.recordings.title, r.title) as string }));
     const countIn = async (table: string, ids: string[]) =>
       ids.length === 0 ? 0 : Number((await pool.query<{ n: string }>(`select count(*)::text n from ${table} where recording_id = any($1::uuid[])`, [ids])).rows[0].n);
     const peopleBefore = Number((await pool.query<{ n: string }>(`select count(*)::text n from people where account_id = $1`, [acc])).rows[0].n);
@@ -1915,7 +1923,7 @@ async function main(): Promise<void> {
                from moments m join recordings r on r.id = m.recording_id where m.recording_id = any($1::uuid[]) order by m.start_sec`,
             [dIds],
           )
-        ).rows
+        ).rows.map((m) => ({ ...m, title: viaColumn(schema.moments.title, m.title) as string }))
       : [];
     const perCall = dIds.map((id) => demoMoments.filter((m) => m.recording_id === id).length);
     record(

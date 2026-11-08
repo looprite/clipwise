@@ -4,9 +4,9 @@
 //
 //   npx tsx src/lib/check-call-text.ts
 //
-// It also runs the key-id command from the hand step (base64 -d | shasum -a 256)
-// on a throwaway key, so the id Jon reads off his terminal is the one the server
-// computes.
+// It also runs the key-id command an operator uses on a new key (base64 -d |
+// shasum -a 256) on a throwaway key, so the id read off a terminal is the one
+// the server computes.
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";

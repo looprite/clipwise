@@ -18,6 +18,7 @@
 //   npx tsx src/check-boot.ts
 
 import { spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
@@ -78,10 +79,22 @@ server.close();
 // SIGTERM to the real server. `sendWhen` picks the log line after which it is
 // sent; the result has every line the child wrote and how long the exit took.
 const DEAD_URL = "postgres://check:check@127.0.0.1:1/none";
-async function sigtermServer(sendWhen: (line: string) => boolean): Promise<{ lines: string[]; code: number | null; ms: number | null }> {
+// A throwaway call-text key (SAA-277): the server refuses to start without one.
+const TEST_KEY = randomBytes(32).toString("base64");
+const TEST_KEY_ID = createHash("sha256").update(Buffer.from(TEST_KEY, "base64")).digest("hex").slice(0, 8);
+function childEnv(extra: Record<string, string | undefined>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, PORT: "0", DATABASE_URL: DEAD_URL, CALL_TEXT_KEY: TEST_KEY, NODE_ENV: "development" };
+  delete env.CALL_TEXT_KEY_ID;
+  for (const [k, v] of Object.entries(extra)) {
+    if (v === undefined) delete env[k];
+    else env[k] = v;
+  }
+  return env;
+}
+async function sigtermServer(sendWhen: (line: string) => boolean, extraEnv: Record<string, string | undefined> = {}): Promise<{ lines: string[]; code: number | null; ms: number | null }> {
   const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
     cwd: resolve(import.meta.dirname, ".."),
-    env: { ...process.env, PORT: "0", DATABASE_URL: DEAD_URL },
+    env: childEnv(extraEnv),
     stdio: ["ignore", "pipe", "pipe"],
   });
   const lines: string[] = [];
@@ -117,6 +130,20 @@ const loaded = await sigtermServer((l) => l.startsWith("jobs: boot check failed"
 console.log(`control, SIGTERM after the worker started: exit ${loaded.code} after ${loaded.ms ?? "-"} ms`);
 check("control: a worker that did start is seen (the absence above is not blindness)", workerSeen(loaded.lines) && loaded.lines.some((l) => l.includes("jobs worker stopped")), loaded.lines.filter((l) => l.startsWith("jobs: ") || l.startsWith("shutdown:")).join(" / "));
 check("control: with the worker started, SIGTERM does not take the \"while starting\" path and exits 0", loaded.code === 0 && !loaded.lines.some((l) => l.includes("received while starting")), JSON.stringify({ code: loaded.code }));
+
+// The call-text key at start (SAA-277). Each run is stopped at "listening" if it
+// gets that far; a refusal exits 1 before the port opens.
+const listening = (lines: string[]) => lines.some((l) => l.startsWith("Clipwise server listening on port"));
+const atListen = (l: string) => l.startsWith("Clipwise server listening on port");
+const noKey = await sigtermServer(atListen, { CALL_TEXT_KEY: undefined });
+check("no CALL_TEXT_KEY: the server refuses before it listens, exit 1, naming the variable", noKey.code === 1 && !listening(noKey.lines) && noKey.lines.some((l) => l.startsWith("startup: refused: CALL_TEXT_KEY not set")), JSON.stringify({ code: noKey.code, lines: noKey.lines.slice(0, 3) }));
+check("with a key, the id is printed and the key is not", loading.lines.includes(`call text: key ${TEST_KEY_ID}`) && !loading.lines.some((l) => l.includes(TEST_KEY)), loading.lines.slice(0, 3).join(" / "));
+const prodNoId = await sigtermServer(atListen, { NODE_ENV: "production" });
+check("production with a key but no CALL_TEXT_KEY_ID: refused before it listens, exit 1", prodNoId.code === 1 && !listening(prodNoId.lines) && prodNoId.lines.some((l) => l.includes("CALL_TEXT_KEY_ID must be set in production")), JSON.stringify({ code: prodNoId.code, lines: prodNoId.lines.slice(0, 3) }));
+const prodWrongId = await sigtermServer(atListen, { NODE_ENV: "production", CALL_TEXT_KEY_ID: TEST_KEY_ID === "00000000" ? "11111111" : "00000000" });
+check("production with a CALL_TEXT_KEY_ID that is not the key's: refused, exit 1, naming both ids and not the key", prodWrongId.code === 1 && !listening(prodWrongId.lines) && prodWrongId.lines.some((l) => l.includes(`has id ${TEST_KEY_ID}`)) && !prodWrongId.lines.some((l) => l.includes(TEST_KEY)), JSON.stringify({ code: prodWrongId.code, lines: prodWrongId.lines.slice(0, 3) }));
+const prodRightId = await sigtermServer(atListen, { NODE_ENV: "production", CALL_TEXT_KEY_ID: TEST_KEY_ID });
+check("control: production with the key's own id starts and listens", listening(prodRightId.lines) && prodRightId.code === 0, JSON.stringify({ code: prodRightId.code, lines: prodRightId.lines.slice(0, 3) }));
 
 console.log(failures === 0 ? "\ncheck-boot: all passed" : `\ncheck-boot: ${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

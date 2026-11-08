@@ -56,7 +56,7 @@
 
 import { createHash } from "node:crypto";
 import type { RequestHandler, Response } from "express";
-import { and, count, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { db, schema } from "../db/index.js";
@@ -628,13 +628,12 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
 
     // Read back from the database, not the ORM's report: what is stored is what
     // was declared (less the deliberate exclusions), or nothing is stored.
-    const [stored] = await tx
-      .select({
-        turnCount: count(),
-        bodyChars: sql<number>`coalesce(sum(char_length(${schema.segments.text})), 0)::bigint`,
-      })
-      .from(schema.segments)
-      .where(eq(schema.segments.recordingId, recording.id));
+    // The text is encrypted at rest (SAA-277), so it is read back through its
+    // column, which decrypts it, and counted by the same rule as the request; a
+    // char_length in SQL would count the stored ciphertext.
+    const stored = countObservedFidelity(
+      await tx.select({ text: schema.segments.text }).from(schema.segments).where(eq(schema.segments.recordingId, recording.id)),
+    );
     const expected = countObservedFidelity(kept);
     if (Number(stored.turnCount) !== expected.turnCount || Number(stored.bodyChars) !== expected.bodyChars) {
       throw new Error(

@@ -36,6 +36,7 @@
 import express from "express";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
+import { openMomentMetadata } from "../db/call-text-columns.js";
 import { pool } from "../db/index.js";
 import { dropAccount, endPool, makeAccount, refuseUnlessScratch } from "../extract/fixtures-for-checks.js";
 import { runExtraction } from "../extract/extract.js";
@@ -143,11 +144,13 @@ async function main(): Promise<void> {
     });
     await runExtraction(rec, { client: stub.client });
     const body = (kind: string) => stub.bodies.filter((_, i) => stub.calls[i] === kind).join("\n");
+    // speakers is sealed at rest (SAA-277), so it is opened here; extraction_run
+    // stays plain and is still filtered in SQL.
     const stored = (await pool.query(
       `select m.metadata->'speakers' as speakers from moments m join recordings r on r.id = m.recording_id
         where m.recording_id = $1 and m.metadata->>'extraction_run' = r.metadata->>'current_extraction_run'`,
       [rec],
-    )).rows.map((r) => JSON.stringify(r.speakers));
+    )).rows.map((r) => JSON.stringify((openMomentMetadata({ speakers: r.speakers }) as { speakers: unknown }).speakers));
     return { pass1: body("pass1"), pass2: body("pass2"), stored };
   };
   const SAID = [HOST, "Jon", GUEST, "me"];

@@ -382,26 +382,15 @@ export async function searchMoments(ctx: AccessContext, query: SearchMomentsQuer
       ),
     );
   }
-  if (query.q) {
-    // SAA-158: this used to run one ILIKE against the whole query
-    // string, so a multi-word query only matched a moment where the
-    // words appeared contiguously and in that order — a query for two
-    // words that are both in the moment's text, just not next to each
-    // other, returned zero regardless of what the store contained.
-    // Split on whitespace and AND a substring match per word instead
-    // (each word can land in either title or summary independently).
-    // Still pure substring matching, no ranking or embeddings — AD
-    // #13's separation of the lexical and semantic paths is unchanged.
-    const words = query.q.split(/\s+/).filter(Boolean);
-    for (const word of words) {
-      const like = `%${word}%`;
-      const wordMatch = or(
-        ilike(schema.moments.title, like),
-        ilike(schema.moments.summary, like),
-      );
-      if (wordMatch) conditions.push(wordMatch);
-    }
-  }
+  // `q` (SAA-158): every whitespace-separated word must appear, as a
+  // case-insensitive substring, in the title or the summary (each word in
+  // either, independently). Still pure substring matching, no ranking or
+  // embeddings — AD #13's separation of the lexical and semantic paths is
+  // unchanged. Matched in the server, not by ILIKE: title and summary are
+  // encrypted at rest (SAA-277), so SQL sees only ciphertext. See the lexical
+  // branch below. A word is now matched literally; ILIKE took % and _ in it as
+  // wildcards.
+  const words = (query.q ?? "").split(/\s+/).filter(Boolean).map((w) => w.toLowerCase());
 
   // Semantic path — separate from substring per AD #13. Return shape
   // matches the substring path apart from the added similarity and
@@ -477,6 +466,64 @@ export async function searchMoments(ctx: AccessContext, query: SearchMomentsQuer
     };
   }
 
+  const limit = query.limit ?? 50;
+  const lexicalFields = {
+    id: schema.moments.id,
+    recordingId: schema.moments.recordingId,
+    kind: schema.moments.kind,
+    title: schema.moments.title,
+    summary: schema.moments.summary,
+    startSec: schema.moments.startSec,
+    endSec: schema.moments.endSec,
+    score: schema.moments.score,
+    metadata: schema.moments.metadata,
+    createdAt: schema.moments.createdAt,
+    recordingTitle: schema.recordings.title,
+    recordingSlug: schema.recordings.slug,
+    recordingSourceId: schema.recordings.sourceId,
+  };
+
+  if (words.length > 0) {
+    // Every moment the other conditions allow, read and decrypted, then the
+    // words matched here. The count, the round-robin order and the limit below
+    // are the SQL path's, done on the matches: a recording's rank has to be
+    // counted among its matching moments only, as row_number() over the
+    // filtered rows did. Reads every candidate in scope on each query, which is
+    // fine at this corpus's size; narrowing by recordingId, kind or dates
+    // narrows the read too.
+    const candidates = await db
+      .select({ ...lexicalFields, recordingStartedAt: schema.recordings.startedAt })
+      .from(schema.moments)
+      .innerJoin(schema.recordings, eq(schema.moments.recordingId, schema.recordings.id))
+      .where(and(...conditions));
+    const matches = candidates.filter((m) => {
+      const title = (m.title ?? "").toLowerCase();
+      const summary = (m.summary ?? "").toLowerCase();
+      return words.every((w) => title.includes(w) || summary.includes(w));
+    });
+    const rankOf = new Map<string, number>();
+    const byRecording = new Map<string, typeof matches>();
+    for (const m of matches) byRecording.set(m.recordingId, [...(byRecording.get(m.recordingId) ?? []), m]);
+    for (const list of byRecording.values()) {
+      list.sort((a, b) => a.startSec - b.startSec || a.id.localeCompare(b.id));
+      list.forEach((m, i) => rankOf.set(m.id, i + 1));
+    }
+    // desc(started_at) as Postgres sorts it: nulls first.
+    const started = (m: (typeof matches)[number]) => (m.recordingStartedAt ? m.recordingStartedAt.getTime() : Number.POSITIVE_INFINITY);
+    matches.sort(
+      (a, b) =>
+        rankOf.get(a.id)! - rankOf.get(b.id)! || started(b) - started(a) || a.startSec - b.startSec || a.id.localeCompare(b.id),
+    );
+    const rows = matches.slice(0, limit).map(({ recordingStartedAt: _startedAt, ...row }) => row);
+    return {
+      moments: rows,
+      totalMatches: matches.length,
+      truncated: matches.length > rows.length,
+      scope: resolvedScope,
+      scopeDefaulted,
+    };
+  }
+
   // True match count (SAA-131, SAA-108) — see the semantic branch above
   // for why this runs against `conditions` before `limit` is applied.
   const [{ count: totalMatches }] = await db
@@ -485,23 +532,8 @@ export async function searchMoments(ctx: AccessContext, query: SearchMomentsQuer
     .innerJoin(schema.recordings, eq(schema.moments.recordingId, schema.recordings.id))
     .where(and(...conditions));
 
-  const limit = query.limit ?? 50;
   const rows = await db
-    .select({
-      id: schema.moments.id,
-      recordingId: schema.moments.recordingId,
-      kind: schema.moments.kind,
-      title: schema.moments.title,
-      summary: schema.moments.summary,
-      startSec: schema.moments.startSec,
-      endSec: schema.moments.endSec,
-      score: schema.moments.score,
-      metadata: schema.moments.metadata,
-      createdAt: schema.moments.createdAt,
-      recordingTitle: schema.recordings.title,
-      recordingSlug: schema.recordings.slug,
-      recordingSourceId: schema.recordings.sourceId,
-    })
+    .select(lexicalFields)
     .from(schema.moments)
     .innerJoin(
       schema.recordings,

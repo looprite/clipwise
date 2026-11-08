@@ -97,6 +97,7 @@ import { makeStubEmbedder, makeStubModel, waitFor } from "../extract/stub-model.
 import { dropAccount, endPool, makeAccount, makeRecording, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
 import { captureScopeRouter } from "../routes/capture-scope.js";
 import { capturesPost } from "../routes/captures.js";
+import { isEncryptedCallText } from "../lib/call-text.js";
 import { encrypt } from "../lib/crypto.js";
 import { errorHandler } from "../lib/http.js";
 import * as workerModule from "./worker.js";
@@ -433,7 +434,8 @@ async function main(): Promise<void> {
 
         await db.delete(schema.jobs).where(eq(schema.jobs.recordingId, capZ));
         const jobs = await runToEnd(worker(model(), makeStubEmbedder()), capX);
-        const rec = (await pool.query("select status, title from recordings where id = $1", [capX])).rows[0] as { status: string; title: string | null };
+        // Through the column, which decrypts: the title is encrypted at rest (SAA-277).
+        const [rec] = await db.select({ status: schema.recordings.status, title: schema.recordings.title }).from(schema.recordings).where(eq(schema.recordings.id, capX));
         const inv = (await pool.query("select email from invitees where recording_id = $1 order by email", [capX])).rows.map((r) => r.email as string);
         const uniqueTokens = [...new Set(tokensSeen)];
 
@@ -1104,6 +1106,32 @@ async function main(): Promise<void> {
       }
     }
 
+    // ---- emb0: a blank moment is not missing an embedding (SAA-277) -------------
+    // Title and summary are encrypted at rest, so even an empty one is stored as a
+    // non-empty cw1: value. missingEmbeddings must decide "has text" after
+    // decrypting, by the embedder's rule: read in SQL, the blank moment would be
+    // reported missing on every pass, and embedMissing would fail the job, since
+    // the embedder skips it.
+    if (wanted("emb0")) {
+      const rid = await makeRecording(fx, { segments: 1 });
+      const run = randomUUID();
+      await db.update(schema.recordings).set({ metadata: { current_extraction_run: run } }).where(eq(schema.recordings.id, rid));
+      const insertMoment = async (title: string, summary: string) =>
+        (await db
+          .insert(schema.moments)
+          .values({ accountId: fx.accountId, recordingId: rid, kind: "observation", title, summary, startSec: 0, endSec: 1, metadata: { source: "extracted", extraction_run: run } })
+          .returning({ id: schema.moments.id }))[0].id;
+      const blank = await insertMoment("", "");
+      const withText = await insertMoment("a point made", "with a summary");
+      const stored = (await pool.query("select title, summary, embedding is null as no_embedding from moments where id = $1", [blank])).rows[0] as { title: string; summary: string; no_embedding: boolean };
+      check("emb0 setup: the blank moment's title and summary are stored encrypted, and it has no embedding", isEncryptedCallText(stored.title) && isEncryptedCallText(stored.summary) && stored.no_embedding);
+      const w = worker(model(), makeStubEmbedder());
+      const missing: string[] = await w["missingEmbeddings"](rid);
+      check("emb0 a current-run moment with empty title and summary is not reported missing an embedding", !missing.includes(blank), JSON.stringify({ blankReported: missing.includes(blank), missing: missing.length }));
+      check("emb0 control: a current-run moment with text and no embedding is reported missing", missing.includes(withText), JSON.stringify({ missing: missing.length }));
+      await db.delete(schema.recordings).where(eq(schema.recordings.id, rid));
+    }
+
     // ---- r: the jobs CLI ------------------------------------------------------
     if (wanted("r")) {
       await clearJobs();
@@ -1134,7 +1162,9 @@ async function main(): Promise<void> {
       // list: both jobs, by id and state, and no call content. The phrase is in the
       // database (the done recording's moments), so its absence here is the list's.
       const listed = await cli("list");
-      const phraseInDb = (await pool.query("select count(*)::int as n from moments where recording_id = $1 and title like $2", [recordingId, `%${PHRASE}%`])).rows[0].n;
+      // Read through the column, which decrypts: titles are encrypted at rest
+      // (SAA-277), so a LIKE in SQL would find nothing.
+      const phraseInDb = (await db.select({ title: schema.moments.title }).from(schema.moments).where(eq(schema.moments.recordingId, recordingId))).filter((m) => (m.title ?? "").includes(PHRASE)).length;
       const lineOf = (id: string): string => listed.out.split("\n").find((l) => l.includes(id)) ?? "";
       check("r list exits 0 with one line per job, each with its recording, kind, state and attempts", listed.code === 0 && / done +attempts=1 /.test(lineOf(failed.id)) && lineOf(failed.id).includes(`recording=${recordingId} extract`) && / running +attempts=0 /.test(lineOf(running.id)), JSON.stringify({ code: listed.code, lines: [lineOf(failed.id), lineOf(running.id)] }));
       check("r list holds the planted phrase nowhere, though the recording's moments carry it", phraseInDb > 0 && !`${listed.out}${listed.err}`.includes(PHRASE), JSON.stringify({ phraseInMoments: phraseInDb }));

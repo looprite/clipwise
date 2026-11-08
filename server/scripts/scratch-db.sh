@@ -62,9 +62,10 @@
 # doing anything, 3 the guard refused a host.
 #
 # Secrets stay in the settings file (mode 600). Nothing here prints the
-# connection string, the admin password, the auth secret, VOYAGE_API_KEY,
-# ANTHROPIC_API_KEY or GOOGLE_CLIENT_SECRET, and none of them goes on a command
-# line (where `ps` would show it).
+# connection string, the admin password, the auth secret, the branch's test
+# CALL_TEXT_KEY, VOYAGE_API_KEY, ANTHROPIC_API_KEY or GOOGLE_CLIENT_SECRET, and
+# none of them goes on a command line (where `ps` would show it). The test key's
+# id is printed; it is not secret.
 #
 # Every check runs from a cleaned environment: only the variables it needs, and
 # DOTENV_CONFIG_PATH pointing at an empty file so nothing from server/.env loads
@@ -261,6 +262,33 @@ clean_exec() {
   )
 }
 
+# ---- the call-text key (SAA-277) ----
+# Each scratch branch gets its own test key, made by `up` into the settings file
+# and nowhere else. It must not be production's: production's key id (an id, not
+# the key) is CALL_TEXT_KEY_ID in fly.toml's [env], and a test key with that id is
+# refused. dev.env must hold no CALL_TEXT_KEY at all: the production key is kept
+# as a host secret with one backup outside the host, and never on disk here.
+FLY_TOML="$SERVER_DIR/fly.toml"
+key_id_of_file() { envval CALL_TEXT_KEY "$1" | tr -d '\n' | base64 -d 2>/dev/null | shasum -a 256 | cut -c1-8; }
+production_key_id() { sed -nE 's/^[[:space:]]*CALL_TEXT_KEY_ID[[:space:]]*=[[:space:]]*"([0-9a-f]{8})".*$/\1/p' "$FLY_TOML" | head -n 1; }
+test_key_apart() {
+  local f="$1" id prod
+  [ -n "$(envval CALL_TEXT_KEY "$f")" ] || { say "call-text key: $f has no CALL_TEXT_KEY (made before SAA-277). Run: scratch-db.sh down, then up"; return 1; }
+  if [ -f "$DEV_ENV" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?CALL_TEXT_KEY=' "$DEV_ENV"; then
+    say "call-text key: $DEV_ENV holds a CALL_TEXT_KEY line; the call-text key is never kept there. Remove that line"
+    return 1
+  fi
+  id="$(key_id_of_file "$f")"
+  printf '%s' "$id" | grep -qE '^[0-9a-f]{8}$' || { say "call-text key: the test key's id could not be computed"; return 1; }
+  prod="$(production_key_id)"
+  if [ -z "$prod" ]; then
+    say "call-text key: test key $id; fly.toml records no production key id yet"
+    return 0
+  fi
+  [ "$id" != "$prod" ] || { say "call-text key: REFUSED: the test key has production's id ($prod)"; return 1; }
+  say "call-text key: test key $id, not production's ($prod)"
+}
+
 # ---- the scratch password must not open main ----
 # Connects (no query) to main's endpoint with the scratch branch's credentials
 # and expects Postgres to refuse the password. Prints only the error class.
@@ -439,9 +467,12 @@ cmd_up() {
     printf 'BETTER_AUTH_SECRET=%s\n' "$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9')"
     printf 'SCRATCH_ADMIN_EMAIL=%s\n' "$ADMIN_EMAIL"
     printf 'SCRATCH_ADMIN_PASSWORD=%s\n' "$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9')"
+    # This branch's own call-text key (SAA-277): made here, kept here, gone with `down`.
+    printf 'CALL_TEXT_KEY=%s\n' "$(openssl rand -base64 32)"
   } >> "$f"
   chmod 600 "$f" "$e"
   say "up: settings written to $f (mode $(stat -f %Lp "$f"), folder mode $(stat -f %Lp "$SCRATCH_DIR")); sslmode=verify-full lines: $(grep -c 'sslmode=verify-full' "$f")"
+  test_key_apart "$f" || fail "the test call-text key was refused; the branch is left up"
 
   SCRATCH_ENDPOINT_ID="$ep"
   local url host
@@ -499,6 +530,7 @@ scratch_ready() {
   host="$(host_of "$url")"
   url=""
   guard_host "$host" || exit 3
+  test_key_apart "$F" || exit 2
   # What the child will see, not what the keg says.
   local seen want
   want="$(tr -d '[:space:]' < "$SERVER_DIR/.nvmrc")"
@@ -545,11 +577,11 @@ cmd_run() {
     check-trash)
       # One of the two processes that get VOYAGE_API_KEY (serve is the other).
       VOYAGE_VALUE="$(real_env_value VOYAGE_API_KEY)" || exit 2
-      clean_exec "$F" DATABASE_URL VOYAGE_API_KEY -- npx --no-install tsx "$script" 2>&1 | scrub
+      clean_exec "$F" DATABASE_URL VOYAGE_API_KEY CALL_TEXT_KEY -- npx --no-install tsx "$script" 2>&1 | scrub
       exit "${PIPESTATUS[0]}"
       ;;
     *)
-      clean_exec "$F" DATABASE_URL CLIPWISE_CHECK_SCRATCH_DB CLIPWISE_CHECK_CONTROL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED -- \
+      clean_exec "$F" DATABASE_URL CLIPWISE_CHECK_SCRATCH_DB CLIPWISE_CHECK_CONTROL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED CALL_TEXT_KEY -- \
         npx --no-install tsx "$script" 2>&1 | scrub
       exit "${PIPESTATUS[0]}"
       ;;
@@ -604,7 +636,7 @@ cmd_serve() {
     calendar="calendar connect (GOOGLE_OAUTH_REDIRECT_URI and CALENDAR_TOKEN_ENCRYPTION_KEY from dev.env)"
   fi
   say "serve: src/index.ts at $AUTH_ORIGIN, with ANTHROPIC_API_KEY and VOYAGE_API_KEY; $signin; $calendar"
-  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED AUTH_ALLOWED_EMAIL_DOMAIN ANTHROPIC_API_KEY VOYAGE_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_OAUTH_REDIRECT_URI CALENDAR_TOKEN_ENCRYPTION_KEY -- \
+  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED AUTH_ALLOWED_EMAIL_DOMAIN ANTHROPIC_API_KEY VOYAGE_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_OAUTH_REDIRECT_URI CALENDAR_TOKEN_ENCRYPTION_KEY CALL_TEXT_KEY -- \
     npx --no-install tsx src/index.ts 2>&1 | scrub
   exit "${PIPESTATUS[0]}"
 }
@@ -627,7 +659,7 @@ cmd_jobs() {
   [ $# -gt 0 ] || refuse "usage: scratch-db.sh jobs <command> (see src/jobs/cli.ts)"
   scratch_ready
   say "jobs: src/jobs/cli.ts $1"
-  clean_exec "$F" DATABASE_URL -- \
+  clean_exec "$F" DATABASE_URL CALL_TEXT_KEY -- \
     npx --no-install tsx src/jobs/cli.ts "$@" 2>&1 | scrub
   exit "${PIPESTATUS[0]}"
 }
@@ -644,7 +676,7 @@ cmd_demo_produce() {
   ANTHROPIC_VALUE="$(real_env_value ANTHROPIC_API_KEY)" || exit 2
   VOYAGE_VALUE="$(real_env_value VOYAGE_API_KEY)" || exit 2
   say "demo-produce: src/demo/produce.ts, with ANTHROPIC_API_KEY and VOYAGE_API_KEY"
-  clean_exec "$F" DATABASE_URL CLIPWISE_CHECK_SCRATCH_DB ANTHROPIC_API_KEY VOYAGE_API_KEY -- \
+  clean_exec "$F" DATABASE_URL CLIPWISE_CHECK_SCRATCH_DB ANTHROPIC_API_KEY VOYAGE_API_KEY CALL_TEXT_KEY -- \
     npx --no-install tsx src/demo/produce.ts 2>&1 | scrub
   exit "${PIPESTATUS[0]}"
 }

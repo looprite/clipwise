@@ -38,8 +38,9 @@
 
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { and, count, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { countObservedFidelity } from "../lib/fidelity.js";
 import { slugify } from "../lib/slug.js";
 import { resolveOwnerMemberId } from "./owner.js";
 import {
@@ -338,13 +339,11 @@ export async function ingestTranscript(
       .select()
       .from(schema.transcripts)
       .where(eq(schema.transcripts.recordingId, existing.id));
-    const [counts] = await db
-      .select({
-        turnCount: count(),
-        bodyChars: sql<number>`coalesce(sum(char_length(${schema.segments.text})), 0)::bigint`,
-      })
-      .from(schema.segments)
-      .where(eq(schema.segments.recordingId, existing.id));
+    // Counted here, not by char_length in SQL: the text is encrypted at rest
+    // (SAA-277) and decrypted by its column on the way out.
+    const counts = countObservedFidelity(
+      await db.select({ text: schema.segments.text }).from(schema.segments).where(eq(schema.segments.recordingId, existing.id)),
+    );
     process.stdout.write(
       `ingest: recording already exists for source_id=${sourceId} → reusing ${existing.id} (no insert)\n`,
     );
@@ -561,13 +560,11 @@ export async function ingestTranscript(
     .from(schema.recordings)
     .where(eq(schema.recordings.id, result.recording.id));
 
-  const [dbCounts] = await db
-    .select({
-      turnCount: count(),
-      bodyChars: sql<number>`coalesce(sum(char_length(${schema.segments.text})), 0)::bigint`,
-    })
-    .from(schema.segments)
-    .where(eq(schema.segments.recordingId, result.recording.id));
+  // Counted here, not by char_length in SQL: the text is encrypted at rest
+  // (SAA-277) and decrypted by its column on the way out.
+  const dbCounts = countObservedFidelity(
+    await db.select({ text: schema.segments.text }).from(schema.segments).where(eq(schema.segments.recordingId, result.recording.id)),
+  );
 
   if (result.appliedIdentity) {
     process.stdout.write(

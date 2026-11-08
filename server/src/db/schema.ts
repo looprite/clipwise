@@ -14,7 +14,13 @@ import {
   varchar,
   vector,
 } from "drizzle-orm/pg-core";
+import { encryptedText, momentMetadata, recordingMetadata } from "./call-text-columns.js";
 
+// Call text is encrypted at rest (SAA-277): the encryptedText columns below, and
+// the call-text fields inside recordings.metadata and moments.metadata. See
+// call-text-columns.ts for what that means for queries: no comparison, sort or
+// grouping on these columns matches in SQL.
+//
 // NOTE: The `embedding vector(1024)` columns on moments and segments require
 // the pgvector extension. Enable it on the Neon database (CREATE EXTENSION
 // IF NOT EXISTS vector) before running the generated migration. The 1024
@@ -181,7 +187,12 @@ export const recordings = pgTable(
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade" }),
     slug: varchar("slug", { length: 128 }),
-    title: varchar("title", { length: 512 }),
+    // Encrypted: text, not varchar(512), since the stored shape is longer than
+    // the title. The routes that take a title still cap it at 512 characters
+    // (routes/recordings.ts, routes/moments.ts). A calendar match stores the
+    // event's title as given (pipeline/match-calendar.ts); one longer than 512,
+    // which the old column refused, is now stored.
+    title: encryptedText("title"),
     source: varchar("source", { length: 64 }),
     sourceId: varchar("source_id", { length: 256 }),
     // Google's id shared by every instance of a recurring series (SAA-115
@@ -229,7 +240,8 @@ export const recordings = pgTable(
       onDelete: "restrict",
     }),
     visibility: varchar("visibility", { length: 16 }).notNull().default("private"),
-    metadata: jsonb("metadata"),
+    // capture_quality.dropped_segments[].text is sealed (call-text-columns.ts).
+    metadata: recordingMetadata("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -264,7 +276,7 @@ export const transcripts = pgTable(
       .references(() => recordings.id, { onDelete: "cascade" }),
     provider: varchar("provider", { length: 64 }),
     language: varchar("language", { length: 16 }),
-    text: text("text"),
+    text: encryptedText("text"),
     status: varchar("status", { length: 32 }).notNull().default("pending"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -317,7 +329,7 @@ export const segments = pgTable(
     }),
     startSec: doublePrecision("start_sec").notNull(),
     endSec: doublePrecision("end_sec").notNull(),
-    text: text("text").notNull(),
+    text: encryptedText("text").notNull(),
     orderIndex: integer("order_index").notNull(),
     embedding: vector("embedding", { dimensions: 1024 }),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -350,8 +362,8 @@ export const moments = pgTable(
       .notNull()
       .references(() => recordings.id, { onDelete: "cascade" }),
     kind: varchar("kind", { length: 64 }).notNull(),
-    title: varchar("title", { length: 512 }),
-    summary: text("summary"),
+    title: encryptedText("title"),
+    summary: encryptedText("summary"),
     startSec: doublePrecision("start_sec").notNull(),
     endSec: doublePrecision("end_sec").notNull(),
     score: doublePrecision("score"),
@@ -369,7 +381,9 @@ export const moments = pgTable(
     isPersonnelAssessment: boolean("is_personnel_assessment")
       .notNull()
       .default(false),
-    metadata: jsonb("metadata"),
+    // span_label and speakers are sealed (call-text-columns.ts); the keys
+    // searches filter on (source, extraction_run, collapsed_into) are not.
+    metadata: momentMetadata("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -404,8 +418,8 @@ export const clips = pgTable(
       onDelete: "set null",
     }),
     slug: varchar("slug", { length: 128 }),
-    title: varchar("title", { length: 512 }),
-    description: text("description"),
+    title: encryptedText("title"),
+    description: encryptedText("description"),
     startSec: doublePrecision("start_sec").notNull(),
     endSec: doublePrecision("end_sec").notNull(),
     mediaUrl: text("media_url"),

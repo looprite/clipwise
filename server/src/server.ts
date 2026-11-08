@@ -2,6 +2,7 @@ import "dotenv/config";
 import { createServer, type Server } from "node:http";
 import { createGate } from "./boot.js";
 import { pool } from "./db/index.js";
+import { loadCallTextKey } from "./lib/call-text.js";
 import { logError } from "./lib/safe-error.js";
 // A type only: erased at build, so the worker's modules are not loaded here.
 import type { JobWorker } from "./jobs/worker.js";
@@ -73,6 +74,22 @@ export async function startServer(): Promise<(signal: string) => void> {
   // started before the callback it would run first and "listening" would wait
   // for it. A request that arrives during that stretch waits for it (about 220 ms
   // on a laptop); it is not refused.
+  // Call text is encrypted at rest (SAA-277), so a server without its key cannot
+  // read or write a recording: refused here, before the port opens, rather than
+  // on the first request. In production the key must also be the one fly.toml
+  // names by id (CALL_TEXT_KEY_ID), so a wrong or stale secret is refused too.
+  // The id is printed; it is not secret. Neither message holds the key.
+  try {
+    const key = loadCallTextKey();
+    if (process.env.NODE_ENV === "production" && !process.env.CALL_TEXT_KEY_ID) {
+      throw new Error("CALL_TEXT_KEY_ID must be set in production (fly.toml [env])");
+    }
+    console.log(`call text: key ${key.id}`);
+  } catch (err) {
+    console.error(`startup: refused: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
   const gate = createGate();
   const port = Number(process.env.PORT ?? 3000);
   const server: Server = createServer(gate.listener);
