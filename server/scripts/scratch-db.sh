@@ -496,10 +496,13 @@ cmd_up() {
     return 0
   fi
   say "up: expected from the code: init-account makes the one account, bootstrap-admin adds one member and its login"
-  clean_exec "$f" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED SCRATCH_ADMIN_PASSWORD -- \
+  # CALL_TEXT_KEY: adding a member seeds its demo calls (src/demo/seed.ts), which
+  # are call text and so need the branch's key; without it the seed fails and the
+  # member is added with no demo (SAA-277).
+  clean_exec "$f" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED SCRATCH_ADMIN_PASSWORD CALL_TEXT_KEY -- \
     npx --no-install tsx src/auth/cli.ts init-account --name Scratch 2>&1 | scrub
   [ "${PIPESTATUS[0]}" = 0 ] || fail "init-account failed; the branch is left up"
-  clean_exec "$f" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED SCRATCH_ADMIN_PASSWORD -- \
+  clean_exec "$f" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED SCRATCH_ADMIN_PASSWORD CALL_TEXT_KEY -- \
     npx --no-install tsx src/auth/cli.ts bootstrap-admin --email "$ADMIN_EMAIL" --name "Scratch admin" \
     --password-env SCRATCH_ADMIN_PASSWORD 2>&1 | scrub
   [ "${PIPESTATUS[0]}" = 0 ] || fail "bootstrap-admin failed; the branch is left up"
@@ -660,7 +663,8 @@ cmd_cli() {
   # A login password, e.g. `read -s P; CLIPWISE_CLI_PASSWORD=$P scratch-db.sh cli
   # bootstrap-admin --email … --password-env CLIPWISE_CLI_PASSWORD`. Never printed.
   CLI_PASSWORD_VALUE="${CLIPWISE_CLI_PASSWORD:-}"
-  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED CLIPWISE_CLI_PASSWORD -- \
+  # CALL_TEXT_KEY: add-member seeds the new member's demo calls (see cmd_up).
+  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED CLIPWISE_CLI_PASSWORD CALL_TEXT_KEY -- \
     npx --no-install tsx src/auth/cli.ts "$@" 2>&1 | scrub
   exit "${PIPESTATUS[0]}"
 }

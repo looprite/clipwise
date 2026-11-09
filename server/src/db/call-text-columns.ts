@@ -28,10 +28,13 @@
 //                        scope by decision, SAA-277 2026-11-08 item 1).
 // Sealing is idempotent: a field already in the encrypted shape is kept as it is,
 // so an ORM update that writes back metadata it read is safe, and so is one that
-// writes back metadata it got from raw SQL.
+// writes back metadata it got from raw SQL. Opening is strict: a call-text field
+// found in plain is refused (CallTextKeyError), as decryptCallText refuses a
+// plain column value; the backfill left none, so one can only have been written
+// behind these types' back.
 
 import { customType } from "drizzle-orm/pg-core";
-import { decryptCallText, encryptCallText, isEncryptedCallText, type CallTextKey } from "../lib/call-text.js";
+import { CallTextKeyError, decryptCallText, encryptCallText, isEncryptedCallText, type CallTextKey } from "../lib/call-text.js";
 
 export const encryptedText = customType<{ data: string; driverData: string }>({
   dataType() {
@@ -64,11 +67,16 @@ export function sealMomentMetadata(meta: unknown, key?: CallTextKey): unknown {
   return out;
 }
 
+// Strict, like decryptCallText: a span_label or speakers that is there and not
+// sealed is refused with CallTextKeyError. Absent and null fields open as they are.
 export function openMomentMetadata(meta: unknown): unknown {
   if (!isObj(meta)) return meta;
   const out: Obj = { ...meta };
   if (typeof out.span_label === "string") out.span_label = decryptCallText(out.span_label);
-  if (typeof out.speakers === "string" && isEncryptedCallText(out.speakers)) out.speakers = JSON.parse(decryptCallText(out.speakers));
+  if (out.speakers !== undefined && out.speakers !== null) {
+    if (typeof out.speakers !== "string") throw new CallTextKeyError("moment speakers are stored in plain, not encrypted; run db/encrypt-call-text.ts");
+    out.speakers = JSON.parse(decryptCallText(out.speakers));
+  }
   return out;
 }
 

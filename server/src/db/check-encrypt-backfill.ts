@@ -25,7 +25,7 @@
 
 import { randomBytes, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { encryptCallText, loadCallTextKey } from "../lib/call-text.js";
+import { CallTextKeyError, encryptCallText, loadCallTextKey } from "../lib/call-text.js";
 import { dropAccount, endPool, makeAccount, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
 import { BackfillRefused, ENCRYPTED_RE, TARGETS, backfill, type Target } from "./encrypt-call-text.js";
 import { db, pool, schema } from "./index.js";
@@ -124,6 +124,19 @@ try {
   show(`plain values planted, per target: ${JSON.stringify(before)}`);
   check(`setup: ${N} plain values planted, every target covered`, JSON.stringify(before) === JSON.stringify(expected), JSON.stringify(before));
   check("setup: the value written through the ORM is already encrypted", new RegExp(ENCRYPTED_RE).test(alreadyStored));
+
+  // Strict: until the backfill encrypts them, the planted values do not read
+  // through the ORM at all.
+  let ormRefusal: unknown = null;
+  try {
+    await db.select({ title: schema.recordings.title }).from(schema.recordings).where(eq(schema.recordings.id, R));
+  } catch (err) {
+    ormRefusal = err;
+  }
+  const refusalCls = ormRefusal instanceof Error ? ormRefusal.constructor.name : String(ormRefusal);
+  const refusalMsg = ormRefusal instanceof Error ? ormRefusal.message : "";
+  check("strict: before --apply, an ORM read of a planted plain value is refused with CallTextKeyError", ormRefusal instanceof CallTextKeyError, refusalCls);
+  check("  and the refusal holds none of the value", !refusalMsg.includes(P) && !refusalMsg.includes("quokka"));
 
   const lines: string[] = [];
   const log = (l: string) => {

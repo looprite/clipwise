@@ -9,7 +9,10 @@
 //   - the metadata keys that searches filter on are still readable by SQL;
 //   - a capture posted through POST /captures (the recorder's path) is stored,
 //     raw SQL finds its phrase in no segment and its dropped line nowhere in the
-//     metadata, and getTranscriptPage shows the phrase.
+//     metadata, and getTranscriptPage shows the phrase;
+//   - strict: a segment written plain with raw SQL makes every read of its
+//     transcript refuse, with no text in the error, the response or the log, and
+//     no access line; control: the encrypted recording beside it still reads.
 //
 // Writes, so it refuses unless run through scratch-db.sh on a scratch branch:
 //
@@ -18,11 +21,14 @@
 // Everything it wrote goes with its throwaway account at the end.
 
 import { randomUUID } from "node:crypto";
+import type { AddressInfo } from "node:net";
 import { eq } from "drizzle-orm";
-import type { NextFunction, Request, Response } from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import type { AccessContext } from "../access/context.js";
 import { capturesPost } from "../routes/captures.js";
-import { isEncryptedCallText } from "../lib/call-text.js";
+import { transcriptRouter } from "../routes/transcript.js";
+import { CallTextKeyError, isEncryptedCallText } from "../lib/call-text.js";
+import { errorHandler } from "../lib/http.js";
 import { readTranscript } from "../lib/transcript-read.js";
 import { getMoment } from "../services/search-moments.js";
 import { getTranscriptPage } from "../services/transcript.js";
@@ -199,6 +205,69 @@ try {
     const capDropped = (capRec.metadata as { capture_quality?: { dropped_segments?: Array<{ text: string }> } }).capture_quality?.dropped_segments?.[0]?.text;
     check("captured: the dropped line reads back open through the server", capDropped === `the ${CAP} line, dropped`, String(capDropped));
   }
+
+  // ---- strict: a value written plain, behind the ORM's back, is refused ----
+  // One recording with a segment written through the ORM, then one written plain
+  // with raw SQL, as nothing in production does. Every read of that transcript is
+  // refused, with no text in the error, the response or the log, and no access
+  // line, since nothing was read.
+  const PLAIN = `walrus${fx.tag}beacon`;
+  const prid = randomUUID();
+  await db.insert(schema.recordings).values({ id: prid, accountId: fx.accountId, ownerMemberId: fx.memberId, slug: `check-call-text-plain-${fx.tag}`, title: "plain check", source: "check", sourceId: prid, status: "ready", visibility: "private", metadata: {} });
+  const [ptr] = await db.insert(schema.transcripts).values({ recordingId: prid, provider: "check", status: "ready" }).returning();
+  const [psp] = await db.insert(schema.speakers).values({ recordingId: prid, label: "me" }).returning();
+  await db.insert(schema.segments).values({ accountId: fx.accountId, recordingId: prid, transcriptId: ptr.id, speakerId: psp.id, startSec: 0, endSec: 2, text: "written through the column", orderIndex: 0 });
+  await pool.query(
+    `insert into segments (account_id, recording_id, transcript_id, speaker_id, start_sec, end_sec, text, order_index) values ($1, $2, $3, $4, 3, 5, $5, 1)`,
+    [fx.accountId, prid, ptr.id, psp.id, `the ${PLAIN} figure, written plain`],
+  );
+  let readRefusal: unknown = null;
+  try {
+    await readTranscript(prid);
+  } catch (err) {
+    readRefusal = err;
+  }
+  const readMsg = readRefusal instanceof Error ? readRefusal.message : String(readRefusal);
+  check("strict: readTranscript refuses a transcript holding a plain segment, with CallTextKeyError", readRefusal instanceof CallTextKeyError, readRefusal === null ? "not refused" : `${(readRefusal as Error).constructor?.name}: ${readMsg}`);
+  check("strict: the refusal holds none of the plain text", !readMsg.includes(PLAIN) && !readMsg.includes("walrus"));
+
+  const tapped: string[] = [];
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  const tap = (chunk: unknown) => {
+    tapped.push(String(chunk));
+    return true;
+  };
+  const app = express();
+  app.use((req, _res, next) => {
+    req.access = ctx;
+    next();
+  });
+  app.use("/", transcriptRouter);
+  app.use(errorHandler);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  let status = 0;
+  let respBody = "";
+  process.stdout.write = tap as typeof process.stdout.write;
+  process.stderr.write = tap as typeof process.stderr.write;
+  try {
+    const r = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/recordings/${prid}/transcript`);
+    status = r.status;
+    respBody = await r.text();
+    await new Promise((r2) => setImmediate(r2));
+  } finally {
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+    await new Promise((r) => server.close(r));
+  }
+  check("strict: GET /recordings/:id/transcript answers 500 for it", status === 500, `status ${status}`);
+  check("strict: the response body holds none of the plain text", !respBody.includes(PLAIN) && !respBody.includes("walrus"), respBody.slice(0, 120));
+  const logged = tapped.join("");
+  check("strict: nothing written to stdout or stderr holds the plain text", !logged.includes(PLAIN) && !logged.includes("walrus"));
+  check("strict: no access line is written for the refused read", !logged.includes("access: "), logged.split("\n").filter((l) => l.startsWith("access: ")).join(" / "));
+  check("control: the plain text is in the database, so its absence above is the reader's", ((await pool.query(`select count(*)::int n from segments where recording_id = $1 and text like $2`, [prid, `%${PLAIN}%`])).rows[0].n as number) === 1);
+  check("control: the encrypted recording beside it still reads", (await readTranscript(rid)).segments.some((s) => s.text === `so the ${PHRASE} line is final`));
 } finally {
   if (fx) await dropAccount(fx);
   await endPool();

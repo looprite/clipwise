@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   CALL_TEXT_PREFIX,
+  CallTextKeyError,
   decryptCallText,
   encryptCallText,
   isEncryptedCallText,
@@ -62,11 +63,27 @@ check("control: the containment test finds the phrase when it is there", `x${PHR
 check("two encryptions of the same text differ (random IV)", encryptCallText(PHRASE, keyA) !== encryptCallText(PHRASE, keyA));
 check("isEncryptedCallText: true for a stored value", isEncryptedCallText(stored));
 
-// ---- plaintext passes through (until the backfill's strict follow-up) ----
+// ---- a plain value is refused (strict, once the backfill left none) ----
+// The class, and a message that holds none of the value.
+const refusedPlain = (value: string): { ok: boolean; detail: string } => {
+  try {
+    decryptCallText(value, keyA);
+    return { ok: false, detail: "not refused" };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const words = value.split(/\s+/).filter((w) => w.length > 3);
+    return { ok: err instanceof CallTextKeyError && !words.some((w) => msg.includes(w)), detail: `${err instanceof Error ? err.constructor.name : typeof err}: ${msg}` };
+  }
+};
 check("isEncryptedCallText: false for plain speech", !isEncryptedCallText(PHRASE));
-check("an unprefixed value decrypts to itself", decryptCallText(PHRASE, keyA) === PHRASE);
+const plain = refusedPlain(PHRASE);
+check("a plain value is refused with CallTextKeyError, and the message holds none of it", plain.ok, plain.detail);
 const lookalike = "cw1: so the first thing on the list is pricing";
-check("speech that happens to start with cw1: is not taken for ciphertext", !isEncryptedCallText(lookalike) && decryptCallText(lookalike, keyA) === lookalike);
+const look = refusedPlain(lookalike);
+check("speech that happens to start with cw1: is not taken for ciphertext, and is refused as plain", !isEncryptedCallText(lookalike) && look.ok, look.detail);
+const empty = refusedPlain("");
+check("an empty plain string is refused too (an empty value is stored encrypted)", empty.ok, empty.detail);
+check("control: the empty string stored encrypted still opens", decryptCallText(encryptCallText("", keyA), keyA) === "");
 check("isEncryptedCallText: false for the prefix and a key id with no body", !isEncryptedCallText(`${CALL_TEXT_PREFIX}${keyA.id}:`));
 
 // ---- refusals, and what they say ----

@@ -13,9 +13,11 @@
 // holds the key it was told to expect (CALL_TEXT_KEY_ID), and a scratch run check
 // that it does not.
 //
-// A value without the prefix is returned as it is. That is for the backfill only:
-// rows written before this existed are plain until the backfill reaches them. A
-// later change refuses an unprefixed value once the readback on main shows none.
+// A value that is not in the stored shape is refused (CallTextKeyError), not
+// returned as it is: every value is encrypted at rest since the backfill
+// (db/encrypt-call-text.ts) left none plain on main, so a plain one can only
+// have been written behind the column types' back. The backfill never decrypts:
+// it finds plain values in SQL and only encrypts them.
 //
 // Nothing here puts the text or the key into an error message.
 
@@ -76,7 +78,7 @@ export function encryptCallText(plaintext: string, key: CallTextKey = loadCallTe
 }
 
 export function decryptCallText(stored: string, key: CallTextKey = loadCallTextKey()): string {
-  if (!isEncryptedCallText(stored)) return stored;
+  if (!isEncryptedCallText(stored)) throw new CallTextKeyError("call text is stored in plain, not encrypted; run db/encrypt-call-text.ts");
   const [, id, body] = STORED.exec(stored)!;
   if (id !== key.id) throw new CallTextKeyError(`call text was encrypted with key ${id}; the key loaded is ${key.id}`);
   const raw = Buffer.from(body, "base64");

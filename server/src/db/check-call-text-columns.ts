@@ -7,7 +7,7 @@
 
 import { randomBytes } from "node:crypto";
 import { pgTable } from "drizzle-orm/pg-core";
-import { isEncryptedCallText } from "../lib/call-text.js";
+import { CallTextKeyError, isEncryptedCallText } from "../lib/call-text.js";
 import {
   encryptedText,
   momentMetadata,
@@ -24,6 +24,16 @@ function check(name: string, ok: boolean, detail = ""): void {
   if (!ok) failures++;
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+// Refused with CallTextKeyError, and the message holds none of the call text.
+const refusal = (fn: () => unknown): { ok: boolean; detail: string } => {
+  try {
+    fn();
+    return { ok: false, detail: "not refused" };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: err instanceof CallTextKeyError && !/zebra|lantern|Prewett|Ottoline/.test(msg), detail: `${err instanceof Error ? err.constructor.name : typeof err}: ${msg}` };
+  }
+};
 
 const KEY_A = randomBytes(32).toString("base64");
 const KEY_B = randomBytes(32).toString("base64");
@@ -38,7 +48,8 @@ const toDb = t.x.mapToDriverValue(PHRASE) as string;
 check("encryptedText writes the encrypted shape", isEncryptedCallText(toDb), String(toDb).slice(0, 16));
 check("encryptedText writes no plaintext", !toDb.includes("zebra"));
 check("encryptedText reads back the text", t.x.mapFromDriverValue(toDb) === PHRASE);
-check("encryptedText reads a plain (not yet backfilled) value as it is", t.x.mapFromDriverValue(PHRASE) === PHRASE);
+const plainText = refusal(() => t.x.mapFromDriverValue(PHRASE));
+check("encryptedText refuses a plain value (CallTextKeyError, none of the text in the message)", plainText.ok, plainText.detail);
 check("encryptedText's SQL type is text", t.x.getSQLType() === "text", t.x.getSQLType());
 
 // ---- moment metadata ----
@@ -62,7 +73,14 @@ check("moment: the keys searches filter on are left as they were", structural.ev
 check("moment: open gives back the original", same(openMomentMetadata(sealedMoment), moment));
 check("moment: sealing twice is sealing once (an already-sealed value is kept)", same(sealMomentMetadata(sealedMoment), sealedMoment));
 check("moment: the input object is not changed by sealing", same(moment.speakers, [NAME, "them"]) && moment.span_label.includes("zebra"));
-check("moment: plain metadata (before the backfill) opens to itself", same(openMomentMetadata(moment), moment));
+const plainMoment = refusal(() => openMomentMetadata(moment));
+check("moment: plain metadata (span_label and speakers plain) is refused", plainMoment.ok, plainMoment.detail);
+const plainLabel = refusal(() => openMomentMetadata({ ...sealedMoment, span_label: moment.span_label }));
+check("moment: a plain span_label beside sealed speakers is refused", plainLabel.ok, plainLabel.detail);
+const plainSpeakers = refusal(() => openMomentMetadata({ ...sealedMoment, speakers: moment.speakers }));
+check("moment: a plain speakers array beside a sealed span_label is refused", plainSpeakers.ok, plainSpeakers.detail);
+check("control: metadata with only the keys searches filter on opens unchanged", same(openMomentMetadata({ source: "hand_curated", extraction_run: "x" }), { source: "hand_curated", extraction_run: "x" }));
+check("control: a null span_label and null speakers open as null", same(openMomentMetadata({ span_label: null, speakers: null }), { span_label: null, speakers: null }));
 check("moment: metadata without span_label or speakers is unchanged", same(sealMomentMetadata({ source: "hand_curated" }), { source: "hand_curated" }));
 check("moment: a null span_label stays null", (sealMomentMetadata({ span_label: null }) as Record<string, unknown>).span_label === null);
 check("moment: null and non-object metadata pass through", sealMomentMetadata(null) === null && openMomentMetadata(null) === null && sealMomentMetadata(5) === 5);
@@ -89,6 +107,9 @@ check("recording: the sealed JSON holds no dropped speech", !JSON.stringify(seal
 check("recording: track and times of a dropped segment are left readable", dropped[0].track === "them" && dropped[0].start_ms === 0 && dropped[0].end_ms === 900);
 check("recording: everything outside the dropped text is left as it was (names stay plain, by decision)", same({ ...sealedRecording, capture_quality: { ...sealedRecording.capture_quality, dropped_segments: null } }, { ...recording, capture_quality: { ...recording.capture_quality, dropped_segments: null } }));
 check("recording: open gives back the original", same(openRecordingMetadata(sealedRecording), recording));
+const plainDropped = refusal(() => openRecordingMetadata(recording));
+check("recording: a plain dropped-segment text is refused", plainDropped.ok, plainDropped.detail);
+check("control: recording metadata with no capture_quality opens unchanged", same(openRecordingMetadata({ identity: { guests: [{ name: NAME }] } }), { identity: { guests: [{ name: NAME }] } }));
 check("recording: sealing twice is sealing once", same(sealRecordingMetadata(sealedRecording), sealedRecording));
 check("recording: metadata with no capture_quality, or none at all, is unchanged", same(sealRecordingMetadata({ identity: {} }), { identity: {} }) && sealRecordingMetadata(null) === null);
 check("recording: a capture_quality with dropped_segments null is unchanged", same(sealRecordingMetadata({ capture_quality: { dropped_segments: null } }), { capture_quality: { dropped_segments: null } }));
