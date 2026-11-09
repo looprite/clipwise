@@ -142,8 +142,9 @@ function claudeAddress(origin) {
 //   'read-notice'       setup finished and the notice agreed to: read it again
 //   'recording-notice'  setup finished, but the notice is not agreed to (a raised version)
 //   'sign-in'           setup finished, a server is set and this Mac holds no token for it
+//   'team-notice'       signed in, and GET /captures/me said this member is an admin
 //   'sign-out'          signed in
-function trayAccountItems({ setupCompleted, acknowledged, server, signedIn }) {
+function trayAccountItems({ setupCompleted, acknowledged, server, signedIn, teamRole }) {
     const out = [];
     if (!setupCompleted) out.push('finish-setup');
     else {
@@ -151,6 +152,8 @@ function trayAccountItems({ setupCompleted, acknowledged, server, signedIn }) {
         out.push(acknowledged ? 'read-notice' : 'recording-notice');
         if (server && !signedIn) out.push('sign-in');
     }
+    // Admins only (Gate 1, item 2); the server refuses the list to anyone else.
+    if (signedIn && teamRole === 'admin') out.push('team-notice');
     if (signedIn) out.push('sign-out');
     return out;
 }

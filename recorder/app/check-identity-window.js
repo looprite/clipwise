@@ -47,9 +47,10 @@
 // functions stay as a second line of evidence. The switch* fixtures show that
 // unset it opens nothing and logs nothing, and that a value it can't use opens
 // nothing and logs one line.
-// The hardening fixture (SAA-243) opens all four windows' pages in one launch:
-// identity by that switch, setup by itself, and Recent meetings and Recognize
-// voices by main.js's other check-only switch, CLIPWISE_CHECK_OPEN_WINDOWS. In
+// The hardening fixture (SAA-243) opens all five windows' pages in one launch:
+// identity by that switch, setup by itself, and Recent meetings, Recognize
+// voices and the admin's team list (Gate 1) by main.js's other check-only
+// switch, CLIPWISE_CHECK_OPEN_WINDOWS. In
 // each page it shows the page's own script ran, that require, process and
 // module are undefined, that an inserted inline script does not run, that its
 // own preload is in force, and what Electron applied (hardeningChecks).
@@ -592,6 +593,9 @@ const HARDENED_PAGES = [
         good: `typeof filterRows === 'function' && filterRows([{ scope: 'work' }, { scope: null }], 'work').length === 1 && document.querySelectorAll('#view button').length === 2` },
     { page: 'voice-prints.html', foreign: 'identity:skip',
         good: `typeof render === 'function' && (render({ enabled: false }), document.querySelector('#on').hidden === false)` },
+    // Gate 1, item 2: the admin's list. Drawn from lines given here, no server.
+    { page: 'team-notice.html', foreign: 'voice-prints:ready',
+        good: `typeof render === 'function' && (render({ heading: 'Current notice: version 1', lines: ['a@x.test, member: not yet'] }), document.querySelectorAll('#list li').length === 1 && document.querySelector('#list li').textContent === 'a@x.test, member: not yet')` },
 ];
 const foreignSend = (channel) => `(() => {
   const c = window.clipwise;
@@ -808,7 +812,7 @@ async function runFixture(fx, n, ctx) {
             const env = { ...process.env, CLIPWISE_SUPPORT_DIR: support, CHECK_USERDATA: path.join(root, 'userdata') };
             delete env[SWITCH];
             delete env[OPEN_SWITCH];
-            if (fx.hardening) env[OPEN_SWITCH] = 'meetings,voice-prints';
+            if (fx.hardening) env[OPEN_SWITCH] = 'meetings,voice-prints,team-notice';
             const value = fx.switchValue !== undefined ? fx.switchValue : fx.open ? `${STEM}:${fx.open}` : STEM;
             if (value !== null) env[SWITCH] = value;
             return env;

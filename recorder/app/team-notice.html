@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Scripts from the bundle's own files only, nothing remote (as SAA-243's
+     window hardening has it for every window). Styles stay inline. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<!-- Who accepted the recording notice (Gate 1, item 2): the admin's tray item
+     "Team: who accepted the notice…". main.js asks the server
+     (GET /captures/members/notice), writes one line per member
+     (team-notice.js), and sends them; team-notice-page.js draws them as text.
+     Read only: nothing here changes anything. Loaded from file:// with no Node;
+     team-notice-preload.js is all it reaches of the main process. -->
+<title>Who accepted the notice</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --muted: #6e6e73; --bg: #ececee; --error: #c4291c; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --muted: #98989d; --bg: #2a2a2c; --error: #ff6b5e; } }
+  html, body { height: 100%; }
+  body {
+    margin: 0; padding: 18px 20px; box-sizing: border-box; overflow-y: auto;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    color: var(--fg); background: var(--bg); user-select: text;
+  }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  #heading { color: var(--muted); margin: 0 0 12px; }
+  ul { margin: 0; padding-left: 18px; }
+  li { margin: 0 0 6px; }
+  .error { color: var(--error); }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>Who accepted the recording notice</h1>
+  <p id="heading"></p>
+  <p id="error" class="error"></p>
+  <p id="empty" class="muted"></p>
+  <ul id="list"></ul>
+<script src="team-notice-page.js"></script>
+</body>
+</html>

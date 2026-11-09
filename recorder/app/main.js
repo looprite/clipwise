@@ -69,6 +69,7 @@ const silenceReminder = require('./silence-reminder.js');
 // The first-run acknowledgement and the notice line (SAA-216). Pure; the gate
 // that uses it is startRecording.
 const consent = require('./consent.js');
+const teamNotice = require('./team-notice.js');
 // First-run setup, launch at login, the move to Applications and the recording
 // time in the menu bar (SAA-198 step 4). Pure; the window is below.
 const setup = require('./setup.js');
@@ -332,6 +333,7 @@ const IDENTITY_HTML = path.join(__dirname, 'identity.html');
 const SETUP_HTML = path.join(__dirname, 'setup.html');
 const MEETINGS_HTML = path.join(__dirname, 'meetings.html');
 const VOICE_PRINTS_HTML = path.join(__dirname, 'voice-prints.html');
+const TEAM_NOTICE_HTML = path.join(__dirname, 'team-notice.html');
 // How long the prompt waits for the page to report its height before showing
 // itself anyway. Short enough not to be noticed after a capture, long enough
 // for a local file: the measurement is sent from the page's first script run.
@@ -1730,17 +1732,17 @@ function openIdentityWindowForCheck() {
 
 // The window-hardening check's switch (check-identity-window.js, its hardening
 // fixture), read here and nowhere else: the windows no other switch opens.
-// Unset in normal use. Set to a comma-separated list of "meetings" and
-// "voice-prints", it opens each through the function its tray item calls, and
-// logs one line naming them. Any other value opens nothing and logs one line
-// saying so, without the value. It opens only; it does nothing else.
+// Unset in normal use. Set to a comma-separated list of "meetings",
+// "voice-prints" and "team-notice", it opens each through the function its tray
+// item calls, and logs one line naming them. Any other value opens nothing and
+// logs one line saying so, without the value. It opens only; it does nothing else.
 function openWindowsForCheck() {
     const raw = process.env.CLIPWISE_CHECK_OPEN_WINDOWS;
     if (!raw) return;
-    const OPEN = { meetings: openMeetingsWindow, 'voice-prints': openVoicePrintsWindow };
+    const OPEN = { meetings: openMeetingsWindow, 'voice-prints': openVoicePrintsWindow, 'team-notice': openTeamNoticeWindow };
     const windows = raw.split(',').map((s) => s.trim());
     if (!windows.every((w) => Object.prototype.hasOwnProperty.call(OPEN, w))) {
-        console.error('[clipwise-recorder] check switch: nothing opened — not a list of "meetings" and "voice-prints"');
+        console.error('[clipwise-recorder] check switch: nothing opened — not a list of "meetings", "voice-prints" and "team-notice"');
         return;
     }
     console.error(`[clipwise-recorder] check switch: opening ${windows.join(', ')}`);
@@ -1857,6 +1859,8 @@ function renderTray() {
             items.push({ label: 'Recording notice…', click: () => showSetupWindow(blockedStartFresh() ? 'blocked' : 'launch') });
         } else if (item === 'read-notice') {
             items.push({ label: 'Read the recording notice…', click: () => showSetupWindow('reread') });
+        } else if (item === 'team-notice') {
+            items.push({ label: 'Team: who accepted the notice…', click: openTeamNoticeWindow });
         } else if (item === 'sign-in') {
             items.push({ label: 'Sign in to Clipwise…', click: signInToCaptureServer });
         } else if (item === 'sign-out') {
@@ -3097,6 +3101,11 @@ function readCaptureServerUrl() {
 
 // The capture token, once signed in: { server, access, refresh, expiresAt }.
 let captureTokens = null;
+// This member's role on the team, 'admin' or 'member' as GET /captures/me last
+// said (refreshTeamRole), or null while unknown or signed out. It only decides
+// whether the tray offers the admin's "Team: who accepted the notice…"; the
+// server answers that list to admins only, whatever this says.
+let teamRole = null;
 // The loopback listener of a sign-in in progress, if any.
 let captureSignIn = null;
 
@@ -3172,6 +3181,7 @@ async function exchangeCaptureCode(server, code, redirectUri, verifier) {
         setupSignInFinished(true);
         // Setup asks for the notice before sign-in, so this is its first chance.
         void reportNoticeToServer('signed in');
+        void refreshTeamRole('signed in');
     } catch (err) {
         console.error(`[clipwise-recorder] sign-in: failed: ${err.cause?.code || err.name}`);
         setupSignInFinished(false);
@@ -3215,6 +3225,7 @@ async function signOutFromTray() {
 
 function signOutOfCaptureServer(reason) {
     captureTokens = null;
+    teamRole = null;
     clearTimeout(captureRefreshTimer);
     captureRetryMs = CAPTURE_RETRY_FIRST_MS;
     try { fs.unlinkSync(CAPTURE_TOKEN_PATH); } catch {}
@@ -3740,6 +3751,99 @@ async function reportNoticeToServer(reason) {
     } catch (err) {
         console.error(`[clipwise-recorder] notice: report failed (${reason}): ${err.code || err.name}`);
     }
+}
+
+// This member's role, from GET /captures/me (Gate 1, item 2), for the tray's
+// admin item. At launch and at sign-in; forgotten at sign-out. Only 'admin' or
+// 'member' is kept; anything else, no reply, or not signed in leaves it unknown,
+// which offers nothing. Logs the role, never the reply.
+async function refreshTeamRole(reason) {
+    const server = signedInServer();
+    let next = null;
+    if (server) {
+        try {
+            const reply = await captureServerRequest(server, 'GET', '/captures/me');
+            const role = reply.status === 200 && reply.json ? reply.json.role : null;
+            next = role === 'admin' || role === 'member' ? role : null;
+        } catch {
+            next = null;
+        }
+    }
+    if (next === teamRole) return;
+    teamRole = next;
+    console.error(`[clipwise-recorder] team: role ${teamRole || 'unknown'} (${reason})`);
+    renderTray();
+}
+
+// The admin's window: who accepted the recording notice (Gate 1, item 2).
+let teamNoticeWindow = null;
+function openTeamNoticeWindow() {
+    if (teamNoticeWindow && !teamNoticeWindow.isDestroyed()) {
+        teamNoticeWindow.show();
+        try { app.focus({ steal: true }); } catch {}
+        void sendTeamNoticeData();
+        return;
+    }
+    teamNoticeWindow = new BrowserWindow({
+        width: 560,
+        height: 420,
+        minWidth: 420,
+        minHeight: 260,
+        title: 'Who accepted the notice',
+        show: false,
+        webPreferences: windowPreferences('team-notice-preload.js'),
+    });
+    const win = teamNoticeWindow;
+    win.once('ready-to-show', () => {
+        win.show();
+        try { app.focus({ steal: true }); } catch {}
+    });
+    win.on('closed', () => {
+        if (teamNoticeWindow === win) teamNoticeWindow = null;
+    });
+    win.loadFile(TEAM_NOTICE_HTML).catch((err) => {
+        console.error(`team: window failed to load: ${String(err)}`);
+        try { win.close(); } catch {}
+    });
+}
+
+// Asks the server and sends the window its lines (team-notice.js), or one error
+// line. A 403 means this member is not an admin (any more): the role is dropped
+// and the tray no longer offers the item. Logs counts and statuses only.
+async function sendTeamNoticeData() {
+    const win = teamNoticeWindow;
+    if (!win || win.isDestroyed()) return;
+    const send = (data) => { try { if (!win.isDestroyed()) win.webContents.send('team-notice:data', data); } catch {} };
+    const server = signedInServer();
+    if (!server) {
+        send({ heading: '', lines: [], error: 'Sign in to Clipwise to see this.' });
+        return;
+    }
+    let reply;
+    try {
+        reply = await captureServerRequest(server, 'GET', '/captures/members/notice');
+    } catch (err) {
+        reply = { status: null, json: {} };
+    }
+    if (reply.status === 403) {
+        console.error('[clipwise-recorder] team: the server answered 403 — not an admin');
+        teamRole = 'member';
+        renderTray();
+        send({ heading: '', lines: [], error: 'Only an admin of your team can see this.' });
+        return;
+    }
+    if (reply.status !== 200 || !reply.json || !Array.isArray(reply.json.members)) {
+        console.error(`[clipwise-recorder] team: list not loaded: server ${reply.status ?? 'no reply'}`);
+        send({ heading: '', lines: [], error: 'The list couldn’t be loaded. Try again in a moment.' });
+        return;
+    }
+    const view = teamNotice.formatTeamNotice(reply.json.members, consent.STATEMENT_VERSION);
+    console.error(`[clipwise-recorder] team: list of ${view.lines.length} member(s) shown`);
+    send({ ...view, error: '' });
+}
+
+function registerTeamNoticeIpc() {
+    ipcMain.on('team-notice:ready', () => { void sendTeamNoticeData(); });
 }
 
 // The server owns trash state (SAA-227 part L decision 8), and this Mac's marker
@@ -4414,6 +4518,7 @@ function setupStatus() {
         signedIn: !!(server && captureTokens && captureTokens.server === server),
         mic: lastPermissions.mic,
         tap: lastPermissions.tap,
+        teamRole,
     };
 }
 
@@ -5716,6 +5821,7 @@ app.whenReady().then(async () => {
     // Before the first render, so the tray knows whether to offer sign-in, and
     // whether setup is done (setupCompleted needs the token and the grants).
     loadCaptureTokens();
+    void refreshTeamRole('launch');
     // On wake from sleep, with capture tokens held, the refresh is logged and
     // rescheduled from the clock: one that came due during sleep runs at once.
     powerMonitor.on('resume', () => {
@@ -5740,6 +5846,7 @@ app.whenReady().then(async () => {
     openIdentityWindowForCheck();
     registerMeetingsIpc();
     registerVoicePrintsIpc();
+    registerTeamNoticeIpc();
     registerSetupIpc();
     // Unset in normal use: see openWindowsForCheck.
     openWindowsForCheck();

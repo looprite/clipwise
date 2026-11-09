@@ -77,6 +77,9 @@ const FFMPEG_BUILD = readRepo('recorder/ffmpeg/build.sh');
 // Required lazily for the same reason: without setup.js its cases fail one by one.
 let setup = null;
 try { setup = require('./setup.js'); } catch {}
+// The same for team-notice.js (Gate 1, item 2).
+let teamNotice = null;
+try { teamNotice = require('./team-notice.js'); } catch {}
 const whenReadyBody = (() => {
     const a = SRC.indexOf('app.whenReady().then(');
     const b = SRC.indexOf('\n});\n', a);
@@ -846,6 +849,67 @@ const CASES = [
             && !body.includes('applyUpdateNow('); }],
     ['update: build-app.sh copies update-gate.js into the bundle', () =>
         BUILD.includes('cp "$APP_SRC/update-gate.js" "$C/Resources/app/update-gate.js"')],
+
+    // 9. Who accepted the notice, for an admin (Gate 1, item 2): a tray item and a
+    // small window, admins only; the role from GET /captures/me.
+    ['team: the tray offers "Team: who accepted the notice…" to a signed-in admin', () =>
+        setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }).includes('team-notice')],
+    ['team: not to a member, not to an admin who is signed out, and not while the role is unknown', () =>
+        !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'member' }).includes('team-notice')
+        && !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, signedIn: false, teamRole: 'admin' }).includes('team-notice')
+        && !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true }).includes('team-notice')],
+    ['team: main.js draws the item and opens the team window', () =>
+        /item === 'team-notice'\) \{\s*items\.push\(\{ label: 'Team: who accepted the notice…', click: openTeamNoticeWindow \}\);/.test(SRC)],
+    ['team: the role is part of setupStatus, so the tray rule sees it', () => /teamRole,/.test(fnBody('setupStatus'))],
+    ['team: the role is read from GET /captures/me, kept only as "admin" or "member", and the tray redrawn when it changes', () => {
+        const body = fnBody('refreshTeamRole');
+        return /captureServerRequest\(server, 'GET', '\/captures\/me'\)/.test(body)
+            && /role === 'admin' \|\| role === 'member' \? role : null/.test(body) && /renderTray\(\)/.test(body); }],
+    ['team: the role is read at launch and at sign-in, and forgotten at sign-out', () => {
+        const signed = SRC.indexOf('sign-in: signed in to ${server}');
+        return /loadCaptureTokens\(\);\s*void refreshTeamRole\('launch'\);/.test(SRC)
+            && SRC.indexOf("void refreshTeamRole('signed in')", signed) > signed
+            && /captureTokens = null;\s*teamRole = null;/.test(fnBody('signOutOfCaptureServer')); }],
+    ['team: a 403 from the list drops the role and redraws the tray', () =>
+        /reply\.status === 403\) \{[\s\S]{0,200}teamRole = 'member';[\s\S]{0,80}renderTray\(\);/.test(fnBody('sendTeamNoticeData'))],
+    ['team: the window asks GET /captures/members/notice and sends the formatted lines', () => {
+        const body = fnBody('sendTeamNoticeData');
+        return /captureServerRequest\(server, 'GET', '\/captures\/members\/notice'\)/.test(body)
+            && /teamNotice\.formatTeamNotice\(reply\.json\.members, consent\.STATEMENT_VERSION\)/.test(body); }],
+    ['team: format marks the current version in the heading', () =>
+        teamNotice && teamNotice.formatTeamNotice([], 2).heading === 'Current notice: version 2'],
+    ['team: a member on the current version shows it, marked current, and the date', () =>
+        teamNotice && JSON.stringify(teamNotice.formatTeamNotice([{ name: 'Ana Ruiz', email: 'ana@x.test', role: 'member', latestVersion: 2, acceptedAt: '2026-11-09T10:30:00.000Z' }], 2).lines)
+            === JSON.stringify(['Ana Ruiz (ana@x.test), member: accepted version 2 (current) on 2026-11-09'])],
+    ['team: anyone not on the current version is "not yet", with their last version when there is one', () => {
+        if (!teamNotice) return false;
+        const { lines } = teamNotice.formatTeamNotice([
+            { name: 'Ben Okafor', email: 'ben@x.test', role: 'admin', latestVersion: 1, acceptedAt: '2026-11-01T08:00:00.000Z' },
+            { name: null, email: 'cy@x.test', role: 'member', latestVersion: null, acceptedAt: null },
+        ], 2);
+        return JSON.stringify(lines) === JSON.stringify([
+            'Ben Okafor (ben@x.test), admin: not yet (last accepted version 1 on 2026-11-01)',
+            'cy@x.test, member: not yet',
+        ]); }],
+    ['team: a name holding markup stays as it is in the line (the page draws it as text)', () =>
+        teamNotice && teamNotice.formatTeamNotice([{ name: '<b>Dee</b>', email: 'd@x.test', role: 'member', latestVersion: null, acceptedAt: null }], 1).lines[0]
+            === '<b>Dee</b> (d@x.test), member: not yet'],
+    ['team: the page draws the heading, lines and error with textContent only', () => {
+        const page = readOr('team-notice-page.js');
+        return /textContent = /.test(page) && /createElement\('li'\)/.test(page) && !/innerHTML|insertAdjacentHTML|outerHTML/.test(page); }],
+    ['team: the page loads only its own script, under the same Content-Security-Policy as the setup window', () => {
+        const html = readOr('team-notice.html');
+        const csp = (s) => (/<meta http-equiv="Content-Security-Policy" content="([^"]*)">/.exec(s) || [])[1];
+        return !!csp(html) && csp(html) === csp(readOr('setup.html')) && html.includes('<script src="team-notice-page.js"></script>')
+            && !/<script>/.test(html); }],
+    ['team: its preload lets through its two channels and no others', () => {
+        const pre = readOr('team-notice-preload.js');
+        return /const SEND = \['team-notice:ready'\];/.test(pre) && /const ON = \['team-notice:data'\];/.test(pre); }],
+    ['team: the window opens with the hardened preferences', () => /webPreferences: windowPreferences\('team-notice-preload\.js'\)/.test(fnBody('openTeamNoticeWindow'))],
+    ['team: the window-hardening check switch can open it', () => /'team-notice': openTeamNoticeWindow/.test(fnBody('openWindowsForCheck'))],
+    ['team: build-app.sh copies team-notice.js, its page, its script and its preload into the bundle', () =>
+        ['team-notice.js', 'team-notice.html', 'team-notice-page.js', 'team-notice-preload.js']
+            .every((f) => BUILD.includes(`cp "$APP_SRC/${f}" "$C/Resources/app/${f}"`))],
 ];
 
 console.log(`rule: ${useNaive ? 'NAIVE (any existing file counts as agreed to)' : 'consent.js'}`);

@@ -1459,6 +1459,72 @@ async function main(): Promise<void> {
       await pool.query(`delete from notice_acknowledgements where member_id = $1 and notice_version = 900`, [A.memberId]);
     }
 
+    // ---- who accepted the notice, for an admin (Gate 1, item 2) --------------
+    // GET /captures/members/notice: an admin's capture token, their own account
+    // only. Each member's latest version on record and when; nothing else.
+    {
+      const LIST = "/captures/members/notice";
+      const none = await http("GET", LIST);
+      const junk = await http("GET", LIST, { token: "junk.junk.junk" });
+      const mcp = await http("GET", LIST, { token: C.token });
+      record(
+        none.status === 401 && junk.status === 401 && mcp.status === 403 && mcp.json?.error === "insufficient_scope",
+        "team notice: GET /captures/members/notice gives no token and a junk token 401, and an admin's MCP token 403 insufficient_scope",
+        `got ${none.status} / ${junk.status} / ${mcp.status} ${mcp.json?.error ?? ""}`,
+      );
+      const asMember = await http("GET", LIST, { token: capToken(A) });
+      record(
+        asMember.status === 403 && asMember.json?.error === "admin_only" && !JSON.stringify(asMember.json ?? {}).includes("@"),
+        "team notice: a member's capture token is 403 admin_only, with no member in the reply",
+        `got ${asMember.status} ${JSON.stringify(asMember.json)}`,
+      );
+      // A's two versions on record (the later one counts), B none at these versions,
+      // and a second account with its own member and acknowledgement.
+      await db.insert(schema.noticeAcknowledgements).values([
+        { memberId: A.memberId, noticeVersion: 950, acknowledgedAt: new Date("2026-11-09T09:00:00.000Z") },
+        { memberId: A.memberId, noticeVersion: 951, acknowledgedAt: new Date("2026-11-09T10:30:00.000Z") },
+      ]);
+      const [otherAccount] = await db.insert(schema.accounts).values({ name: `Other ${tag}`, slug: `check-access-other-${tag}` }).returning();
+      const otherEmail = `outsider-${tag}@clipwise.test`;
+      const [outsider] = await db.insert(schema.accountMembers).values({ accountId: otherAccount.id, email: otherEmail, role: "member", displayName: `Outsider ${tag}`, joinedAt: new Date() }).returning();
+      await db.insert(schema.noticeAcknowledgements).values({ memberId: outsider.id, noticeVersion: 951, acknowledgedAt: new Date("2026-11-09T11:00:00.000Z") });
+      try {
+        const asAdmin = await http("GET", LIST, { token: capToken(C) });
+        const list = (asAdmin.json?.members ?? []) as Array<Record<string, unknown>>;
+        const byEmail = (e: string) => list.find((m) => m.email === e);
+        const a = byEmail(A.email);
+        const b = byEmail(B.email);
+        const c = byEmail(C.email);
+        record(
+          asAdmin.status === 200 && !!a && !!b && !!c && a.name === "Check alice" && a.role === "member" && c.role === "admin"
+            && list.every((m) => sameSet(Object.keys(m), ["name", "email", "role", "latestVersion", "acceptedAt"])),
+          "team notice: an admin sees each member's name, email and role, and nothing else per member",
+          `got ${asAdmin.status} ${JSON.stringify(list.slice(0, 3))}`,
+        );
+        record(
+          a?.latestVersion === 951 && a?.acceptedAt === "2026-11-09T10:30:00.000Z",
+          "team notice: a member's latest version on record and when they accepted it",
+          JSON.stringify(a),
+        );
+        // Every listed member's latest version is the database's own answer.
+        const truth = (await pool.query(
+          `select m.email, max(n.notice_version) v from account_members m left join notice_acknowledgements n on n.member_id = m.id
+            where m.account_id = $1 and m.removed_at is null group by m.email`,
+          [acc],
+        )).rows as Array<{ email: string; v: number | null }>;
+        const agrees = truth.length === list.length && truth.every((t) => byEmail(t.email)?.latestVersion === (t.v ?? null));
+        record(agrees, "team notice: every active member of the account is listed once, with the latest version on record (null for none)", `db ${truth.length} members, listed ${list.length}`);
+        record(
+          !list.some((m) => m.email === otherEmail) && !JSON.stringify(asAdmin.json ?? {}).includes(`Outsider ${tag}`),
+          "team notice: another account's members never appear",
+          `listed: ${list.map((m) => m.email).join(", ")}`,
+        );
+      } finally {
+        await pool.query(`delete from notice_acknowledgements where member_id = $1 and notice_version in (950, 951)`, [A.memberId]);
+        await db.delete(schema.accounts).where(eq(schema.accounts.id, otherAccount.id));
+      }
+    }
+
     // ---- the recorder's people questions (SAA-260 step 1) ------------------
     // GET /captures/me and GET /captures/people, with capture tokens. The
     // generic loops above and below cover them once they are classified; the
@@ -1512,10 +1578,14 @@ async function main(): Promise<void> {
 
       // -- GET /captures/me --
       const meA = await http("GET", "/captures/me", { token: capOf(A) });
+      const meC = await http("GET", "/captures/me", { token: capOf(C) });
+      // The role is the caller's own (Gate 1): how the Mac knows to offer an
+      // admin the team's notice list.
       record(
-        meA.status === 200 && meA.json?.displayName === "Check alice" && sameSet(Object.keys(meA.json ?? {}), ["displayName"]),
-        "capture me: the caller's own display name, and nothing else",
-        `got ${meA.status} ${JSON.stringify(meA.json)}`,
+        meA.status === 200 && meA.json?.displayName === "Check alice" && meA.json?.role === "member" && sameSet(Object.keys(meA.json ?? {}), ["displayName", "role"])
+          && meC.status === 200 && meC.json?.role === "admin",
+        "capture me: the caller's own display name and role, and nothing else",
+        `got ${meA.status} ${JSON.stringify(meA.json)}; admin ${meC.status} ${JSON.stringify(meC.json)}`,
       );
       const setBName = (v: string | null) =>
         db.update(schema.accountMembers).set({ displayName: v }).where(eq(schema.accountMembers.id, B.memberId));

@@ -74,7 +74,13 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
   "GET /captures/me": {
     access: "member",
     requires: "capture",
-    note: "the caller's own account_members.display_name, trimmed, or null when it is empty or holds an @; nothing else",
+    note: "the caller's own account_members.display_name, trimmed, or null when it is empty or holds an @, and the caller's own role (admin or member, for the Mac's admin item); nothing else",
+  },
+  // Who accepted the recording notice, for an admin (Gate 1, item 2; routes/capture-notice.ts).
+  "GET /captures/members/notice": {
+    access: "admin",
+    requires: "capture",
+    note: "an admin's own account's members who are not removed: name, email, role, and the latest notice version on record with when; a member is 403 admin_only; no other account's member; nothing else per member",
   },
   // The recording notice's acknowledgement, reported at once (Gate 1, routes/capture-notice.ts).
   "POST /captures/notice": {

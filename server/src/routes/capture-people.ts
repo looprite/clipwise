@@ -81,13 +81,16 @@ export function displayNameFor(raw: string | null | undefined): string | null {
   return name.length === 0 || name.includes("@") ? null : name;
 }
 
+// The caller's own name and role. The role (Gate 1, item 2) is how the recorder
+// knows to offer an admin "Team: who accepted the notice…"; the list itself
+// (GET /captures/members/notice) is refused to anyone else whatever the Mac shows.
 export const captureMeGet: RequestHandler = asyncHandler(async (req, res) => {
   const ctx = accessOf(req);
   const [row] = await db
     .select({ displayName: schema.accountMembers.displayName })
     .from(schema.accountMembers)
     .where(eq(schema.accountMembers.id, ctx.memberId));
-  res.json({ displayName: displayNameFor(row?.displayName) });
+  res.json({ displayName: displayNameFor(row?.displayName), role: ctx.role });
 });
 
 const searchQuerySchema = z

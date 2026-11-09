@@ -22,7 +22,7 @@
 
 import express, { type Express, type RequestHandler, type Router } from "express";
 import { sql } from "drizzle-orm";
-import { requireCapture, requireMember, requireMemberOrCaptureWrites, requireSession, sameAccountOnly } from "./access/authenticate.js";
+import { requireAdmin, requireCapture, requireMember, requireMemberOrCaptureWrites, requireSession, sameAccountOnly } from "./access/authenticate.js";
 import { authorizationServerMetadata, protectedResourceMetadata } from "./auth/discovery.js";
 import { consentPage, loginPage } from "./auth/pages.js";
 import { db } from "./db/index.js";
@@ -34,7 +34,7 @@ import { accountsRouter } from "./routes/accounts.js";
 import { momentsRouter } from "./routes/moments.js";
 import { capturesPost } from "./routes/captures.js";
 import { calendarPreviewPost } from "./routes/calendar-preview.js";
-import { captureNoticePost } from "./routes/capture-notice.js";
+import { captureMembersNoticeGet, captureNoticePost } from "./routes/capture-notice.js";
 import { captureMeGet, capturePeopleGet } from "./routes/capture-people.js";
 import { captureScopeRouter } from "./routes/capture-scope.js";
 import { oauthRouter } from "./routes/oauth.js";
@@ -130,6 +130,8 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   // The member's acknowledgement of the recording notice, reported at once
   // (Gate 1; routes/capture-notice.ts). Here for the same reason.
   app.post("/captures/notice", requireCapture, captureNoticePost);
+  // Who accepted it, for an admin's tray item (Gate 1, item 2). Admins only.
+  app.get("/captures/members/notice", requireCapture, requireAdmin, captureMembersNoticeGet);
   // What the recorder does with a stored capture of its owner's: the transcript,
   // trash, restore, delete permanently and job status (routes/capture-scope.ts).
   app.use("/captures/:captureId", requireCapture);
