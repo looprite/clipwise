@@ -139,6 +139,7 @@ function claudeAddress(origin) {
 
 // The account items the tray offers, in order:
 //   'finish-setup'      setup never finished: the one way back into the window
+//   'read-notice'       setup finished and the notice agreed to: read it again
 //   'recording-notice'  setup finished, but the notice is not agreed to (a raised version)
 //   'sign-in'           setup finished, a server is set and this Mac holds no token for it
 //   'sign-out'          signed in
@@ -146,7 +147,8 @@ function trayAccountItems({ setupCompleted, acknowledged, server, signedIn }) {
     const out = [];
     if (!setupCompleted) out.push('finish-setup');
     else {
-        if (!acknowledged) out.push('recording-notice');
+        // Agreed to: read it again (Gate 1). Not agreed to: the item that asks.
+        out.push(acknowledged ? 'read-notice' : 'recording-notice');
         if (server && !signedIn) out.push('sign-in');
     }
     if (signedIn) out.push('sign-out');

@@ -34,6 +34,7 @@ import { accountsRouter } from "./routes/accounts.js";
 import { momentsRouter } from "./routes/moments.js";
 import { capturesPost } from "./routes/captures.js";
 import { calendarPreviewPost } from "./routes/calendar-preview.js";
+import { captureNoticePost } from "./routes/capture-notice.js";
 import { captureMeGet, capturePeopleGet } from "./routes/capture-people.js";
 import { captureScopeRouter } from "./routes/capture-scope.js";
 import { oauthRouter } from "./routes/oauth.js";
@@ -126,6 +127,9 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   // step 1; routes/capture-people.ts). Here for the same reason.
   app.get("/captures/me", requireCapture, captureMeGet);
   app.get("/captures/people", requireCapture, capturePeopleGet);
+  // The member's acknowledgement of the recording notice, reported at once
+  // (Gate 1; routes/capture-notice.ts). Here for the same reason.
+  app.post("/captures/notice", requireCapture, captureNoticePost);
   // What the recorder does with a stored capture of its owner's: the transcript,
   // trash, restore, delete permanently and job status (routes/capture-scope.ts).
   app.use("/captures/:captureId", requireCapture);

@@ -14,11 +14,15 @@
      window comes back to the front, and the page draws that. Every button sends
      one message with the window's token.
 
-     The notice screen's text is the approved text from SAA-216, unchanged. Its
-     primary button's label comes from main.js (consent.js buttonLabel): "I
-     understand" when it opened by itself, "I understand — start recording" when
-     something tried to start a capture. "Not now" and closing the window are the
-     same thing: nothing is written and the gate stays shut.
+     The notice screen's text is not in this page: it is the repo's copy for the
+     current version, notice/recording-notice-v<N>.txt, which main.js reads
+     (consent.js readNotice) and sends with the state; setup-page.js draws its
+     title, headings, lists and paragraphs as text. Its primary button's label
+     comes from main.js too (consent.js buttonLabel): "I understand" when it
+     opened by itself, "I understand — start recording" when something tried to
+     start a capture, "Close" when it is reread from the menu bar once agreed.
+     "Not now" and closing the window are the same thing: nothing is written and
+     the gate stays shut. A reread has no "Not now", and its button writes nothing.
 
      Loaded from file:// with no Node, like identity.html (SAA-243 window
      hardening): setup-preload.js is all it reaches of the main process. Ships
@@ -87,7 +91,9 @@
     flex: 1 1 auto; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--secondary-border);
     background: var(--secondary-bg); font: 12px/1.4 ui-monospace, Menlo, monospace; user-select: text; overflow-wrap: anywhere;
   }
-  ol { margin: 0 0 10px; padding-left: 20px; }
+  ol, ul { margin: 0 0 10px; padding-left: 20px; }
+  /* The notice's section headings (notice/recording-notice-v<N>.txt "## "). */
+  h2 { font-size: 13px; font-weight: 600; margin: 12px 0 6px; }
   li { margin: 0 0 4px; }
   #actions { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; }
   button {
@@ -109,10 +115,9 @@
   <p id="filevault" class="error" style="display:none"><span id="filevault-text"></span> <a id="filevault-settings">Open System Settings</a></p>
 
   <div class="screen" id="screen-notice">
-    <h1>Before you record</h1>
-    <p>Clipwise records calls on this Mac without joining them. No bot appears in the meeting, so nobody else on the call can see that it is recording.</p>
-    <p>You are responsible for telling the people you record, and for following the laws and workplace rules that apply to you. In many places everyone on a call has to agree to be recorded.</p>
-    <p>When you start recording, Clipwise shows a short line you can say to let everyone know. On calls with a chat, &ldquo;Copy recording notice&rdquo; in the menu bar copies it for you.</p>
+    <h1 id="notice-title"></h1>
+    <div id="notice-text"></div>
+    <p class="error" id="notice-error"></p>
   </div>
 
   <div class="screen" id="screen-address">

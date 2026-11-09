@@ -112,6 +112,17 @@ const startNotice = (() => {
     return a >= 0 && b > a ? SRC.slice(a, b) : '';
 })();
 
+// The approved text of notice v1 (SAA-216), as it stood in setup.html before it
+// moved to notice/recording-notice-v1.txt, entities written as the characters.
+const APPROVED_NOTICE = {
+    title: 'Before you record',
+    paragraphs: [
+        'Clipwise records calls on this Mac without joining them. No bot appears in the meeting, so nobody else on the call can see that it is recording.',
+        'You are responsible for telling the people you record, and for following the laws and workplace rules that apply to you. In many places everyone on a call has to agree to be recorded.',
+        'When you start recording, Clipwise shows a short line you can say to let everyone know. On calls with a chat, “Copy recording notice” in the menu bar copies it for you.',
+    ],
+};
+
 const holds = (...keys) => (k) => keys.includes(k);
 const trig = { key: 'com.google.Chrome.helper', name: 'Google Chrome' };
 
@@ -190,13 +201,117 @@ const CASES = [
         return inside >= 1 && n === inside + 1; }],
     ['gate: a blocked start opens the window and returns', () =>
         /showSetupWindow\('blocked'\);[\s\S]{0,400}?return;/.test(startBody)],
-    ['window text: title and the three paragraphs are the approved text', () => [
-        'Before you record',
-        'Clipwise records calls on this Mac without joining them. No bot appears in the meeting, so nobody else on the call can see that it is recording.',
-        'You are responsible for telling the people you record, and for following the laws and workplace rules that apply to you. In many places everyone on a call has to agree to be recorded.',
-        'When you start recording, Clipwise shows a short line you can say to let everyone know. On calls with a chat, &ldquo;Copy recording notice&rdquo; in the menu bar copies it for you.',
-        'Not now',
-    ].every(t => HTML.includes(t))],
+    // The notice's text (Gate 1, the member notice): one copy in the repo per
+    // version, notice/recording-notice-v<N>.txt, read by consent.js for
+    // STATEMENT_VERSION. The page draws what main.js sends; none of it is in the
+    // page itself.
+    ['notice: the repo copy for the current version exists (notice/recording-notice-v<N>.txt)', () =>
+        fs.existsSync(path.join(__dirname, 'notice', `recording-notice-v${consent.STATEMENT_VERSION}.txt`))],
+    ['notice: consent.readNotice gives v1 exactly as approved: the title, then three paragraphs and nothing else (control)', () => {
+        const n = consent.readNotice(1);
+        return n.version === 1 && n.title === APPROVED_NOTICE.title
+            && JSON.stringify(n.blocks) === JSON.stringify(APPROVED_NOTICE.paragraphs.map((text) => ({ tag: 'p', text })))
+            && JSON.stringify(n.paragraphs) === JSON.stringify(APPROVED_NOTICE.paragraphs); }],
+    ['notice: a heading, a two-item list and a paragraph read in order as h2, ul with both items, p', () => withDir(d => {
+        fs.writeFileSync(path.join(d, 'recording-notice-v8.txt'),
+            'The title\n\n## What is stored\n- Your microphone\n- The sound your Mac plays\n\nA closing paragraph\nthat runs over two lines.\n');
+        const n = consent.readNotice(8, d);
+        return n.title === 'The title' && JSON.stringify(n.blocks) === JSON.stringify([
+            { tag: 'h2', text: 'What is stored' },
+            { tag: 'ul', items: ['Your microphone', 'The sound your Mac plays'] },
+            { tag: 'p', text: 'A closing paragraph that runs over two lines.' },
+        ]); })],
+    ['notice: a blank line ends a list; the next bullets start a second list', () => withDir(d => {
+        fs.writeFileSync(path.join(d, 'recording-notice-v9.txt'), 'T\n\n- a\n- b\n\n- c\n');
+        const n = consent.readNotice(9, d);
+        return JSON.stringify(n.blocks) === JSON.stringify([{ tag: 'ul', items: ['a', 'b'] }, { tag: 'ul', items: ['c'] }]); })],
+    ['notice: markup in the file stays text (the page never parses it)', () => withDir(d => {
+        fs.writeFileSync(path.join(d, 'recording-notice-v10.txt'), 'T\n\n<b>bold</b> & more\n');
+        const n = consent.readNotice(10, d);
+        return n.blocks.length === 1 && n.blocks[0].tag === 'p' && n.blocks[0].text === '<b>bold</b> & more'; })],
+    ['notice: the page draws h2, ul with li, and p from the blocks, by textContent, and no other tag', () => {
+        const page = readOr('setup-page.js');
+        return /NOTICE_TAGS = new Set\(\['h2', 'ul', 'p'\]\)/.test(page)
+            && /createElement\('li'\)/.test(page) && /li\.textContent = /.test(page)
+            && /el\.textContent = b\.text/.test(page) && /if \(!NOTICE_TAGS\.has\(b\.tag\)\) continue;/.test(page)
+            && !/innerHTML|insertAdjacentHTML|outerHTML/.test(page); }],
+    ['notice: readNotice of a version with no file throws, never an empty notice', () => {
+        try { consent.readNotice(consent.STATEMENT_VERSION + 1000); return false; } catch { return true; } }],
+    ['notice: a notice file is read for the version it is asked for (a later version is its own file)', () => withDir(d => {
+        fs.writeFileSync(path.join(d, 'recording-notice-v7.txt'), 'A title\n\nFirst.\n\nSecond, with a “quote”.\n');
+        const n = consent.readNotice(7, d);
+        return n.version === 7 && n.title === 'A title'
+            && JSON.stringify(n.blocks) === JSON.stringify([{ tag: 'p', text: 'First.' }, { tag: 'p', text: 'Second, with a “quote”.' }]); })],
+    ['notice: setup.html holds none of the notice text; the page draws it from v.notice as text', () =>
+        !HTML.includes('Clipwise records calls on this Mac without joining them')
+        && !HTML.includes('You are responsible for telling the people you record')
+        && !/<h1>Before you record<\/h1>/.test(HTML)
+        && /v\.notice/.test(readOr('setup-page.js')) && /textContent = /.test(readOr('setup-page.js'))
+        && !/innerHTML/.test(readOr('setup-page.js'))],
+    ['notice: setupView sends the notice through noticeForPage, which reads it with consent.readNotice and turns a failure into null', () => {
+        const body = fnBody('noticeForPage');
+        return /notice: noticeForPage\(\)/.test(fnBody('setupView'))
+            && /try \{[\s\S]*consent\.readNotice\(\)[\s\S]*\} catch/.test(body) && /return null;/.test(body); }],
+    // A notice that is missing or empty can't be agreed to.
+    ['notice not loaded: consent.noticeAgreeable is false for null, no blocks, an empty list of blocks, or no title', () =>
+        !consent.noticeAgreeable(null) && !consent.noticeAgreeable({ title: 'T' })
+        && !consent.noticeAgreeable({ title: 'T', blocks: [] }) && !consent.noticeAgreeable({ title: '', blocks: [{ tag: 'p', text: 'x' }] })],
+    ['notice not loaded: the page disables "I understand" and shows one line, "The notice couldn\'t be loaded"', () => {
+        const page = readOr('setup-page.js');
+        return /const agreeable = !!\(v\.notice && v\.notice\.title && Array\.isArray\(v\.notice\.blocks\) && v\.notice\.blocks\.length > 0\);/.test(page)
+            && /primary\.disabled = !!v\.busy \|\| \(v\.screen === 'notice' && !agreeable && !v\.rereading\);/.test(page)
+            && /\$\('notice-error'\)\.textContent = agreeable \? '' : "The notice couldn't be loaded";/.test(page)
+            && HTML.includes('id="notice-error"'); }],
+    ['notice not loaded: main.js records no acknowledgement for it, whatever the page sends', () => {
+        const a = SRC.indexOf("ipcMain.on('setup:acknowledge'");
+        const b = SRC.indexOf("ipcMain.on('setup:later'", a);
+        const handler = a >= 0 && b > a ? SRC.slice(a, b) : '';
+        const guard = handler.indexOf('if (!consent.noticeAgreeable(noticeForPage()))');
+        const saved = handler.indexOf('consent.recordAcknowledgement(SUPPORT_DIR)');
+        return guard >= 0 && saved > guard; }],
+    ['control: the loaded notice is agreeable, so the button stays enabled', () => consent.noticeAgreeable(consent.readNotice())],
+    ['notice: "Not now" is still the window\'s second button', () => HTML.includes('Not now')],
+    ['build-app.sh copies the notice directory into the bundle', () =>
+        /cp -R "\$APP_SRC\/notice" "\$C\/Resources\/app\/notice"/.test(BUILD)],
+
+    // Reading it again once agreed (Gate 1's setup-guide note).
+    ['reread: the button is "Close" when the notice is reread', () => consent.buttonLabel('reread') === 'Close'],
+    ['reread: the tray offers "Read the recording notice…" once setup is finished and the notice agreed to', () =>
+        setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true }).includes('read-notice')],
+    ['reread: not offered while the notice is not agreed to (the "Recording notice…" item asks instead), nor before setup is finished', () =>
+        !setup.trayAccountItems({ ...ALL_DONE, acknowledged: false, setupCompleted: true }).includes('read-notice')
+        && setup.trayAccountItems({ ...ALL_DONE, acknowledged: false, setupCompleted: true }).includes('recording-notice')
+        && !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: false }).includes('read-notice')],
+    ['reread: main.js draws the tray item and opens the window as "reread"', () =>
+        /item === 'read-notice'\) \{\s*items\.push\(\{ label: 'Read the recording notice…', click: \(\) => showSetupWindow\('reread'\) \}\);/.test(SRC)],
+    ['reread: an agreed install opens the notice window only when it is asked to reread it', () =>
+        /if \(noticeOnly && mode !== 'reread' && consent\.isAcknowledged\(SUPPORT_DIR\)\) return;/.test(fnBody('showSetupWindow'))],
+    ['reread: the page hides "Not now", and its button closes the window without sending an acknowledgement', () => {
+        const page = readOr('setup-page.js');
+        return /rereading/.test(fnBody('setupView')) && /v\.rereading/.test(page)
+            && /view\.rereading\) send\('setup:later'\)/.test(page); }],
+
+    // The acknowledgement reaches the server at once (POST /captures/notice);
+    // the capture's notice stamp stays the fallback.
+    ['report: consent.noticeReport is null when the notice is not agreed to', () => withDir(d => consent.noticeReport(d) === null)],
+    ['report: consent.noticeReport is the version and acknowledged_at as the route takes them, nothing else', () => withDir(d => {
+        put(d, JSON.stringify({ version: consent.STATEMENT_VERSION, acknowledged_at: '2026-10-07T20:00:00.000Z', extra: 'x' }));
+        return JSON.stringify(consent.noticeReport(d)) === JSON.stringify({ version: consent.STATEMENT_VERSION, acknowledgedAt: '2026-10-07T20:00:00.000Z' }); })],
+    ['report: reportNoticeToServer posts consent.noticeReport to /captures/notice, only when signed in', () => {
+        const body = fnBody('reportNoticeToServer');
+        return /const server = signedInServer\(\);/.test(body) && /consent\.noticeReport\(SUPPORT_DIR\)/.test(body)
+            && /captureServerRequest\(server, 'POST', '\/captures\/notice', report\)/.test(body); }],
+    ['report: "I understand" reports it, after the answer is saved', () => {
+        const a = SRC.indexOf("ipcMain.on('setup:acknowledge'");
+        const b = SRC.indexOf("ipcMain.on('setup:later'", a);
+        const handler = a >= 0 && b > a ? SRC.slice(a, b) : '';
+        const saved = handler.indexOf('consent.recordAcknowledgement(SUPPORT_DIR)');
+        const report = handler.indexOf("reportNoticeToServer('acknowledged')");
+        return saved >= 0 && report > saved; }],
+    ['report: signing in reports it (the notice is agreed to before sign-in in setup)', () => {
+        const signed = SRC.indexOf('sign-in: signed in to ${server}');
+        const report = SRC.indexOf("reportNoticeToServer('signed in')", signed);
+        return signed >= 0 && report > signed && report - signed < 400; }],
     ['window: the primary button is labelled by main.js, not hard-coded to one mode', () =>
         HTML.includes('v.noticeLabel') && fnBody('setupView').includes('noticeLabel: consent.buttonLabel(w.mode)')],
     ['start notification: fires on the move from starting to recording', () => startNotice.length > 0],
@@ -222,7 +337,7 @@ const CASES = [
         return w >= 0 && t > w && a > t; }],
     ['launch: the window opens at launch when not agreed to (showSetupWindow at launch, which stays shut only when setup is finished and the notice agreed to)', () =>
         whenReadyBody.includes("showSetupWindow('launch');")
-        && /if \(noticeOnly && consent\.isAcknowledged\(SUPPORT_DIR\)\) return;/.test(fnBody('showSetupWindow'))],
+        && /if \(noticeOnly && mode !== 'reread' && consent\.isAcknowledged\(SUPPORT_DIR\)\) return;/.test(fnBody('showSetupWindow'))],
     ['build-app.sh copies consent.js into the bundle', () => /cp "\$APP_SRC\/consent\.js" "\$C\/Resources\/app\/consent\.js"/.test(BUILD)],
     ['build-app.sh copies setup.js, setup.html, its script setup-page.js and its preload setup-preload.js into the bundle', () =>
         /cp "\$APP_SRC\/setup\.js" "\$C\/Resources\/app\/setup\.js"/.test(BUILD)
@@ -300,8 +415,9 @@ const CASES = [
         return !garbled && !setup.isSetupCompleted(d); })],
     ['tray: setup never finished -> only "Finish setting up", not the notice or sign-in items', () =>
         JSON.stringify(setup.trayAccountItems({ setupCompleted: false, acknowledged: false, server: 'https://t.example.com', signedIn: false })) === JSON.stringify(['finish-setup'])],
+    // Since Gate 1's reread item, an agreed install also offers "Read the recording notice…" first.
     ['tray: setup finished, then signed out -> "Sign in to Clipwise", not "Finish setting up"', () =>
-        JSON.stringify(setup.trayAccountItems({ setupCompleted: true, acknowledged: true, server: 'https://t.example.com', signedIn: false })) === JSON.stringify(['sign-in'])],
+        JSON.stringify(setup.trayAccountItems({ setupCompleted: true, acknowledged: true, server: 'https://t.example.com', signedIn: false })) === JSON.stringify(['read-notice', 'sign-in'])],
     ['tray: setup finished, notice version raised -> "Recording notice"', () =>
         setup.trayAccountItems({ setupCompleted: true, acknowledged: false, server: 'https://t.example.com', signedIn: true }).includes('recording-notice')],
     ['tray: signed in -> "Sign out", and no sign-in item', () => {
@@ -540,8 +656,9 @@ const CASES = [
         && HTML.includes("el.className = `state ${state === 'granted' ? 'granted' : state === 'denied' ? 'denied' : ''}`;")],
     ['window: the sign-in screen says Google asks once for read-only calendar access (SAA-198 step 5)', () =>
         HTML.includes('Google asks once for read-only access to your calendar, so your recordings get their meeting&rsquo;s title and invitees.')],
-    ['window: setup.html has the five screens and the notice\'s approved title', () =>
-        ['screen-notice', 'screen-address', 'screen-signin', 'screen-permissions', 'screen-claude', '<h1>Before you record</h1>'].every(t => HTML.includes(t))],
+    // The notice's title is now drawn from its file (readNotice), into notice-title.
+    ['window: setup.html has the five screens and a place for the notice\'s title and text', () =>
+        ['screen-notice', 'screen-address', 'screen-signin', 'screen-permissions', 'screen-claude', 'id="notice-title"', 'id="notice-text"'].every(t => HTML.includes(t))],
 
     // 7. Use Clipwise in Claude, setup's fifth screen (SAA-198 step 6, Jon's call 9)
     ['claude screen: the address is the team\'s origin plus /mcp, and none without a server', () =>
@@ -554,7 +671,7 @@ const CASES = [
         && fnBody('setupView').includes('claudeAddress: setup.claudeAddress(status.server)')],
     ['claude screen: an install with all four done is recorded as set up, so its window never opens as setup and never shows it', () => withDir(d =>
         setup.SCREENS.includes('claude') && setup.settleSetup(d, ALL_DONE) === true && setup.isSetupCompleted(d)
-        && /if \(noticeOnly && consent\.isAcknowledged\(SUPPORT_DIR\)\) return;/.test(fnBody('showSetupWindow')))],
+        && /if \(noticeOnly && mode !== 'reread' && consent\.isAcknowledged\(SUPPORT_DIR\)\) return;/.test(fnBody('showSetupWindow')))],
     ['claude screen: its text is the approved text, each line once', () => {
         const lines = [
             '<h1>Use Clipwise in Claude</h1>',

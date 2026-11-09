@@ -23,7 +23,8 @@ const path = require('path');
 
 // Raised only to ask everyone again, deliberately. A file written at a lower
 // version counts as not acknowledged; a higher one (a newer build's file read
-// by an older build) does not.
+// by an older build) does not. Each version's text is
+// notice/recording-notice-v<N>.txt (readNotice, below).
 const STATEMENT_VERSION = 1;
 
 // Single line, plain ASCII, on purpose. A line break in a pasted chat message
@@ -33,6 +34,58 @@ const NOTICE_LINE = "I'm recording this call with Clipwise to take notes. Let me
 
 function consentPath(supportDir) {
     return path.join(supportDir, 'consent.json');
+}
+
+// The notice's text, one file per version in the repo and the bundle:
+// notice/recording-notice-v<N>.txt. Raising STATEMENT_VERSION means adding the
+// next file; the earlier ones stay as the record of what each version said.
+//
+// The format, plain text:
+//   the first non-blank line   the title
+//   "## " at a line's start    a heading                     -> { tag: 'h2', text }
+//   "- " at a line's start     a bullet; consecutive bullets  -> { tag: 'ul', items }
+//                              are one list, a blank line ends it
+//   any other lines            a paragraph; lines run together, a blank line
+//                              ends it                        -> { tag: 'p', text }
+// The page draws these three tags with textContent and nothing else, never as
+// markup, so nothing in the file can become HTML.
+const NOTICE_DIR = path.join(__dirname, 'notice');
+
+// Throws when the file for that version is missing, has no title, or has
+// nothing after it: a bundle without it must fail loudly, never show an empty
+// notice that could be agreed to.
+function readNotice(version = STATEMENT_VERSION, dir = NOTICE_DIR) {
+    const lines = fs.readFileSync(path.join(dir, `recording-notice-v${version}.txt`), 'utf8').replace(/\r\n/g, '\n').split('\n');
+    const clean = (s) => s.replace(/\s+/g, ' ').trim();
+    let title = null;
+    const blocks = [];
+    let open = null; // the paragraph or list being added to
+    for (const raw of lines) {
+        const line = raw.trimEnd();
+        if (line.trim() === '') { open = null; continue; }
+        if (title === null) { title = clean(line); continue; }
+        if (line.startsWith('## ')) {
+            blocks.push({ tag: 'h2', text: clean(line.slice(3)) });
+            open = null;
+        } else if (line.startsWith('- ')) {
+            if (!open || open.tag !== 'ul') { open = { tag: 'ul', items: [] }; blocks.push(open); }
+            open.items.push(clean(line.slice(2)));
+        } else if (open && open.tag === 'p') {
+            open.text = clean(`${open.text} ${line}`);
+        } else {
+            open = { tag: 'p', text: clean(line) };
+            blocks.push(open);
+        }
+    }
+    if (!title || blocks.length === 0) throw new Error(`recording-notice-v${version}.txt has no title or no text after it`);
+    return { version, title, blocks, paragraphs: blocks.filter((b) => b.tag === 'p').map((b) => b.text) };
+}
+
+// Whether a notice as the page gets it can be agreed to: a title and at least
+// one block. A notice that could not be read (null) or is empty cannot: the page
+// disables its button, and main.js records nothing for it.
+function noticeAgreeable(notice) {
+    return !!(notice && notice.title && Array.isArray(notice.blocks) && notice.blocks.length > 0);
 }
 
 // Never throws: a missing, unreadable, garbled or wrongly-shaped file is the
@@ -81,9 +134,21 @@ function noticeStamp(supportDir) {
     return { version: doc.version, acknowledged_at: doc.acknowledged_at };
 }
 
+// The acknowledgement as POST /captures/notice takes it (Gate 1, the member
+// notice): the version and when it was agreed to, nothing else. Null when it is
+// not agreed to. The capture's notice stamp carries the same and stays the
+// fallback for an answer given while offline or signed out.
+function noticeReport(supportDir) {
+    const stamp = noticeStamp(supportDir);
+    return stamp ? { version: stamp.version, acknowledgedAt: stamp.acknowledged_at } : null;
+}
+
 // 'launch': the window opened by itself when the app started.
 // 'blocked': it opened because something tried to start a capture.
+// 'reread': opened from the tray to read it again once agreed; its one button
+//   closes it and writes nothing.
 function buttonLabel(mode) {
+    if (mode === 'reread') return 'Close';
     return mode === 'blocked' ? 'I understand — start recording' : 'I understand';
 }
 
@@ -102,7 +167,7 @@ function shouldStartAfterAcknowledgement(mode, blockedStart, holdsMic) {
 }
 
 module.exports = {
-    STATEMENT_VERSION, NOTICE_LINE,
-    consentPath, readConsent, isAcknowledged, recordAcknowledgement, noticeStamp,
+    STATEMENT_VERSION, NOTICE_LINE, NOTICE_DIR,
+    consentPath, readNotice, noticeAgreeable, readConsent, isAcknowledged, recordAcknowledgement, noticeStamp, noticeReport,
     buttonLabel, shouldStartAfterAcknowledgement,
 };

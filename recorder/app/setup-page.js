@@ -12,6 +12,30 @@ const send = (channel, extra) => ipcRenderer.send(channel, { token, ...(extra ||
 const STATE_TEXT = { granted: 'Allowed', denied: 'Off', notDetermined: 'Not yet asked' };
 let view = null;
 
+// The notice's text, as main.js sends it (consent.js readNotice): a title and
+// blocks of three kinds only. Every string goes in as textContent; a block of
+// any other kind is skipped, so nothing the file holds can become markup.
+const NOTICE_TAGS = new Set(['h2', 'ul', 'p']);
+function drawNotice(notice) {
+  $('notice-title').textContent = notice ? notice.title : '';
+  const box = $('notice-text');
+  box.replaceChildren();
+  for (const b of (notice && notice.blocks) || []) {
+    if (!NOTICE_TAGS.has(b.tag)) continue;
+    const el = document.createElement(b.tag);
+    if (b.tag === 'ul') {
+      for (const item of b.items || []) {
+        const li = document.createElement('li');
+        li.textContent = item;
+        el.appendChild(li);
+      }
+    } else {
+      el.textContent = b.text;
+    }
+    box.appendChild(el);
+  }
+}
+
 // Any other state audiodevs reports (restricted, unavailable, unexpected) is
 // "Not available" in the muted style: it does not hold setup open
 // (setup.js permissionSettled), but it is not a grant either.
@@ -34,9 +58,14 @@ function draw(v) {
   $('filevault').style.display = v.fileVaultWarning ? 'block' : 'none';
   const primary = $('primary');
   const later = $('later');
-  primary.disabled = !!v.busy;
+  // A notice that could not be read (null) or is empty can't be agreed to.
+  const agreeable = !!(v.notice && v.notice.title && Array.isArray(v.notice.blocks) && v.notice.blocks.length > 0);
+  // A reread's Close writes nothing, so it stays usable either way.
+  primary.disabled = !!v.busy || (v.screen === 'notice' && !agreeable && !v.rereading);
   later.textContent = v.screen === 'permissions' ? 'Finish later' : 'Not now';
   if (v.screen === 'notice') {
+    drawNotice(v.notice);
+    $('notice-error').textContent = agreeable ? '' : "The notice couldn't be loaded";
     primary.textContent = v.noticeLabel || 'I understand';
   } else if (v.screen === 'address') {
     primary.textContent = v.busy ? 'Checking…' : 'Continue';
@@ -59,7 +88,8 @@ function draw(v) {
     primary.textContent = 'Done';
   }
   primary.style.display = v.screen === 'permissions' ? 'none' : '';
-  later.style.display = v.screen === 'claude' ? 'none' : '';
+  // A reread (opened from the menu bar once agreed) has one button, Close.
+  later.style.display = v.screen === 'claude' || v.rereading ? 'none' : '';
 }
 
 ipcRenderer.on('setup:state', (_event, v) => draw(v));
@@ -67,7 +97,9 @@ ipcRenderer.on('setup:state', (_event, v) => draw(v));
 $('primary').addEventListener('click', () => {
   if (!view || $('primary').disabled) return;
   $('primary').disabled = true;
-  if (view.screen === 'notice') send('setup:acknowledge');
+  // Reread: Close only closes; nothing is sent that could write an answer.
+  if (view.screen === 'notice' && view.rereading) send('setup:later');
+  else if (view.screen === 'notice') send('setup:acknowledge');
   else if (view.screen === 'address') send('setup:address', { address: $('address').value });
   else if (view.screen === 'signin') send('setup:signin');
   else if (view.screen === 'claude') send('setup:done');

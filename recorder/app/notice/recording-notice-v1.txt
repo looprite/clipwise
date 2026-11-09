@@ -1,0 +1,7 @@
+Before you record
+
+Clipwise records calls on this Mac without joining them. No bot appears in the meeting, so nobody else on the call can see that it is recording.
+
+You are responsible for telling the people you record, and for following the laws and workplace rules that apply to you. In many places everyone on a call has to agree to be recorded.
+
+When you start recording, Clipwise shows a short line you can say to let everyone know. On calls with a chat, “Copy recording notice” in the menu bar copies it for you.

@@ -198,6 +198,10 @@ cp "$APP_SRC/silence-reminder.js" "$C/Resources/app/silence-reminder.js"
 # without either .js fails to launch, and without the page the gate would shut
 # with nothing to open.
 cp "$APP_SRC/consent.js" "$C/Resources/app/consent.js"
+# The recording notice's text, one file per version (consent.js readNotice reads
+# it beside itself): without it the notice can't be shown, so it can't be agreed
+# to and nothing records.
+cp -R "$APP_SRC/notice" "$C/Resources/app/notice"
 cp "$APP_SRC/setup.js" "$C/Resources/app/setup.js"
 cp "$APP_SRC/setup.html" "$C/Resources/app/setup.html"
 # Its script and its preload (SAA-243 window hardening), beside the page.

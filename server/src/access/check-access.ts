@@ -1408,6 +1408,57 @@ async function main(): Promise<void> {
       await pool.query(`delete from attendees where recording_id = $1 and person_id = $2`, [rec.b1.id, people.hidden.id]);
     }
 
+    // ---- the recording notice, reported at once (Gate 1, the member notice) ----
+    // POST /captures/notice: the Mac reports "I understand" as soon as it is
+    // signed in, so the acknowledgement is on record before any capture carries
+    // it (captures stay the fallback). The generic loops cover it once it is
+    // classified; the lines here are stated again so code without it fails them.
+    {
+      const ackRows = async (who: Who) =>
+        (await pool.query(`select notice_version, acknowledged_at from notice_acknowledgements where member_id = $1 order by notice_version`, [who.memberId])).rows as Array<{ notice_version: number; acknowledged_at: Date }>;
+      const none = await http("POST", "/captures/notice", { json: { version: 1, acknowledgedAt: "2026-11-09T10:00:00.000Z" } });
+      const junk = await http("POST", "/captures/notice", { token: "junk.junk.junk", json: { version: 1, acknowledgedAt: "2026-11-09T10:00:00.000Z" } });
+      const mcp = await http("POST", "/captures/notice", { token: A.token, json: { version: 1, acknowledgedAt: "2026-11-09T10:00:00.000Z" } });
+      record(
+        none.status === 401 && junk.status === 401 && mcp.status === 403 && mcp.json?.error === "insufficient_scope",
+        "notice: POST /captures/notice gives no token and a junk token 401, and an MCP token 403 insufficient_scope",
+        `got ${none.status} / ${junk.status} / ${mcp.status} ${mcp.json?.error ?? ""}`,
+      );
+      // Version 900: a fixture version no capture of this run carries, so the
+      // rows below are this block's alone.
+      const beforeA = (await ackRows(A)).filter((r) => r.notice_version === 900).length;
+      const first = await http("POST", "/captures/notice", { token: capToken(A), json: { version: 900, acknowledgedAt: "2026-11-09T10:00:00.000Z" } });
+      const afterFirst = (await ackRows(A)).filter((r) => r.notice_version === 900);
+      record(
+        beforeA === 0 && first.status === 200 && first.json?.recorded === true && first.json?.version === 900 && afterFirst.length === 1
+          && afterFirst[0].acknowledged_at.toISOString() === "2026-11-09T10:00:00.000Z",
+        "notice: a capture token records the caller's acknowledgement at once (200, recorded true), with the time the Mac sent",
+        `status ${first.status} ${JSON.stringify(first.json)}; rows ${JSON.stringify(afterFirst)}`,
+      );
+      const again = await http("POST", "/captures/notice", { token: capToken(A), json: { version: 900, acknowledgedAt: "2026-11-09T12:00:00.000Z" } });
+      const afterAgain = (await ackRows(A)).filter((r) => r.notice_version === 900);
+      record(
+        again.status === 200 && again.json?.recorded === false && afterAgain.length === 1 && afterAgain[0].acknowledged_at.toISOString() === "2026-11-09T10:00:00.000Z",
+        "notice: the same version again is 200 recorded false, and the first acknowledged_at stands",
+        `status ${again.status} ${JSON.stringify(again.json)}; rows ${JSON.stringify(afterAgain)}`,
+      );
+      const bRows = (await ackRows(B)).filter((r) => r.notice_version === 900).length;
+      record(bRows === 0, "notice: it is recorded for the token's member only, never another member", `B has ${bRows} row(s) at version 900`);
+      const bad = [
+        await http("POST", "/captures/notice", { token: capToken(A), json: {} }),
+        await http("POST", "/captures/notice", { token: capToken(A), json: { version: 0, acknowledgedAt: "2026-11-09T10:00:00.000Z" } }),
+        await http("POST", "/captures/notice", { token: capToken(A), json: { version: 901, acknowledgedAt: "yesterday" } }),
+        await http("POST", "/captures/notice", { token: capToken(A), json: { version: 901, acknowledgedAt: "2026-11-09T10:00:00.000Z", memberId: B.memberId } }),
+      ];
+      const v901 = (await ackRows(A)).filter((r) => r.notice_version === 901).length + (await ackRows(B)).filter((r) => r.notice_version === 901).length;
+      record(
+        bad.every((r) => r.status === 400) && v901 === 0,
+        "notice: an empty body, version 0, a time that is not a timestamp, and any extra field are 400, and nothing is written",
+        `${bad.map((r) => r.status).join(" / ")}; rows at 901: ${v901}`,
+      );
+      await pool.query(`delete from notice_acknowledgements where member_id = $1 and notice_version = 900`, [A.memberId]);
+    }
+
     // ---- the recorder's people questions (SAA-260 step 1) ------------------
     // GET /captures/me and GET /captures/people, with capture tokens. The
     // generic loops above and below cover them once they are classified; the

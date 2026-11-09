@@ -1855,6 +1855,8 @@ function renderTray() {
             items.push({ label: 'Finish setting up Clipwise…', click: () => showSetupWindow(blockedStartFresh() ? 'blocked' : 'launch') });
         } else if (item === 'recording-notice') {
             items.push({ label: 'Recording notice…', click: () => showSetupWindow(blockedStartFresh() ? 'blocked' : 'launch') });
+        } else if (item === 'read-notice') {
+            items.push({ label: 'Read the recording notice…', click: () => showSetupWindow('reread') });
         } else if (item === 'sign-in') {
             items.push({ label: 'Sign in to Clipwise…', click: signInToCaptureServer });
         } else if (item === 'sign-out') {
@@ -3168,6 +3170,8 @@ async function exchangeCaptureCode(server, code, redirectUri, verifier) {
         console.error(`[clipwise-recorder] sign-in: signed in to ${server}`);
         sendUploadsWaitingOnSignIn();
         setupSignInFinished(true);
+        // Setup asks for the notice before sign-in, so this is its first chance.
+        void reportNoticeToServer('signed in');
     } catch (err) {
         console.error(`[clipwise-recorder] sign-in: failed: ${err.cause?.code || err.name}`);
         setupSignInFinished(false);
@@ -3719,6 +3723,23 @@ async function captureServerRequest(server, method, route, json) {
 function signedInServer() {
     const server = readCaptureServerUrl();
     return server && captureTokens && captureTokens.server === server ? server : null;
+}
+
+// The recording notice's acknowledgement, on the server at once (Gate 1, the
+// member notice): POST /captures/notice with the version and when it was agreed
+// to. Best effort and idempotent on the server: not signed in, not agreed to, or
+// no reply changes nothing here, and each capture's notice stamp still carries
+// it. Logs the status only.
+async function reportNoticeToServer(reason) {
+    const server = signedInServer();
+    const report = consent.noticeReport(SUPPORT_DIR);
+    if (!server || !report) return;
+    try {
+        const reply = await captureServerRequest(server, 'POST', '/captures/notice', report);
+        console.error(`[clipwise-recorder] notice: reported v${report.version} (${reason}): server ${reply.status ?? 'no reply'}${reply.json && reply.json.error ? ` ${reply.json.error}` : ''}`);
+    } catch (err) {
+        console.error(`[clipwise-recorder] notice: report failed (${reason}): ${err.code || err.name}`);
+    }
 }
 
 // The server owns trash state (SAA-227 part L decision 8), and this Mac's marker
@@ -4407,11 +4428,16 @@ function setupCompleted() {
 // mode 'permissions' (SAA-124): a start is waiting on an unanswered audio grant,
 // so the full window opens at the permissions screen, even when setup was
 // finished before; it is drawn as a 'launch' window from there on.
+// mode 'reread' (Gate 1): opened from the tray to read the notice again once it
+// is agreed to. It is the notice alone, its one button is Close, and nothing it
+// does writes an answer. A notice that is not agreed to (a raised version) is
+// shown as an ordinary 'launch' instead, so it asks.
 function showSetupWindow(mode = 'launch') {
     const forPermissions = mode === 'permissions';
     if (forPermissions) mode = 'launch';
+    if (mode === 'reread' && !consent.isAcknowledged(SUPPORT_DIR)) mode = 'launch';
     const noticeOnly = setupCompleted() && !forPermissions;
-    if (noticeOnly && consent.isAcknowledged(SUPPORT_DIR)) return;
+    if (noticeOnly && mode !== 'reread' && consent.isAcknowledged(SUPPORT_DIR)) return;
     // The notice alone has no permissions screen: replaced by the full window.
     if (forPermissions && setupWindow && setupWindow.noticeOnly) closeSetupWindow();
     // Already open: bring it forward, and if a start has been blocked since it
@@ -4497,6 +4523,19 @@ function showSetupWindow(mode = 'launch') {
     });
 }
 
+// The notice for the page: the repo copy for the current version (consent.js
+// readNotice). A file that is missing or unreadable is logged, once per window
+// state sent, and gives null: the page then shows "The notice couldn't be
+// loaded" with its button off, and the acknowledge handler records nothing.
+function noticeForPage() {
+    try {
+        return consent.readNotice();
+    } catch (err) {
+        console.error(`consent: could not read the recording notice v${consent.STATEMENT_VERSION}: ${err.code || err.message}`);
+        return null;
+    }
+}
+
 // What the page draws: the screen, and everything on it.
 function setupView() {
     const w = setupWindow;
@@ -4510,6 +4549,9 @@ function setupView() {
         screen,
         stepText: w.noticeOnly ? '' : `Step ${setup.SCREENS.indexOf(screen) + 1} of ${setup.SCREENS.length}`,
         noticeLabel: consent.buttonLabel(w.mode),
+        notice: noticeForPage(),
+        // Read again from the tray once agreed: Close only, no "Not now".
+        rereading: w.mode === 'reread',
         address: w.address !== undefined ? w.address : host,
         host,
         busy: w.busy,
@@ -4759,6 +4801,13 @@ function registerSetupIpc() {
     });
     ipcMain.on('setup:acknowledge', (_event, payload) => {
         if (!fromWindow(payload)) return;
+        // A notice that could not be read can't be agreed to, whatever the page
+        // sent: its button is off, and nothing is written here either.
+        if (!consent.noticeAgreeable(noticeForPage())) {
+            console.error('[clipwise-recorder] consent: "I understand" refused: the recording notice could not be loaded');
+            sendSetupState();
+            return;
+        }
         try {
             consent.recordAcknowledgement(SUPPORT_DIR);
         } catch (err) {
@@ -4772,6 +4821,9 @@ function registerSetupIpc() {
         }
         const mode = setupWindow.mode;
         console.error(`[clipwise-recorder] consent: recording notice agreed to (opened as "${mode}")`);
+        // On the server at once when signed in; otherwise at sign-in, and the
+        // next capture carries it regardless.
+        void reportNoticeToServer('acknowledged');
         if (setupWindow.noticeOnly) closeSetupWindow();
         else {
             setupWindow.mode = 'launch';
@@ -4783,9 +4835,11 @@ function registerSetupIpc() {
     ipcMain.on('setup:later', (_event, payload) => {
         if (!fromWindow(payload)) return;
         const screen = setupView().screen;
-        console.error(screen === 'notice'
-            ? '[clipwise-recorder] consent: "Not now" — gate stays shut'
-            : `[clipwise-recorder] setup: "Not now" at "${screen}"`);
+        console.error(setupWindow.mode === 'reread'
+            ? '[clipwise-recorder] consent: recording notice reread, closed'
+            : screen === 'notice'
+                ? '[clipwise-recorder] consent: "Not now" — gate stays shut'
+                : `[clipwise-recorder] setup: "Not now" at "${screen}"`);
         closeSetupWindow();
         renderTray();
     });

@@ -76,6 +76,12 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
     requires: "capture",
     note: "the caller's own account_members.display_name, trimmed, or null when it is empty or holds an @; nothing else",
   },
+  // The recording notice's acknowledgement, reported at once (Gate 1, routes/capture-notice.ts).
+  "POST /captures/notice": {
+    access: "member",
+    requires: "capture",
+    note: "records the caller's own acknowledgement of a recording-notice version (member from the token, never the body); a repeat writes nothing and the first acknowledged_at stands; no other member's row",
+  },
   "GET /captures/people": {
     access: "member",
     requires: "capture",
