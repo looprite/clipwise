@@ -849,8 +849,43 @@ function main() {
         return [ok, ''];
     });
 
+    // --- SAA-275 part 3: the advice line, above the statement and outside it --
+    const ADVICE = 'Only keep voice prints for people you talk to often. A print just saves you naming them after each call.';
+    // #statement exactly as members agreed to it (version 1), from 66e367e.
+    const STATEMENT_V1 = [
+        '  <div id="statement">',
+        "    <p>Clipwise learns the voices of people you talk to, so it can tell you who was on a call. It starts naming people once it's reliable.</p>",
+        '    <ul>',
+        '      <li>Keeps a voice print for you and each person you name, on this Mac only. Never uploaded.</li>',
+        "      <li>Some places require the other person's consent. That's up to you.</li>",
+        '      <li>Turn it off anytime to delete all voice prints. Your recordings aren\'t affected.</li>',
+        '    </ul>',
+        '  </div>',
+    ].join('\n');
+    // True when the advice is its own paragraph right above #statement and
+    // outside it, and #statement is exactly version 1's.
+    const adviceAbove = (html) => {
+        const at = html.indexOf('  <div id="statement">');
+        const block = at >= 0 ? html.slice(at, html.indexOf('\n  </div>', at) + '\n  </div>'.length) : '';
+        const before = at >= 0 ? html.slice(0, at) : '';
+        return block === STATEMENT_V1 && !block.includes(ADVICE)
+            && before.trimEnd().endsWith(`<p id="advice">${ADVICE}</p>`)
+            && (html.match(new RegExp(ADVICE.replace(/[.]/g, '\\.'), 'g')) || []).length === 1;
+    };
+    add('65. the advice line is its own paragraph right above #statement, outside it; #statement is unchanged from 66e367e and its version stays 1', () => {
+        const pageVersion = /const STATEMENT_VERSION = 1;/.test(PAGE);
+        const modVersion = !!mod && mod.STATEMENT_VERSION === 1;
+        return [adviceAbove(HTML) && pageVersion && modVersion, JSON.stringify({ advice: adviceAbove(HTML), pageVersion, modVersion })];
+    });
+    add('66. control: the same scan returns false on a copy with the advice as #statement\'s first bullet, and on a copy with no advice', () => {
+        const inside = HTML.replace(`  <p id="advice">${ADVICE}</p>\n`, '').replace('    <ul>\n', `    <ul>\n      <li>${ADVICE}</li>\n`);
+        const none = HTML.replace(`  <p id="advice">${ADVICE}</p>\n`, '');
+        const altered = inside !== HTML && none !== HTML;
+        return [altered && adviceAbove(inside) === false && adviceAbove(none) === false, JSON.stringify({ altered, inside: adviceAbove(inside), none: adviceAbove(none) })];
+    });
+
     for (const [name, fn] of cases) {
-        const needsModule = !/^(2[2-5]|39|4[0-2]|5[1-4]|64)\./.test(name);
+        const needsModule = !/^(2[2-5]|39|4[0-2]|5[1-4]|6[4-6])\./.test(name);
         if (needsModule && !mod) { check(name, false, why); continue; }
         let result;
         try { result = fn(); } catch (err) { result = [false, `threw ${err.message}`]; }
