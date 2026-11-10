@@ -26,6 +26,10 @@ const path = require('path');
 // by an older build) does not. Each version's text is
 // notice/recording-notice-v<N>.txt (readNotice, below).
 const STATEMENT_VERSION = 2;
+// The day each version was published, for the admin's "Who accepted the
+// notice" heading (team-notice.js, SAA-285). Raising STATEMENT_VERSION means
+// adding its day here; check-consent.js fails without it.
+const NOTICE_UPDATED = { 2: '2026-11-10' };
 
 // Single line, plain ASCII, on purpose. A line break in a pasted chat message
 // can send it in two pieces, and a curly quote or a dash is the kind of
@@ -181,7 +185,7 @@ function shouldStartAfterAcknowledgement(mode, blockedStart, holdsMic) {
 }
 
 module.exports = {
-    STATEMENT_VERSION, NOTICE_LINE, NOTICE_DIR,
+    STATEMENT_VERSION, NOTICE_UPDATED, NOTICE_LINE, NOTICE_DIR,
     consentPath, readNotice, noticeAgreeable, readConsent, isAcknowledged, recordAcknowledgement, noticeStamp, noticeReport,
     buttonLabel, shouldStartAfterAcknowledgement,
 };

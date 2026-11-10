@@ -3854,7 +3854,7 @@ async function sendTeamNoticeData() {
         send({ heading: '', lines: [], error: 'The list couldn’t be loaded. Try again in a moment.' });
         return;
     }
-    const view = teamNotice.formatTeamNotice(reply.json.members, consent.STATEMENT_VERSION);
+    const view = teamNotice.formatTeamNotice(reply.json.members, consent.STATEMENT_VERSION, consent.NOTICE_UPDATED[consent.STATEMENT_VERSION]);
     console.error(`[clipwise-recorder] team: list of ${view.lines.length} member(s) shown`);
     send({ ...view, error: '' });
 }

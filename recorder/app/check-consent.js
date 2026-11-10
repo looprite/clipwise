@@ -299,8 +299,12 @@ const CASES = [
         const doc = consent.readConsent(d);
         return doc.version === 2 && doc.acknowledged_at === '2026-11-09T12:00:00.000Z'
             && JSON.stringify(consent.noticeReport(d)) === JSON.stringify({ version: 2, acknowledgedAt: '2026-11-09T12:00:00.000Z' }); })],
-    ['notice v2: the admin window heading for this build reads "Current notice: version 2"', () =>
-        teamNotice && teamNotice.formatTeamNotice([], consent.STATEMENT_VERSION).heading === 'Current notice: version 2'],
+    ['notice v2: the admin window heading for this build reads "Current notice: updated Nov 10, 2026"', () =>
+        teamNotice && teamNotice.formatTeamNotice([], consent.STATEMENT_VERSION, consent.NOTICE_UPDATED && consent.NOTICE_UPDATED[consent.STATEMENT_VERSION]).heading
+            === 'Current notice: updated Nov 10, 2026'],
+    ['notice: this build\'s version has a published day (consent.js NOTICE_UPDATED), a real YYYY-MM-DD', () =>
+        !!consent.NOTICE_UPDATED && /^\d{4}-\d{2}-\d{2}$/.test(consent.NOTICE_UPDATED[consent.STATEMENT_VERSION] || '')
+        && !Number.isNaN(Date.parse(`${consent.NOTICE_UPDATED[consent.STATEMENT_VERSION]}T00:00:00Z`))],
     // The short acknowledgement and the full notice, one version (Gate 1, SAA-280).
     ['notice ack: readNotice(2, NOTICE_DIR, \'ack\') gives the approved title and exactly the four approved paragraphs, with no headings or lists', () => {
         const n = consent.readNotice(2, consent.NOTICE_DIR, 'ack');
@@ -1008,25 +1012,43 @@ const CASES = [
     ['team: the window asks GET /captures/members/notice and sends the formatted lines', () => {
         const body = fnBody('sendTeamNoticeData');
         return /captureServerRequest\(server, 'GET', '\/captures\/members\/notice'\)/.test(body)
-            && /teamNotice\.formatTeamNotice\(reply\.json\.members, consent\.STATEMENT_VERSION\)/.test(body); }],
-    ['team: format marks the current version in the heading', () =>
-        teamNotice && teamNotice.formatTeamNotice([], 2).heading === 'Current notice: version 2'],
-    ['team: a member on the current version shows it, marked current, and the date', () =>
-        teamNotice && JSON.stringify(teamNotice.formatTeamNotice([{ name: 'Ana Ruiz', email: 'ana@x.test', role: 'member', latestVersion: 2, acceptedAt: '2026-11-09T10:30:00.000Z' }], 2).lines)
-            === JSON.stringify(['Ana Ruiz (ana@x.test), member: accepted version 2 (current) on 2026-11-09'])],
-    ['team: anyone not on the current version is "not yet", with their last version when there is one', () => {
+            && /teamNotice\.formatTeamNotice\(reply\.json\.members, consent\.STATEMENT_VERSION, consent\.NOTICE_UPDATED\[consent\.STATEMENT_VERSION\]\)/.test(body); }],
+    // SAA-285 (2): dates, not version numbers, in the wording decided 2026-11-10.
+    ['team: the heading is the day the notice was updated, not its version number', () =>
+        teamNotice && teamNotice.formatTeamNotice([], 2, '2026-11-10').heading === 'Current notice: updated Nov 10, 2026'
+        && !/version/.test(teamNotice.formatTeamNotice([], 2, '2026-11-10').heading)],
+    ['team: each line in its decided words: current with the day, earlier, never, newer; the role on every line; the email when no name', () => {
         if (!teamNotice) return false;
         const { lines } = teamNotice.formatTeamNotice([
-            { name: 'Ben Okafor', email: 'ben@x.test', role: 'admin', latestVersion: 1, acceptedAt: '2026-11-01T08:00:00.000Z' },
-            { name: null, email: 'cy@x.test', role: 'member', latestVersion: null, acceptedAt: null },
-        ], 2);
-        return JSON.stringify(lines) === JSON.stringify([
-            'Ben Okafor (ben@x.test), admin: not yet (last accepted version 1 on 2026-11-01)',
-            'cy@x.test, member: not yet',
-        ]); }],
+            { name: 'Jon Dwyer', email: 'jon@x.test', role: 'admin', latestVersion: 2, acceptedAt: '2026-11-10T14:05:00.000Z' },
+            { name: 'Ben Okafor', email: 'ben@x.test', role: 'member', latestVersion: 1, acceptedAt: '2026-11-01T08:00:00.000Z' },
+            { name: 'Cy Lane', email: 'cy@x.test', role: 'member', latestVersion: null, acceptedAt: null },
+            { name: 'Di Moss', email: 'di@x.test', role: 'admin', latestVersion: 3, acceptedAt: '2026-12-01T08:00:00.000Z' },
+            { name: null, email: 'ed@x.test', role: 'member', latestVersion: 2, acceptedAt: '2026-11-10T23:59:59.000Z' },
+            { name: '  ', email: 'fay@x.test', role: 'member', latestVersion: null, acceptedAt: null },
+        ], 2, '2026-11-10');
+        const want = [
+            'Jon Dwyer (admin) — accepted Nov 10, 2026',
+            'Ben Okafor (member) — accepted an earlier notice; will be asked again at next start',
+            "Cy Lane (member) — hasn't accepted yet; will be asked at next start",
+            'Di Moss (admin) — accepted a newer notice',
+            'ed@x.test (member) — accepted Nov 10, 2026',
+            "fay@x.test (member) — hasn't accepted yet; will be asked at next start",
+        ];
+        if (JSON.stringify(lines) !== JSON.stringify(want)) console.log(`      team lines: ${JSON.stringify(lines)}`);
+        return JSON.stringify(lines) === JSON.stringify(want); }],
+    ['team: no line shows a version number', () => {
+        if (!teamNotice) return false;
+        const { lines } = teamNotice.formatTeamNotice([1, 2, 3, null].map((v, i) => ({ name: `P${i}`, email: `p${i}@x.test`, role: 'member', latestVersion: v, acceptedAt: v ? '2026-11-10T00:00:00.000Z' : null })), 2, '2026-11-10');
+        return lines.length === 4 && lines.every((l) => !/version|\bv\d/.test(l)); }],
+    ['team: the day is the UTC day the Mac recorded the answer, in fixed English month names', () =>
+        teamNotice && typeof teamNotice.longDay === 'function'
+        && teamNotice.longDay('2026-01-05T23:30:00.000Z') === 'Jan 5, 2026'
+        && teamNotice.longDay('2026-12-31T00:00:00.000Z') === 'Dec 31, 2026'
+        && teamNotice.longDay('not a date') === '' && teamNotice.longDay(null) === ''],
     ['team: a name holding markup stays as it is in the line (the page draws it as text)', () =>
-        teamNotice && teamNotice.formatTeamNotice([{ name: '<b>Dee</b>', email: 'd@x.test', role: 'member', latestVersion: null, acceptedAt: null }], 1).lines[0]
-            === '<b>Dee</b> (d@x.test), member: not yet'],
+        teamNotice && teamNotice.formatTeamNotice([{ name: '<b>Dee</b>', email: 'd@x.test', role: 'member', latestVersion: null, acceptedAt: null }], 1, '2026-11-10').lines[0]
+            === "<b>Dee</b> (member) — hasn't accepted yet; will be asked at next start"],
     ['team: the page draws the heading, lines and error with textContent only', () => {
         const page = readOr('team-notice-page.js');
         return /textContent = /.test(page) && /createElement\('li'\)/.test(page) && !/innerHTML|insertAdjacentHTML|outerHTML/.test(page); }],
