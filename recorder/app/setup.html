@@ -117,6 +117,10 @@
   <div class="screen" id="screen-notice">
     <h1 id="notice-title"></h1>
     <div id="notice-text"></div>
+    <!-- The acknowledgement shows the short notice (Gate 1, SAA-280). This link
+         shows the full one in its place; Back returns to the short one. Neither
+         sends anything to main.js, so reading it records nothing. -->
+    <p id="notice-full" style="display:none"><a id="notice-full-link">Read the full notice</a></p>
     <p class="error" id="notice-error"></p>
   </div>
 

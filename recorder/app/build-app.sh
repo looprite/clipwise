@@ -202,7 +202,9 @@ cp "$APP_SRC/consent.js" "$C/Resources/app/consent.js"
 # it beside itself): without it the notice can't be shown, so it can't be agreed
 # to and nothing records.
 cp -R "$APP_SRC/notice" "$C/Resources/app/notice"
-# The admin's "Team: who accepted the notice…" window (Gate 1, item 2): main.js
+# The menu bar menu's order and status line (SAA-281): main.js requires it.
+cp "$APP_SRC/tray-menu.js" "$C/Resources/app/tray-menu.js"
+# The admin's "Who accepted the notice…" window (Gate 1, item 2): main.js
 # requires team-notice.js, and the window is its page, script and preload.
 cp "$APP_SRC/team-notice.js" "$C/Resources/app/team-notice.js"
 cp "$APP_SRC/team-notice.html" "$C/Resources/app/team-notice.html"

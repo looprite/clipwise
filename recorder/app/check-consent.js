@@ -80,6 +80,9 @@ try { setup = require('./setup.js'); } catch {}
 // The same for team-notice.js (Gate 1, item 2).
 let teamNotice = null;
 try { teamNotice = require('./team-notice.js'); } catch {}
+// The same for tray-menu.js (SAA-281): without it the menu cases fail one by one.
+let trayMenu = null;
+try { trayMenu = require('./tray-menu.js'); } catch {}
 const whenReadyBody = (() => {
     const a = SRC.indexOf('app.whenReady().then(');
     const b = SRC.indexOf('\n});\n', a);
@@ -157,6 +160,19 @@ const APPROVED_NOTICE_V2 = {
     ],
     paragraphs: 26,
 };
+
+// The short v2 text the acknowledgement window shows (Gate 1, SAA-280), as Jon
+// approved it: the title and four paragraphs, no headings.
+const APPROVED_NOTICE_V2_ACK = {
+    title: 'Before you record',
+    paragraphs: [
+        'Clipwise records your calls on your Mac. No bot joins the meeting.',
+        'It records two tracks: your microphone, and the sound the call plays through your Mac. Your Mac turns the audio into a transcript. After each call, use the Clipwise connector in Claude to ask for decisions, commitments and questions.',
+        'You are responsible for telling the people on your calls that you are recording. Some locations require everyone on the call to agree before you record. Follow the law where you and they are.',
+        'When you start recording, Clipwise shows a short line you can say to let everyone know. On calls with a chat, “Copy recording notice” in the menu bar copies it for you.',
+    ],
+};
+const SETUP_PAGE = readOr('setup-page.js');
 
 const holds = (...keys) => (k) => keys.includes(k);
 const trig = { key: 'com.google.Chrome.helper', name: 'Google Chrome' };
@@ -279,6 +295,44 @@ const CASES = [
             && JSON.stringify(consent.noticeReport(d)) === JSON.stringify({ version: 2, acknowledgedAt: '2026-11-09T12:00:00.000Z' }); })],
     ['notice v2: the admin window heading for this build reads "Current notice: version 2"', () =>
         teamNotice && teamNotice.formatTeamNotice([], consent.STATEMENT_VERSION).heading === 'Current notice: version 2'],
+    // The short acknowledgement and the full notice, one version (Gate 1, SAA-280).
+    ['notice ack: readNotice(2, NOTICE_DIR, \'ack\') gives the approved title and exactly the four approved paragraphs, with no headings or lists', () => {
+        const n = consent.readNotice(2, consent.NOTICE_DIR, 'ack');
+        return n.version === 2 && n.kind === 'ack' && n.title === APPROVED_NOTICE_V2_ACK.title
+            && JSON.stringify(n.blocks) === JSON.stringify(APPROVED_NOTICE_V2_ACK.paragraphs.map((text) => ({ tag: 'p', text }))); }],
+    ['notice ack: the short text is not the full one (control: the full v2 has nine headings)', () =>
+        consent.readNotice(2, consent.NOTICE_DIR, 'ack').blocks.length === 4
+        && consent.readNotice(2, consent.NOTICE_DIR, 'full').blocks.filter((b) => b.tag === 'h2').length === 9],
+    ['notice ack: a version with no -ack file throws for kind \'ack\' (v1 has none), never falling back to the full text', () => {
+        try { consent.readNotice(1, consent.NOTICE_DIR, 'ack'); return false; } catch { return true; } }],
+    ['notice ack: noticeForPage gives the full text for "reread" and the short text for every other mode', () =>
+        /function noticeForPage\(mode\) \{\s*const kind = mode === 'reread' \? 'full' : 'ack';/.test(SRC)],
+    ['notice ack: the acknowledge guard checks the text the window showed (the short one), noticeForPage(setupWindow.mode), the same call setupView draws with, before anything is saved', () => {
+        const a = SRC.indexOf("ipcMain.on('setup:acknowledge'");
+        const b = SRC.indexOf("ipcMain.on('setup:later'", a);
+        const handler = a >= 0 && b > a ? SRC.slice(a, b) : '';
+        const guard = handler.indexOf('if (!consent.noticeAgreeable(noticeForPage(setupWindow.mode)))');
+        const saved = handler.indexOf('consent.recordAcknowledgement(SUPPORT_DIR)');
+        const reported = handler.indexOf("reportNoticeToServer('acknowledged')");
+        return guard >= 0 && saved > guard && reported > guard
+            && /notice: noticeForPage\(w\.mode\),/.test(fnBody('setupView')); }],
+    ['notice ack: "Read the full notice" is offered on the acknowledgement only: setupView sends the full text there and never on a reread', () =>
+        fnBody('setupView').includes("fullNotice: screen === 'notice' && w.mode !== 'reread' ? noticeForPage('reread') : null,")
+        && readOr('setup.html').includes('<a id="notice-full-link">Read the full notice</a>')
+        && SETUP_PAGE.includes("const fullOffered = v.screen === 'notice' && !v.rereading && !!(v.fullNotice && v.fullNotice.title);")],
+    ['notice ack: opening the full text from the link, and Back, record nothing: neither sends anything, and the window has no new channel', () => {
+        const link = /\$\('notice-full-link'\)\.addEventListener\('click', \(\) => \{([^}]*)\}\);/.exec(SETUP_PAGE);
+        const back = /if \(view\.screen === 'notice' && showingFull\) \{([^}]*)\}/.exec(SETUP_PAGE);
+        const pre = readOr('setup-preload.js');
+        return !!link && !/send\(|ipcRenderer/.test(link[1]) && /showingFull = true; draw\(view\);/.test(link[1])
+            && !!back && !/send\(|ipcRenderer/.test(back[1]) && /showingFull = false; draw\(view\); return;/.test(back[1])
+            // Back is handled before the primary button's sends, and the full view shows Back, not "I understand".
+            && SETUP_PAGE.indexOf("if (view.screen === 'notice' && showingFull)") < SETUP_PAGE.indexOf("send('setup:acknowledge')")
+            && /if \(v\.screen === 'notice' && showingFull\) \{[\s\S]{0,200}primary\.textContent = 'Back';/.test(SETUP_PAGE)
+            && /const SEND = \['setup:ready', 'setup:acknowledge', 'setup:later', 'setup:address', 'setup:change-address',\s*'setup:signin', 'setup:permission-request', 'setup:permission-settings', 'setup:filevault-settings',\s*'setup:done', 'setup:copy-claude-address'\];/.test(pre); }],
+    ['notice ack: build-app.sh bundles the whole notice folder, so the -ack file ships with the full one', () =>
+        BUILD.includes('cp -R "$APP_SRC/notice" "$C/Resources/app/notice"')
+        && fs.existsSync(path.join(__dirname, 'notice', 'recording-notice-v2-ack.txt'))],
     ['notice: a heading, a two-item list and a paragraph read in order as h2, ul with both items, p', () => withDir(d => {
         fs.writeFileSync(path.join(d, 'recording-notice-v8.txt'),
             'The title\n\n## What is stored\n- Your microphone\n- The sound your Mac plays\n\nA closing paragraph\nthat runs over two lines.\n');
@@ -317,8 +371,8 @@ const CASES = [
         && !/innerHTML/.test(readOr('setup-page.js'))],
     ['notice: setupView sends the notice through noticeForPage, which reads it with consent.readNotice and turns a failure into null', () => {
         const body = fnBody('noticeForPage');
-        return /notice: noticeForPage\(\)/.test(fnBody('setupView'))
-            && /try \{[\s\S]*consent\.readNotice\(\)[\s\S]*\} catch/.test(body) && /return null;/.test(body); }],
+        return /notice: noticeForPage\(w\.mode\)/.test(fnBody('setupView'))
+            && /try \{[\s\S]*consent\.readNotice\(consent\.STATEMENT_VERSION, consent\.NOTICE_DIR, kind\)[\s\S]*\} catch/.test(body) && /return null;/.test(body); }],
     // A notice that is missing or empty can't be agreed to.
     ['notice not loaded: consent.noticeAgreeable is false for null, no blocks, an empty list of blocks, or no title', () =>
         !consent.noticeAgreeable(null) && !consent.noticeAgreeable({ title: 'T' })
@@ -333,7 +387,7 @@ const CASES = [
         const a = SRC.indexOf("ipcMain.on('setup:acknowledge'");
         const b = SRC.indexOf("ipcMain.on('setup:later'", a);
         const handler = a >= 0 && b > a ? SRC.slice(a, b) : '';
-        const guard = handler.indexOf('if (!consent.noticeAgreeable(noticeForPage()))');
+        const guard = handler.indexOf('if (!consent.noticeAgreeable(noticeForPage(setupWindow.mode)))');
         const saved = handler.indexOf('consent.recordAcknowledgement(SUPPORT_DIR)');
         return guard >= 0 && saved > guard; }],
     ['control: the loaded notice is agreeable, so the button stays enabled', () => consent.noticeAgreeable(consent.readNotice())],
@@ -391,7 +445,11 @@ const CASES = [
     ['start notification: it is not behind the stalled/resumed flap throttle', () =>
         !startNotice.includes('lastFlapNotifyMs')],
     ['tray: "Copy recording notice" is offered only while a capture is active', () =>
-        /if \(active\) items\.push\(\{ label: 'Copy recording notice'/.test(SRC)],
+        !!trayMenu && trayMenu.trayMenuOrder({ active: true }).includes('copy-notice') && !trayMenu.trayMenuOrder({ active: false }).includes('copy-notice')
+        // renderTray's own `active` (state !== 'stopped') is what the order is given.
+        && /const active = state !== 'stopped';/.test(fnBody('renderTray'))
+        && /trayMenu\.trayMenuOrder\(\{[\s\S]*?\n        active,\n[\s\S]*?\}\);/.test(fnBody('renderTray'))
+        && /item === 'copy-notice'\) \{[\s\S]{0,200}items\.push\(\{ label: 'Copy recording notice', click: copyRecordingNotice \}\);/.test(fnBody('renderTray'))],
     ['tray: an unacknowledged install has a "Recording notice" item', () => SRC.includes("label: 'Recording notice")],
     ['fresh support dir: the recordings dir is created before the recovery sweep runs', () => {
         const a = SRC.indexOf("fs.mkdirSync(OUTDIR, { recursive: true }); } catch (err) {\n        console.error(`launch: could not create");
@@ -614,7 +672,9 @@ const CASES = [
         return m >= 0 && l > m && t > l
             && /locationNote = setup\.locationWarning\(\{\s*bundled: !!BUILD_INFO, inApplications: app\.isInApplicationsFolder\(\),/.test(whenReadyBody)
             && whenReadyBody.includes("if (locationNote) notify('not-in-applications', locationNote.title, locationNote.body);")
-            && /\{ label: `Status: \$\{label\}`, enabled: false \},\n    \];\n    if \(locationNote\) items\.push\(\{ label: locationNote\.tray, enabled: false \}\);/.test(fnBody('renderTray')); }],
+            && !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ 'location-note': true }).slice(0, 2)) === JSON.stringify(['status', 'location-note'])
+            && fnBody('renderTray').includes("'location-note': !!locationNote,")
+            && /item === 'location-note'\) \{\s*items\.push\(\{ label: locationNote\.tray, enabled: false \}\);/.test(fnBody('renderTray')); }],
     ['location: can it update itself here: in Applications and writable yes; translocated, outside Applications or not writable no; a checkout is not asked (SAA-253 decision 6)', () =>
         setup.updateBlocker({ bundled: true, inApplications: true, appPath: '/Applications/Clipwise.app', parentWritable: true }) === null
         && setup.updateBlocker({ bundled: true, inApplications: true, appPath: '/private/var/folders/x/T/AppTranslocation/ABC/d/Clipwise.app', parentWritable: true }) === 'translocated'
@@ -639,7 +699,7 @@ const CASES = [
         && whenReadyBody.includes('startUpdates(parentWritable);')],
     ['quit: the tray\'s Quit… asks first, and only Quit or Restart (response 0) reaches quitApp', () => {
         const body = fnBody('confirmQuit');
-        return SRC.includes("{ label: 'Quit…', click: confirmQuit },") && !SRC.includes('click: quitApp')
+        return SRC.includes("items.push({ label: 'Quit…', click: confirmQuit });") && !SRC.includes('click: quitApp')
             && body.includes("buttons: [install ? 'Restart' : 'Quit', 'Cancel'], defaultId: 1, cancelId: 1,")
             && body.includes('if (response === 0) quitApp({ install });'); }],
     ['quit: quitApp is called from confirmQuit (asked) and applyUpdateNow (the idle gate passed), and nowhere else (SAA-253)', () =>
@@ -907,7 +967,9 @@ const CASES = [
             && body.includes('app.exit(0);'); }],
     ['update: once downloaded the tray offers Restart to update; during a capture that asks first, otherwise it goes through the idle gate like any other try', () => {
         const body = fnBody('restartToUpdate');
-        return fnBody('renderTray').includes('if (updateReady) items.push({ label: `Restart to update to ${updateReady}`, click: restartToUpdate });')
+        return fnBody('renderTray').includes('update: !!updateReady,')
+            && /item === 'update'\) \{\s*items\.push\(\{ label: `Restart to update to \$\{updateReady\}`, click: restartToUpdate \}\);/.test(fnBody('renderTray'))
+            && !!trayMenu && trayMenu.trayMenuOrder({ update: true }).includes('update') && !trayMenu.trayMenuOrder({}).includes('update')
             && /if \(state !== 'stopped' \|\| session\) \{ confirmQuit\(\{ install: true \}\); return; \}/.test(body)
             && body.includes("maybeApplyUpdate('tray');")
             && !body.includes('applyUpdateNow('); }],
@@ -916,14 +978,15 @@ const CASES = [
 
     // 9. Who accepted the notice, for an admin (Gate 1, item 2): a tray item and a
     // small window, admins only; the role from GET /captures/me.
-    ['team: the tray offers "Team: who accepted the notice…" to a signed-in admin', () =>
+    ['team: the tray offers "Who accepted the notice…" to a signed-in admin', () =>
         setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }).includes('team-notice')],
     ['team: not to a member, not to an admin who is signed out, and not while the role is unknown', () =>
         !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'member' }).includes('team-notice')
         && !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, signedIn: false, teamRole: 'admin' }).includes('team-notice')
         && !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true }).includes('team-notice')],
     ['team: main.js draws the item and opens the team window', () =>
-        /item === 'team-notice'\) \{\s*items\.push\(\{ label: 'Team: who accepted the notice…', click: openTeamNoticeWindow \}\);/.test(SRC)],
+        /item === 'team-notice'\) \{\s*items\.push\(\{ label: 'Who accepted the notice…', click: openTeamNoticeWindow \}\);/.test(SRC)
+        && !SRC.includes('Team: who accepted the notice')],
     ['team: the role is part of setupStatus, so the tray rule sees it', () => /teamRole,/.test(fnBody('setupStatus'))],
     ['team: the role is read from GET /captures/me, kept only as "admin" or "member", and the tray redrawn when it changes', () => {
         const body = fnBody('refreshTeamRole');
@@ -974,6 +1037,82 @@ const CASES = [
     ['team: build-app.sh copies team-notice.js, its page, its script and its preload into the bundle', () =>
         ['team-notice.js', 'team-notice.html', 'team-notice-page.js', 'team-notice-preload.js']
             .every((f) => BUILD.includes(`cp "$APP_SRC/${f}" "$C/Resources/app/${f}"`))],
+
+    // 10. The menu (SAA-281): tray-menu.js's order and status line, and how
+    // main.js's renderTray uses them.
+    ['menu: stopped, signed-in admin: exactly status / Start or Stop / Recent meetings, Save transcript, Recognize voices / Detected applications, Open at login / Read the recording notice, Who accepted the notice, Sign out / About, Acknowledgements, Quit', () =>
+        !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: false, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
+            === JSON.stringify(['status', '-', 'start-stop', '-', 'recent-meetings', 'save-transcript', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
+                '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'acknowledgements', 'quit'])],
+    ['menu: recording: the same order, with "Copy recording notice" right under Start or Stop', () =>
+        !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: true, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
+            === JSON.stringify(['status', '-', 'start-stop', 'copy-notice', '-', 'recent-meetings', 'save-transcript', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
+                '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'acknowledgements', 'quit'])],
+    ['menu: one Start/Stop item whose label switches, and main.js draws no separate Start and Stop', () => {
+        if (!trayMenu) return false;
+        const one = (o) => o.filter((k) => k === 'start-stop').length === 1;
+        const body = fnBody('renderTray');
+        return one(trayMenu.trayMenuOrder({ active: false })) && one(trayMenu.trayMenuOrder({ active: true }))
+            && trayMenu.startStopLabel(false) === 'Start recording' && trayMenu.startStopLabel(true) === 'Stop recording'
+            && body.includes("items.push({ label: trayMenu.startStopLabel(active), click: active ? () => stopRecording('manual') : startRecording });")
+            && !/label: 'Start'|label: 'Stop'/.test(body); }],
+    ['menu: notes and prompts sit right under the status line, before Start or Stop, each prompt after a divider', () =>
+        !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder(Object.fromEntries([...trayMenu.NOTE_KEYS, ...trayMenu.PROMPT_KEYS].map((k) => [k, true]))).slice(0, 19))
+            === JSON.stringify(['status', 'allow-audio', 'location-note', 'update', 'pipeline-note', 'permission-note',
+                '-', 'detect-prompt', '-', 'permission-fixes', '-', 'retry-pipeline', '-', 'pending-identity', '-', 'voice-naming', '-', 'fix-speaker-names', '-'])
+        && trayMenu.trayMenuOrder(Object.fromEntries([...trayMenu.NOTE_KEYS, ...trayMenu.PROMPT_KEYS].map((k) => [k, true])))[19] === 'start-stop'],
+    ['menu: before setup or sign-in is done, Finish setting up, Recording notice and Sign in take the account group\'s slots', () => {
+        if (!trayMenu) return false;
+        const acct = (o) => { const o2 = trayMenu.trayMenuOrder({ accountItems: o }); const a = o2.indexOf('open-at-login') + 2; return o2.slice(a, o2.indexOf('about') - 1); };
+        return JSON.stringify(acct(setup.trayAccountItems({ setupCompleted: false, acknowledged: false, server: null, signedIn: false }))) === JSON.stringify(['finish-setup'])
+            && JSON.stringify(acct(setup.trayAccountItems({ setupCompleted: true, acknowledged: false, server: 'https://t.example.com', signedIn: false }))) === JSON.stringify(['recording-notice', 'sign-in']); }],
+    ['menu: "Who accepted the notice…" only for a signed-in admin: not a member, not a signed-out admin, not an unknown role', () => {
+        if (!trayMenu) return false;
+        const has = (o) => trayMenu.trayMenuOrder({ accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, ...o }) }).includes('team-notice');
+        return has({ teamRole: 'admin' }) && !has({ teamRole: 'member' }) && !has({ teamRole: 'admin', signedIn: false }) && !has({}); }],
+    ['menu: one status line, in place of "Status: …" and the upload lines', () => {
+        if (!trayMenu) return false;
+        const body = fnBody('renderTray');
+        return trayMenu.trayMenuOrder({ active: true }).filter((k) => k === 'status').length === 1
+            && /item === 'status'\) \{\s*items\.push\(\{ label: statusLine, enabled: false \}\);/.test(body)
+            && !/label: `Status: /.test(SRC) && !body.includes('uploadTrayLabel') && !SRC.includes('function uploadTrayLabel'); }],
+    ['menu: the status line says each state in its approved words', () => {
+        if (!trayMenu) return false;
+        const T = (ms) => (ms === 1000 ? '9:02 AM' : ms === 2000 ? '9:00 AM' : `?${ms}`);
+        const stemMs = (stem) => (stem === 'S' ? 2000 : NaN);
+        const on = { state: 'stopped', pipeline: null, server: true, signedIn: true };
+        const up = (u) => trayMenu.trayStatusLine({ ...on, lastUpload: { stem: 'S', ...u } }, T, stemMs);
+        const cases = [
+            [trayMenu.trayStatusLine({ ...on, state: 'recording', startedAtMs: 1000 }, T, stemMs), 'Recording · started 9:02 AM'],
+            [up({ state: 'sent', jobState: 'done' }), 'Stopped · last call ready 9:00 AM'],
+            [up({ state: 'queued', attempts: 0 }), 'Stopped · last call processing'],
+            [up({ state: 'sent', jobState: null }), 'Stopped · last call processing'],
+            [trayMenu.trayStatusLine({ ...on, pipeline: 'running', lastUpload: null }, T, stemMs), 'Stopped · last call processing'],
+            [up({ state: 'queued', attempts: 2 }), 'Stopped · last call retrying upload'],
+            [up({ state: 'failed', lastStatus: 422 }), "Stopped · last call didn't upload — see Recent meetings"],
+            [trayMenu.trayStatusLine({ ...on, signedIn: false, lastUpload: { stem: 'S', state: 'sent', jobState: 'done' } }, T, stemMs), 'Stopped · not signed in'],
+            // The nine Jon worded on 2026-11-10.
+            [trayMenu.trayStatusLine({ ...on, state: 'starting' }, T, stemMs), 'Starting recording…'],
+            [trayMenu.trayStatusLine({ ...on, state: 'stalled', startedAtMs: 1000 }, T, stemMs), 'Recording · stalled — started 9:02 AM'],
+            [up({ state: 'sent', jobState: 'failed' }), 'Stopped · last call failed to process — see Recent meetings'],
+            [up({ state: 'sent', jobState: 'none' }), 'Stopped · last call uploaded'],
+            [up({ state: 'sent', jobState: 'gone' }), 'Stopped · last call no longer on the server'],
+            [up({ state: 'sent', jobState: 'stale' }), 'Stopped · last call status unknown'],
+            [trayMenu.trayStatusLine({ ...on, lastUpload: null }, T, stemMs), 'Stopped'],
+            [trayMenu.trayStatusLine({ ...on, server: false, signedIn: false, lastUpload: null }, T, stemMs), 'Stopped'],
+            [trayMenu.trayStatusLine({ ...on, pipeline: 'failed', lastUpload: { stem: 'S', state: 'sent', jobState: 'done' } }, T, stemMs), 'Stopped · last call failed to process — see Retry below'],
+        ];
+        const wrong = cases.filter(([got, want]) => got !== want);
+        if (wrong.length) console.log(`      status line mismatches: ${JSON.stringify(wrong)}`);
+        return wrong.length === 0; }],
+    ['menu: renderTray takes the newest upload, the capture\'s start time and the Mac\'s local time format for the status line', () => {
+        const body = fnBody('renderTray');
+        return body.includes('lastUpload: status.server ? (listUploadQueue().slice(-1)[0] || null) : null,')
+            && body.includes('startedAtMs: session ? (session.startedAtMs || stemTimeMs(session.stem)) : null,')
+            && body.includes("(ms) => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })"); }],
+    ['menu: main.js requires tray-menu.js, and build-app.sh copies it into the bundle', () =>
+        SRC.includes("const trayMenu = require('./tray-menu.js');")
+        && BUILD.includes('cp "$APP_SRC/tray-menu.js" "$C/Resources/app/tray-menu.js"')],
 ];
 
 console.log(`rule: ${useNaive ? 'NAIVE (any existing file counts as agreed to)' : 'consent.js'}`);

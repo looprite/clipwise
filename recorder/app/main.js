@@ -73,6 +73,8 @@ const teamNotice = require('./team-notice.js');
 // First-run setup, launch at login, the move to Applications and the recording
 // time in the menu bar (SAA-198 step 4). Pure; the window is below.
 const setup = require('./setup.js');
+// The menu bar menu's order and its one status line (SAA-281). Pure.
+const trayMenu = require('./tray-menu.js');
 // The tray's Sign out revokes the refresh token on the server (SAA-198 step 5).
 const { revokeRefreshToken } = require('./capture-sign-out.js');
 // The capture token's form post to the token endpoint, and one refresh.
@@ -487,13 +489,6 @@ let identityWindow = null;
 // the capture object, because the later-marker is written from that object and
 // a preview holds invitee addresses. Dropped when the window closes.
 const calendarPreviews = new Map();
-
-const LABEL = {
-    stopped:   'Stopped',
-    starting:  'Starting',
-    recording: 'Recording',
-    stalled:   'Recording (stalled)',
-};
 
 // Menu-item text, not title text — see renderTray. These were tray-title
 // suffixes and were the same overflow hazard as the permission suffix that
@@ -1803,8 +1798,9 @@ function syncTrayClock() {
 // can't replace, null otherwise.
 let locationNote = null;
 
+// The menu (SAA-281): tray-menu.js decides which items show and in what order;
+// this turns each key into its Electron item(s).
 function renderTray() {
-    const label = LABEL[state];
     const pipelineNote = pipeline && PIPELINE_NOTE[pipeline.state]
         ? PIPELINE_NOTE[pipeline.state](pipeline.stem)
         : null;
@@ -1814,87 +1810,11 @@ function renderTray() {
     tray.setTitle(trayTitle());
 
     const active = state !== 'stopped';
-    // A start waiting on the audio grants (SAA-124) comes first (SAA-259): one
-    // click brings the setup window forward at its permissions screen, so a
-    // window lost behind the meeting is never a dead end.
+    const status = setupStatus();
+    // A start waiting on the audio grants (SAA-124): one click brings the setup
+    // window forward at its permissions screen, so a window lost behind the
+    // meeting is never a dead end (SAA-259). Right under the status line.
     const blocked = blockedStartFresh();
-    const items = [
-        ...(blocked && blocked.reason === 'permissions'
-            ? [{ label: 'Allow audio access…', click: () => showSetupWindow('permissions') }, { type: 'separator' }]
-            : []),
-        { label: `Status: ${label}`, enabled: false },
-    ];
-    if (locationNote) items.push({ label: locationNote.tray, enabled: false });
-    if (updateReady) items.push({ label: `Restart to update to ${updateReady}`, click: restartToUpdate });
-    if (pipelineNote) items.push({ label: pipelineNote, enabled: false });
-    if (permNote) items.push({ label: permNote, enabled: false });
-    // The three most recent uploads, while a server is set.
-    if (readCaptureServerUrl()) {
-        for (const entry of listUploadQueue().slice(-3).reverse()) items.push({ label: uploadTrayLabel(entry), enabled: false });
-    }
-    // The live prompt, carried here as well as in the notification. These are
-    // the same three answers; only the last one writes anything durable.
-    if (detectPending) {
-        const { key, name } = detectPending;
-        items.push(
-            { type: 'separator' },
-            { label: `${name} is using the microphone`, enabled: false },
-            { label: 'Always record this app', click: () => answerDetectPrompt(key, 'record') },
-            { label: 'Not now', click: () => answerDetectPrompt(key, 'not_now') },
-            { label: `Never ask about ${name}`, click: () => answerDetectPrompt(key, 'never') },
-        );
-    }
-    // The account items (setup.js trayAccountItems). Until setup has been
-    // finished once, one item leads back into the setup window, which can be
-    // closed at any screen, and a menu bar item must never be a dead end
-    // (SAA-195's rule). After that: the recording notice while it is not agreed
-    // to, the sign-in (SAA-227 part B) while a server is set and this app holds
-    // no capture token for it, and Sign out while it does.
-    const accountItems = setup.trayAccountItems({ setupCompleted: setupCompleted(), ...setupStatus() });
-    if (accountItems.length) items.push({ type: 'separator' });
-    for (const item of accountItems) {
-        if (item === 'finish-setup') {
-            items.push({ label: 'Finish setting up Clipwise…', click: () => showSetupWindow(blockedStartFresh() ? 'blocked' : 'launch') });
-        } else if (item === 'recording-notice') {
-            items.push({ label: 'Recording notice…', click: () => showSetupWindow(blockedStartFresh() ? 'blocked' : 'launch') });
-        } else if (item === 'read-notice') {
-            items.push({ label: 'Read the recording notice…', click: () => showSetupWindow('reread') });
-        } else if (item === 'team-notice') {
-            items.push({ label: 'Team: who accepted the notice…', click: openTeamNoticeWindow });
-        } else if (item === 'sign-in') {
-            items.push({ label: 'Sign in to Clipwise…', click: signInToCaptureServer });
-        } else if (item === 'sign-out') {
-            items.push({ label: 'Sign out', click: signOutFromTray });
-        }
-    }
-    items.push(
-        { type: 'separator' },
-        { label: 'Start', enabled: !active, click: startRecording },
-        { label: 'Stop',  enabled:  active, click: () => stopRecording('manual') },
-    );
-    // During a capture only: a line to paste into the meeting chat, since
-    // nothing in the meeting shows that Clipwise is recording (SAA-216).
-    if (active) items.push({ label: 'Copy recording notice', click: copyRecordingNotice });
-    items.push({ type: 'separator' }, detectedAppsMenu());
-    if (permissionIssue) {
-        items.push({ type: 'separator' });
-        for (const svc of permissionIssue.denied) {
-            items.push({
-                label: `Open ${svc} settings…`,
-                click: () => shell.openExternal(SETTINGS_PANE[svc]),
-            });
-        }
-        items.push({ label: 'Dismiss warning', click: () => { permissionIssue = null; renderTray(); } });
-    }
-    // A failed run is a menu item, not just a line in a log. Retry re-enters
-    // the pipeline for that stem; it resumes from the first incomplete step.
-    if (pipeline && pipeline.state === 'failed') {
-        items.push(
-            { type: 'separator' },
-            { label: `Retry processing (${pipeline.stem})`, click: retryPipeline },
-            { label: 'Dismiss failure', click: dismissPipelineFailure },
-        );
-    }
     // Identity step left for later (SAA-197) by closing the window — one
     // item per capture, same file-on-disk derivation as the voice-naming
     // block below. Capped to the 3 most recent calls from the last 7 days
@@ -1904,22 +1824,11 @@ function renderTray() {
     // identity-<stem>.json answer whenever one arrives; this only bounds
     // what the tray lists.
     const recentPendingIdentity = recentPendingIdentityStems(OUTDIR);
-    if (recentPendingIdentity.length > 0) {
-        items.push({ type: 'separator' });
-        for (const stem of recentPendingIdentity) {
-            const marker = readLaterMarker(OUTDIR, stem);
-            const autoStopped = !!marker && marker.stopped_by === 'auto';
-            items.push({
-                label: `Who was on the ${stemDateLabel(stem)} call…${autoStopped ? ' (auto-stopped)' : ''}`,
-                click: () => reopenIdentityPrompt(stem),
-            });
-        }
-    }
     // Naming step left for later (SAA-195), one item per capture — derived
     // from files on disk (pendingVoiceNamingStems), the same way the failed-
-    // pipeline block above is derived from `pipeline` rather than a
-    // separate store, and for the same reason: this has to survive a quit
-    // and relaunch, not just live in memory.
+    // pipeline block is derived from `pipeline` rather than a separate store,
+    // and for the same reason: this has to survive a quit and relaunch, not
+    // just live in memory.
     //
     // Excludes any stem still pending on identity (the block above): naming
     // voices before knowing who was on the call isn't useful, and the two
@@ -1931,17 +1840,6 @@ function renderTray() {
     // 7 days (recentPendingVoiceNamingStems, SAA-255). Older ones stay in
     // Recent meetings only.
     const pendingVoiceNaming = recentPendingVoiceNamingStems(OUTDIR);
-    if (pendingVoiceNaming.length > 0) {
-        items.push({ type: 'separator' });
-        for (const stem of pendingVoiceNaming) {
-            const data = readNamingData(OUTDIR, stem);
-            const count = data && Array.isArray(data.voices) ? data.voices.length : 0;
-            items.push({
-                label: `Name ${count} voice${count === 1 ? '' : 's'}… — ${stemRelativeTime(stem)}`,
-                click: () => reopenVoiceNaming(stem),
-            });
-        }
-    }
     // "Fix speaker names…" (SAA-195): the most recent named call only, never
     // a list of past ones. Independent of the pending block above — a call
     // can only appear in one or the other, never both, since
@@ -1953,38 +1851,155 @@ function renderTray() {
     // recording's speaker names and re-extracts its moments; once a newer
     // call has been captured, "Fix speaker names…" with no call named in
     // the item itself would be ambiguous about which recording it acts on.
-    const renameStem = mostRecentNamedStem(OUTDIR);
-    if (renameStem && renameStem === mostRecentCaptureStem(OUTDIR)) {
-        items.push({ type: 'separator' });
-        items.push({
-            label: `Fix speaker names — ${stemDateLabel(renameStem)} call`,
-            click: () => reopenVoiceNaming(renameStem, { rename: true }),
-        });
-    }
+    const namedStem = mostRecentNamedStem(OUTDIR);
+    const renameStem = namedStem && namedStem === mostRecentCaptureStem(OUTDIR) ? namedStem : null;
     // "Save transcript — <meeting>, <weekday time>" (SAA-199): the most recent
     // meeting with a transcript, named in the label so it is visible which one
     // will be saved. See last-meeting.js for which captures count.
     const meeting = lastMeeting(OUTDIR, undefined, captureStateOpts());
-    items.push({ type: 'separator' });
-    items.push({ label: 'Recent meetings…', click: openMeetingsWindow });
-    items.push({ label: 'Recognize voices…', click: openVoicePrintsWindow });
-    if (meeting) {
-        items.push({
-            label: saveTranscriptLabel(meeting),
-            enabled: meeting.state === 'ready' && !savingTranscript,
-            click: () => saveTranscript(meeting),
-        });
+    // The account items (setup.js trayAccountItems). Until setup has been
+    // finished once, one item leads back into the setup window, which can be
+    // closed at any screen, and a menu bar item must never be a dead end
+    // (SAA-195's rule). After that: the recording notice while it is not agreed
+    // to, the sign-in (SAA-227 part B) while a server is set and this app holds
+    // no capture token for it, and Sign out while it does.
+    const accountItems = setup.trayAccountItems({ setupCompleted: setupCompleted(), ...setupStatus() });
+
+    const order = trayMenu.trayMenuOrder({
+        'allow-audio': !!(blocked && blocked.reason === 'permissions'),
+        'location-note': !!locationNote,
+        update: !!updateReady,
+        'pipeline-note': !!pipelineNote,
+        'permission-note': !!permNote,
+        'detect-prompt': !!detectPending,
+        'permission-fixes': !!permissionIssue,
+        'retry-pipeline': !!(pipeline && pipeline.state === 'failed'),
+        'pending-identity': recentPendingIdentity.length > 0,
+        'voice-naming': pendingVoiceNaming.length > 0,
+        'fix-speaker-names': !!renameStem,
+        active,
+        hasMeeting: !!meeting,
+        accountItems,
+    });
+    // The one status line (SAA-281), in place of "Status: …" and the three
+    // upload lines; the history stays in Recent meetings.
+    const statusLine = trayMenu.trayStatusLine({
+        state,
+        startedAtMs: session ? (session.startedAtMs || stemTimeMs(session.stem)) : null,
+        pipeline: pipeline ? pipeline.state : null,
+        server: !!status.server,
+        signedIn: status.signedIn,
+        lastUpload: status.server ? (listUploadQueue().slice(-1)[0] || null) : null,
+    }, (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }), stemTimeMs);
+
+    const items = [];
+    for (const item of order) {
+        if (item === '-') {
+            items.push({ type: 'separator' });
+        } else if (item === 'status') {
+            items.push({ label: statusLine, enabled: false });
+        } else if (item === 'allow-audio') {
+            items.push({ label: 'Allow audio access…', click: () => showSetupWindow('permissions') });
+        } else if (item === 'location-note') {
+            items.push({ label: locationNote.tray, enabled: false });
+        } else if (item === 'update') {
+            items.push({ label: `Restart to update to ${updateReady}`, click: restartToUpdate });
+        } else if (item === 'pipeline-note') {
+            items.push({ label: pipelineNote, enabled: false });
+        } else if (item === 'permission-note') {
+            items.push({ label: permNote, enabled: false });
+        } else if (item === 'detect-prompt') {
+            // The live prompt, carried here as well as in the notification. These
+            // are the same three answers; only the last one writes anything durable.
+            const { key, name } = detectPending;
+            items.push(
+                { label: `${name} is using the microphone`, enabled: false },
+                { label: 'Always record this app', click: () => answerDetectPrompt(key, 'record') },
+                { label: 'Not now', click: () => answerDetectPrompt(key, 'not_now') },
+                { label: `Never ask about ${name}`, click: () => answerDetectPrompt(key, 'never') },
+            );
+        } else if (item === 'permission-fixes') {
+            for (const svc of permissionIssue.denied) {
+                items.push({
+                    label: `Open ${svc} settings…`,
+                    click: () => shell.openExternal(SETTINGS_PANE[svc]),
+                });
+            }
+            items.push({ label: 'Dismiss warning', click: () => { permissionIssue = null; renderTray(); } });
+        } else if (item === 'retry-pipeline') {
+            // A failed run is a menu item, not just a line in a log. Retry re-enters
+            // the pipeline for that stem; it resumes from the first incomplete step.
+            items.push(
+                { label: `Retry processing (${pipeline.stem})`, click: retryPipeline },
+                { label: 'Dismiss failure', click: dismissPipelineFailure },
+            );
+        } else if (item === 'pending-identity') {
+            for (const stem of recentPendingIdentity) {
+                const marker = readLaterMarker(OUTDIR, stem);
+                const autoStopped = !!marker && marker.stopped_by === 'auto';
+                items.push({
+                    label: `Who was on the ${stemDateLabel(stem)} call…${autoStopped ? ' (auto-stopped)' : ''}`,
+                    click: () => reopenIdentityPrompt(stem),
+                });
+            }
+        } else if (item === 'voice-naming') {
+            for (const stem of pendingVoiceNaming) {
+                const data = readNamingData(OUTDIR, stem);
+                const count = data && Array.isArray(data.voices) ? data.voices.length : 0;
+                items.push({
+                    label: `Name ${count} voice${count === 1 ? '' : 's'}… — ${stemRelativeTime(stem)}`,
+                    click: () => reopenVoiceNaming(stem),
+                });
+            }
+        } else if (item === 'fix-speaker-names') {
+            items.push({
+                label: `Fix speaker names — ${stemDateLabel(renameStem)} call`,
+                click: () => reopenVoiceNaming(renameStem, { rename: true }),
+            });
+        } else if (item === 'start-stop') {
+            // One item, whose label and action follow the capture (SAA-281).
+            items.push({ label: trayMenu.startStopLabel(active), click: active ? () => stopRecording('manual') : startRecording });
+        } else if (item === 'copy-notice') {
+            // During a capture only: a line to paste into the meeting chat, since
+            // nothing in the meeting shows that Clipwise is recording (SAA-216).
+            items.push({ label: 'Copy recording notice', click: copyRecordingNotice });
+        } else if (item === 'recent-meetings') {
+            items.push({ label: 'Recent meetings…', click: openMeetingsWindow });
+        } else if (item === 'save-transcript') {
+            items.push({
+                label: saveTranscriptLabel(meeting),
+                enabled: meeting.state === 'ready' && !savingTranscript,
+                click: () => saveTranscript(meeting),
+            });
+        } else if (item === 'recognize-voices') {
+            items.push({ label: 'Recognize voices…', click: openVoicePrintsWindow });
+        } else if (item === 'detected-apps') {
+            items.push(detectedAppsMenu());
+        } else if (item === 'open-at-login') {
+            // On by default from the first run in Applications (applyLoginDefault),
+            // and only offered there: launch at login needs a path that stays put.
+            items.push({ label: 'Open at login', type: 'checkbox', checked: openAtLogin(),
+                enabled: app.isInApplicationsFolder(), click: (box) => setOpenAtLogin(box.checked) });
+        } else if (item === 'finish-setup') {
+            items.push({ label: 'Finish setting up Clipwise…', click: () => showSetupWindow(blockedStartFresh() ? 'blocked' : 'launch') });
+        } else if (item === 'recording-notice') {
+            items.push({ label: 'Recording notice…', click: () => showSetupWindow(blockedStartFresh() ? 'blocked' : 'launch') });
+        } else if (item === 'read-notice') {
+            items.push({ label: 'Read the recording notice…', click: () => showSetupWindow('reread') });
+        } else if (item === 'team-notice') {
+            items.push({ label: 'Who accepted the notice…', click: openTeamNoticeWindow });
+        } else if (item === 'sign-in') {
+            items.push({ label: 'Sign in to Clipwise…', click: signInToCaptureServer });
+        } else if (item === 'sign-out') {
+            items.push({ label: 'Sign out', click: signOutFromTray });
+        } else if (item === 'about') {
+            items.push({ label: 'About Clipwise', click: () => app.showAboutPanel() });
+        } else if (item === 'acknowledgements') {
+            items.push({ label: 'Acknowledgements…', click: openAcknowledgements });
+        } else if (item === 'quit') {
+            items.push({ label: 'Quit…', click: confirmQuit });
+        }
     }
-    items.push(
-        { type: 'separator' },
-        // On by default from the first run in Applications (applyLoginDefault),
-        // and only offered there: launch at login needs a path that stays put.
-        { label: 'Open at login', type: 'checkbox', checked: openAtLogin(),
-          enabled: app.isInApplicationsFolder(), click: (item) => setOpenAtLogin(item.checked) },
-        { label: 'About Clipwise', click: () => app.showAboutPanel() },
-        { label: 'Acknowledgements…', click: openAcknowledgements },
-        { label: 'Quit…', click: confirmQuit },
-    );
     tray.setContextMenu(Menu.buildFromTemplate(items));
 }
 
@@ -3103,7 +3118,7 @@ function readCaptureServerUrl() {
 let captureTokens = null;
 // This member's role on the team, 'admin' or 'member' as GET /captures/me last
 // said (refreshTeamRole), or null while unknown or signed out. It only decides
-// whether the tray offers the admin's "Team: who accepted the notice…"; the
+// whether the tray offers the admin's "Who accepted the notice…"; the
 // server answers that list to admins only, whatever this says.
 let teamRole = null;
 // The loopback listener of a sign-in in progress, if any.
@@ -3627,22 +3642,6 @@ async function pollJobStates() {
         renderTray();
         scheduleJobPoll(JOB_POLL_MS);
     }
-}
-
-// The tray's line for one queued capture: upload state from the queue, job state
-// from the server.
-function uploadTrayLabel(entry) {
-    const when = stemRelativeTime(entry.stem);
-    if (entry.state === 'queued') return `${entry.attempts > 0 ? 'Upload waiting to retry' : 'Upload queued'} — ${when}`;
-    if (entry.state === 'failed') return `Upload refused (${entry.lastStatus}) — ${when}`;
-    const job = {
-        done: 'Uploaded, ready',
-        failed: 'Uploaded, processing failed',
-        none: 'Uploaded',
-        gone: 'Uploaded, no longer on the server',
-        stale: 'Uploaded, status unknown',
-    }[entry.jobState] || 'Uploaded, processing';
-    return `${job} — ${when}`;
 }
 
 // Wakes the queue when its earliest queued capture is next due. None queued, no timer.
@@ -4629,14 +4628,17 @@ function showSetupWindow(mode = 'launch') {
 }
 
 // The notice for the page: the repo copy for the current version (consent.js
-// readNotice). A file that is missing or unreadable is logged, once per window
-// state sent, and gives null: the page then shows "The notice couldn't be
-// loaded" with its button off, and the acknowledge handler records nothing.
-function noticeForPage() {
+// readNotice). The window in mode 'reread' shows the full notice; every other
+// mode is the acknowledgement and shows the short one (Gate 1, SAA-280). A file
+// that is missing or unreadable is logged, once per window state sent, and
+// gives null: the page then shows "The notice couldn't be loaded" with its
+// button off, and the acknowledge handler records nothing.
+function noticeForPage(mode) {
+    const kind = mode === 'reread' ? 'full' : 'ack';
     try {
-        return consent.readNotice();
+        return consent.readNotice(consent.STATEMENT_VERSION, consent.NOTICE_DIR, kind);
     } catch (err) {
-        console.error(`consent: could not read the recording notice v${consent.STATEMENT_VERSION}: ${err.code || err.message}`);
+        console.error(`consent: could not read the recording notice v${consent.STATEMENT_VERSION} (${kind}): ${err.code || err.message}`);
         return null;
     }
 }
@@ -4654,7 +4656,11 @@ function setupView() {
         screen,
         stepText: w.noticeOnly ? '' : `Step ${setup.SCREENS.indexOf(screen) + 1} of ${setup.SCREENS.length}`,
         noticeLabel: consent.buttonLabel(w.mode),
-        notice: noticeForPage(),
+        notice: noticeForPage(w.mode),
+        // The acknowledgement's "Read the full notice": the full text, which the
+        // page shows in place of the short one and back again on its own. It
+        // sends nothing for either, so reading it records nothing.
+        fullNotice: screen === 'notice' && w.mode !== 'reread' ? noticeForPage('reread') : null,
         // Read again from the tray once agreed: Close only, no "Not now".
         rereading: w.mode === 'reread',
         address: w.address !== undefined ? w.address : host,
@@ -4907,8 +4913,9 @@ function registerSetupIpc() {
     ipcMain.on('setup:acknowledge', (_event, payload) => {
         if (!fromWindow(payload)) return;
         // A notice that could not be read can't be agreed to, whatever the page
-        // sent: its button is off, and nothing is written here either.
-        if (!consent.noticeAgreeable(noticeForPage())) {
+        // sent: its button is off, and nothing is written here either. The text
+        // checked is the one the window showed: the short one (Gate 1, SAA-280).
+        if (!consent.noticeAgreeable(noticeForPage(setupWindow.mode))) {
             console.error('[clipwise-recorder] consent: "I understand" refused: the recording notice could not be loaded');
             sendSetupState();
             return;

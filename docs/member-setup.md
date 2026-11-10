@@ -8,7 +8,7 @@ Before you start, ask whoever runs Clipwise for your team for:
 
 1. **The download link** for the Clipwise .dmg file.
 2. **Your team's Clipwise address**, for example `clipwise.yourcompany.com`. You type it in during setup.
-3. **An account.** Your admin adds your email to the team first. You sign in with Google using that email. [CHECK: what you see if you try to sign in before you've been added]
+3. **An account.** Your admin adds your email to the team first. You sign in with Google using that email. If you try before you've been added, the sign-in page says *"This account isn't a member of this Clipwise instance. Ask the person who runs it to add you."*
 
 You also need an Apple silicon Mac with macOS 14.2 or later. Clipwise doesn't open on an Intel Mac.
 
@@ -71,14 +71,14 @@ Click **Done** in Clipwise. To try it, ask Claude: *"What changed in the Panfold
 **Starting.** The first time a calling app uses your microphone, Clipwise asks *"Clipwise: [app] is using the microphone. Record calls from this app?"* You can choose:
 
 - **Always record**: record this call, and future calls from this app, without asking.
-- **Not now**: don't record this time. You can still start by hand with **Start** in the menu bar.
+- **Not now**: don't record this time. You can still start by hand with **Start recording** in the menu bar.
 - **Never ask about this app**: Clipwise won't ask again.
 
 You can change your choice later under **Detected applications** in the menu bar.
 
 When recording starts, a notification says **Recording — let everyone know** and shows a line you can say. On calls with a chat, **Copy recording notice** in the menu bar copies it for you to paste.
 
-**Stopping.** Click **Stop** in the menu bar, or let Clipwise stop by itself when the call ends. You'll then see **Auto-stopped — who was on this call?**
+**Stopping.** Click **Stop recording** in the menu bar (the same item, which changes while you record), or let Clipwise stop by itself when the call ends. You'll then see **Auto-stopped — who was on this call?**
 
 **"Who was on this call?"** This window opens after every call.
 
@@ -122,8 +122,10 @@ Once it's on, **Voice prints on this Mac** lists **You** and each person, with t
 
 **Signing out.** **Sign out** in the menu bar signs this Mac out of your team's server. Your recordings and any voice prints stay on this Mac. Anything recorded while signed out uploads after you sign in again with **Sign in to Clipwise…**. To remove voice prints, use **Turn off and delete prints**.
 
-## 11. The recording notice and the member notice
+## 11. The recording notice
 
-The recording notice is the first setup screen, **Before you record**. It says that Clipwise records without joining the call, so nobody else can see it's recording. You're responsible for telling the people you record and for following the laws and workplace rules that apply to you. Until you agree, the menu bar shows **Recording notice…**. [CHECK: there's no menu item to reread it once you've agreed]
+The recording notice is the first setup screen, **Before you record**. It's short: Clipwise records your calls on your Mac and no bot joins the meeting, your Mac turns the audio into a transcript, and you use the Clipwise connector in Claude to ask about your calls. You're responsible for telling the people on your calls that you're recording, and for following the law where you and they are. Until you agree, the menu bar shows **Recording notice…**.
 
-The member notice, which covers what's stored, where, for how long and who can see it, will appear in the Before you record screen. [CHECK: not shipped yet]
+The full notice covers what's stored, where, for how long, who can see it, and which outside services handle your calls. To read it before you agree, click **Read the full notice** on the Before you record screen; **Back** returns you to the short one, and reading it doesn't count as agreeing. Once you've agreed, read it again any time with **Read the recording notice…** in the menu bar.
+
+When the notice changes, Clipwise shows **Before you record** again and asks you to agree to the new version.

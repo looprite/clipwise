@@ -243,10 +243,17 @@ function neverExitsSpawn(signals) {
             order('if (!consent.isAcknowledged(SUPPORT_DIR))', 'dev = readDevices();', 'startGate.permissionGate(dev.micPerm, dev.tapPerm)', 'buildManifest(', 'spawnChild(')],
         ['main.js (text): block keeps the start as { trigger, at, reason: \'permissions\' }, opens setup at permissions, redraws the tray, notifies only for a trigger with the approved text and a click that opens setup at permissions (SAA-259), and returns', () =>
             /if \(gate === 'block'\) \{\s*blockedStart = \{ trigger, at: Date\.now\(\), reason: 'permissions' \};[\s\S]{0,400}showSetupWindow\('permissions'\);\s*renderTray\(\);[\s\S]{0,300}if \(trigger\) \{\s*notify\('permissions-start-blocked', 'Clipwise: allow audio access',\s*'Recording starts when you answer, if the call is still going\.',\s*\(\) => showSetupWindow\('permissions'\)\);\s*\}\s*return;\s*\}/.test(start)],
-        ['main.js (text): the tray\'s first item is "Allow audio access…", opening setup at permissions, only while a start is blocked on the grants; the resume redraws the tray when it clears the block (SAA-259)', () => {
+        // Since SAA-281 the status line comes first and "Allow audio access…" is
+        // the first item under it (tray-menu.js NOTE_KEYS, first of the notes).
+        ['main.js (text): the tray\'s first item under the status line is "Allow audio access…", opening setup at permissions, only while a start is blocked on the grants; the resume redraws the tray when it clears the block (SAA-259, SAA-281)', () => {
             const t = body('renderTray');
             const r = body('resumePermissionBlockedStart');
-            return /const blocked = blockedStartFresh\(\);\s*const items = \[\s*\.\.\.\(blocked && blocked\.reason === 'permissions'\s*\? \[\{ label: 'Allow audio access…', click: \(\) => showSetupWindow\('permissions'\) \}, \{ type: 'separator' \}\]\s*: \[\]\),\s*\{ label: `Status: \$\{label\}`, enabled: false \},/.test(t)
+            const menu = REV ? '' : read('tray-menu.js');
+            return /const blocked = blockedStartFresh\(\);/.test(t)
+                && t.includes("'allow-audio': !!(blocked && blocked.reason === 'permissions'),")
+                && /item === 'allow-audio'\) \{\s*items\.push\(\{ label: 'Allow audio access…', click: \(\) => showSetupWindow\('permissions'\) \}\);/.test(t)
+                && /const NOTE_KEYS = \['allow-audio',/.test(menu)
+                && /const out = \['status'\];\s*for \(const k of NOTE_KEYS\) if \(s\[k\]\) out\.push\(k\);/.test(menu)
                 && /blockedStart = null;\s*\/\/[^\n]*\n\s*renderTray\(\);/.test(r);
         }],
         ['main.js (text): fallback logs "start: system audio permission unreadable (tap_perm=<state>) — starting without the permission gate" and goes on', () =>

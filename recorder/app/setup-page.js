@@ -11,6 +11,10 @@ const send = (channel, extra) => ipcRenderer.send(channel, { token, ...(extra ||
 
 const STATE_TEXT = { granted: 'Allowed', denied: 'Off', notDetermined: 'Not yet asked' };
 let view = null;
+// The acknowledgement's "Read the full notice" (Gate 1, SAA-280): true while the
+// full text is shown in place of the short one. Set and cleared here only, by
+// the link and by Back; neither sends anything, so it can't record an answer.
+let showingFull = false;
 
 // The notice's text, as main.js sends it (consent.js readNotice): a title and
 // blocks of three kinds only. Every string goes in as textContent; a block of
@@ -63,9 +67,19 @@ function draw(v) {
   // A reread's Close writes nothing, so it stays usable either way.
   primary.disabled = !!v.busy || (v.screen === 'notice' && !agreeable && !v.rereading);
   later.textContent = v.screen === 'permissions' ? 'Finish later' : 'Not now';
-  if (v.screen === 'notice') {
+  // The full text is offered only on the acknowledgement, and only when it loaded.
+  const fullOffered = v.screen === 'notice' && !v.rereading && !!(v.fullNotice && v.fullNotice.title);
+  if (!fullOffered) showingFull = false;
+  if (v.screen === 'notice' && showingFull) {
+    drawNotice(v.fullNotice);
+    $('notice-error').textContent = '';
+    $('notice-full').style.display = 'none';
+    primary.textContent = 'Back';
+    primary.disabled = false;
+  } else if (v.screen === 'notice') {
     drawNotice(v.notice);
     $('notice-error').textContent = agreeable ? '' : "The notice couldn't be loaded";
+    $('notice-full').style.display = fullOffered ? '' : 'none';
     primary.textContent = v.noticeLabel || 'I understand';
   } else if (v.screen === 'address') {
     primary.textContent = v.busy ? 'Checking…' : 'Continue';
@@ -88,14 +102,17 @@ function draw(v) {
     primary.textContent = 'Done';
   }
   primary.style.display = v.screen === 'permissions' ? 'none' : '';
-  // A reread (opened from the menu bar once agreed) has one button, Close.
-  later.style.display = v.screen === 'claude' || v.rereading ? 'none' : '';
+  // A reread (opened from the menu bar once agreed) has one button, Close. The
+  // full text read from the acknowledgement has one too, Back.
+  later.style.display = v.screen === 'claude' || v.rereading || (v.screen === 'notice' && showingFull) ? 'none' : '';
 }
 
 ipcRenderer.on('setup:state', (_event, v) => draw(v));
 
 $('primary').addEventListener('click', () => {
   if (!view || $('primary').disabled) return;
+  // Back from the full text to the short one: nothing is sent.
+  if (view.screen === 'notice' && showingFull) { showingFull = false; draw(view); return; }
   $('primary').disabled = true;
   // Reread: Close only closes; nothing is sent that could write an answer.
   if (view.screen === 'notice' && view.rereading) send('setup:later');
@@ -111,6 +128,8 @@ $('copy-address').addEventListener('click', () => {
 });
 $('address').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('primary').click(); });
 $('later').addEventListener('click', () => send('setup:later'));
+// "Read the full notice": the full text in place of the short one. Nothing is sent.
+$('notice-full-link').addEventListener('click', () => { if (!view) return; showingFull = true; draw(view); });
 $('change-address').addEventListener('click', () => send('setup:change-address'));
 $('filevault-settings').addEventListener('click', () => send('setup:filevault-settings'));
 for (const which of ['mic', 'tap']) {

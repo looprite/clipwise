@@ -1,4 +1,4 @@
-// The "Team: who accepted the notice…" window's preload (Gate 1, item 2), on
+// The "Who accepted the notice…" window's preload (Gate 1, item 2), on
 // the pattern of SAA-243's window hardening. team-notice.html runs with no Node:
 // contextIsolation and sandbox on, nodeIntegration off. What it can reach of the
 // main process is this: the channels below and no others. A channel not listed

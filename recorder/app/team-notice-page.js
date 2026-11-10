@@ -1,4 +1,4 @@
-// The "Team: who accepted the notice…" window's page script (Gate 1, item 2).
+// The "Who accepted the notice…" window's page script (Gate 1, item 2).
 // It runs with no Node: team-notice-preload.js is all it reaches of the main
 // process. main.js sends the heading and one line per member, already written
 // (team-notice.js), or an error; this draws them as text, with textContent only,

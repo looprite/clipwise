@@ -40,6 +40,12 @@ function consentPath(supportDir) {
 // notice/recording-notice-v<N>.txt. Raising STATEMENT_VERSION means adding the
 // next file; the earlier ones stay as the record of what each version said.
 //
+// Two texts per version from v2 on (Gate 1, SAA-280): the acknowledgement
+// window shows the short one, notice/recording-notice-v<N>-ack.txt (kind
+// 'ack'), and "Read the recording notice…" and the window's "Read the full
+// notice" show the full one (kind 'full', the default). Both are agreed to as
+// the one version.
+//
 // The format, plain text:
 //   the first non-blank line   the title
 //   "## " at a line's start    a heading                     -> { tag: 'h2', text }
@@ -51,11 +57,19 @@ function consentPath(supportDir) {
 // markup, so nothing in the file can become HTML.
 const NOTICE_DIR = path.join(__dirname, 'notice');
 
-// Throws when the file for that version is missing, has no title, or has
-// nothing after it: a bundle without it must fail loudly, never show an empty
-// notice that could be agreed to.
-function readNotice(version = STATEMENT_VERSION, dir = NOTICE_DIR) {
-    const lines = fs.readFileSync(path.join(dir, `recording-notice-v${version}.txt`), 'utf8').replace(/\r\n/g, '\n').split('\n');
+// Throws when the file for that version and kind is missing, has no title, or
+// has nothing after it: a bundle without it must fail loudly, never show an
+// empty notice that could be agreed to. There is no fallback from 'ack' to
+// 'full', or the other way.
+function noticeFile(version, kind) {
+    if (kind === 'ack') return `recording-notice-v${version}-ack.txt`;
+    if (kind === 'full') return `recording-notice-v${version}.txt`;
+    throw new Error(`no notice kind ${kind}`);
+}
+
+function readNotice(version = STATEMENT_VERSION, dir = NOTICE_DIR, kind = 'full') {
+    const file = noticeFile(version, kind);
+    const lines = fs.readFileSync(path.join(dir, file), 'utf8').replace(/\r\n/g, '\n').split('\n');
     const clean = (s) => s.replace(/\s+/g, ' ').trim();
     let title = null;
     const blocks = [];
@@ -77,8 +91,8 @@ function readNotice(version = STATEMENT_VERSION, dir = NOTICE_DIR) {
             blocks.push(open);
         }
     }
-    if (!title || blocks.length === 0) throw new Error(`recording-notice-v${version}.txt has no title or no text after it`);
-    return { version, title, blocks, paragraphs: blocks.filter((b) => b.tag === 'p').map((b) => b.text) };
+    if (!title || blocks.length === 0) throw new Error(`${file} has no title or no text after it`);
+    return { version, kind, title, blocks, paragraphs: blocks.filter((b) => b.tag === 'p').map((b) => b.text) };
 }
 
 // Whether a notice as the page gets it can be agreed to: a title and at least
