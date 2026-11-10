@@ -1068,14 +1068,23 @@ const CASES = [
 
     // 10. The menu (SAA-281): tray-menu.js's order and status line, and how
     // main.js's renderTray uses them.
-    ['menu: stopped, signed-in admin: exactly status / Start or Stop / Recent meetings, Save transcript, Recognize voices / Detected applications, Open at login / Read the recording notice, Who accepted the notice, Sign out / About, Acknowledgements, Quit', () =>
+    ['menu: stopped, signed-in admin, with a meeting to save: exactly status / Start or Stop / Recent meetings, Recognize voices / Detected applications, Open at login / Read the recording notice, Who accepted the notice, Sign out / About, Acknowledgements, Quit', () =>
         !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: false, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
-            === JSON.stringify(['status', '-', 'start-stop', '-', 'recent-meetings', 'save-transcript', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
+            === JSON.stringify(['status', '-', 'start-stop', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
                 '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'acknowledgements', 'quit'])],
     ['menu: recording: the same order, with "Copy recording notice" right under Start or Stop', () =>
         !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: true, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
-            === JSON.stringify(['status', '-', 'start-stop', 'copy-notice', '-', 'recent-meetings', 'save-transcript', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
+            === JSON.stringify(['status', '-', 'start-stop', 'copy-notice', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
                 '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'acknowledgements', 'quit'])],
+    ['menu: no "Save transcript" item (SAA-281): none in the order with a meeting to save, renderTray draws none and looks up no last meeting; Recent meetings still saves through saveTranscript', () => {
+        if (!trayMenu) return false;
+        const body = fnBody('renderTray');
+        const saveAt = SRC.indexOf("ipcMain.on('meetings:save'");
+        const save = saveAt >= 0 ? SRC.slice(saveAt, SRC.indexOf('\n    });\n', saveAt)) : '';
+        return !trayMenu.trayMenuOrder({ hasMeeting: true }).includes('save-transcript')
+            && !body.includes("'save-transcript'") && !body.includes('lastMeeting(') && !body.includes('Save transcript')
+            && !SRC.includes('function saveTranscriptLabel') && !SRC.includes('Save transcript —')
+            && save.includes('saveTranscript(c);') && /\nfunction saveTranscript\(meeting\) \{/.test(SRC); }],
     ['menu: one Start/Stop item whose label switches, and main.js draws no separate Start and Stop', () => {
         if (!trayMenu) return false;
         const one = (o) => o.filter((k) => k === 'start-stop').length === 1;

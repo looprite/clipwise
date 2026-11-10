@@ -32,9 +32,10 @@ const {
     readVoiceNamesAnswer, mostRecentNamedStem, mostRecentCaptureStem,
 } = require('./identity-answer.js');
 const { stopMessageFor } = require('./voice-naming-wait.js');
-// Which meeting the tray's "Save transcript" item acts on (SAA-199).
+// What state a capture is in (SAA-199), for Recent meetings' Save transcript
+// and trash, and the server job poll.
 const {
-    lastMeeting, classifyCapture, stemTimeMs, isTrashed, writeCalendarMatchFile, jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
+    classifyCapture, stemTimeMs, isTrashed, writeCalendarMatchFile, jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
     failureResolved,
 } = require('./last-meeting.js');
 // The recent-meetings window's rows (SAA-217).
@@ -1024,25 +1025,10 @@ function stemDateLabel(stem) {
 
 let savingTranscript = false;
 
-// "Mon 1:00 PM", in the local time zone, from the capture's own start.
-function stemWeekdayTime(stem) {
-    const ms = stemTimeMs(stem);
-    if (!Number.isFinite(ms)) return stem || '';
-    const d = new Date(ms);
-    const day = d.toLocaleDateString(undefined, { weekday: 'short' });
-    const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-    return `${day} ${time}`;
-}
-
-function saveTranscriptLabel(meeting) {
-    let title = meeting.title || 'Untitled';
-    if (title.length > 48) title = title.slice(0, 47) + '…';
-    const base = `Save transcript — ${title}, ${stemWeekdayTime(meeting.stem)}`;
-    return meeting.state === 'ready' ? base : `${base} (not ready yet)`;
-}
-
-// The file is built by the server, into a temporary path; the person then picks
-// where it goes, in a Save dialog opening on Downloads.
+// Recent meetings' Save transcript (SAA-281 took it off the menu: a long title
+// pushed the date out of view). The file is built by the server, into a
+// temporary path; the person then picks where it goes, in a Save dialog
+// opening on Downloads.
 function saveTranscript(meeting) {
     if (savingTranscript || meeting.state !== 'ready') return;
     savingTranscript = true;
@@ -1897,10 +1883,6 @@ function renderTray() {
     // the item itself would be ambiguous about which recording it acts on.
     const namedStem = mostRecentNamedStem(OUTDIR);
     const renameStem = namedStem && namedStem === mostRecentCaptureStem(OUTDIR) ? namedStem : null;
-    // "Save transcript — <meeting>, <weekday time>" (SAA-199): the most recent
-    // meeting with a transcript, named in the label so it is visible which one
-    // will be saved. See last-meeting.js for which captures count.
-    const meeting = lastMeeting(OUTDIR, undefined, captureStateOpts());
     // The account items (setup.js trayAccountItems). Until setup has been
     // finished once, one item leads back into the setup window, which can be
     // closed at any screen, and a menu bar item must never be a dead end
@@ -1922,7 +1904,6 @@ function renderTray() {
         'voice-naming': pendingVoiceNaming.length > 0,
         'fix-speaker-names': !!renameStem,
         active,
-        hasMeeting: !!meeting,
         accountItems,
     });
     // The one status line (SAA-281), in place of "Status: …" and the three
@@ -2014,12 +1995,6 @@ function renderTray() {
             items.push({ label: 'Copy recording notice', click: copyRecordingNotice });
         } else if (item === 'recent-meetings') {
             items.push({ label: 'Recent meetings…', click: openMeetingsWindow });
-        } else if (item === 'save-transcript') {
-            items.push({
-                label: saveTranscriptLabel(meeting),
-                enabled: meeting.state === 'ready' && !savingTranscript,
-                click: () => saveTranscript(meeting),
-            });
         } else if (item === 'recognize-voices') {
             items.push({ label: 'Recognize voices…', click: openVoicePrintsWindow });
         } else if (item === 'detected-apps') {

@@ -175,8 +175,8 @@ cp "$APP_SRC/people-name.js" "$C/Resources/app/people-name.js"
 # Step 2's stop-waiting decision (SAA-195). main.js requires this by
 # relative path; a bundle without it fails to launch, same as the others.
 cp "$APP_SRC/voice-naming-wait.js" "$C/Resources/app/voice-naming-wait.js"
-# Which meeting the tray's "Save transcript" item names (SAA-199). main.js
-# requires this by relative path; a bundle without it fails to launch.
+# What state a capture is in (SAA-199), for Recent meetings and the job poll.
+# main.js requires this by relative path; a bundle without it fails to launch.
 cp "$APP_SRC/last-meeting.js" "$C/Resources/app/last-meeting.js"
 # The recent-meetings window (SAA-217): its page and the code that lists its rows.
 # main.js requires meetings.js and loads meetings.html by path relative to itself.

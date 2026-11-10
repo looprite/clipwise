@@ -6,7 +6,7 @@
 // Order, groups separated by dividers ('-'):
 //   status, then any action notes and prompts right under it
 //   Start or Stop recording, and "Copy recording notice" while recording
-//   Recent meetings, Save transcript, Recognize voices
+//   Recent meetings, Recognize voices (Save transcript is in Recent meetings)
 //   Detected applications, Open at login
 //   the account items (setup.js trayAccountItems): Read the recording notice,
 //     Who accepted the notice (admins only), Sign out; before setup or sign-in
@@ -24,17 +24,15 @@ const NOTE_KEYS = ['allow-audio', 'location-note', 'update', 'pipeline-note', 'p
 const PROMPT_KEYS = ['detect-prompt', 'permission-fixes', 'retry-pipeline', 'pending-identity', 'voice-naming', 'fix-speaker-names'];
 
 // s: which notes and prompts are showing (booleans named by key), active (a
-// capture is starting, running or stalled), hasMeeting (Save transcript has a
-// meeting to save), accountItems (setup.js trayAccountItems, in its order).
+// capture is starting, running or stalled), accountItems (setup.js
+// trayAccountItems, in its order).
 function trayMenuOrder(s) {
     const out = ['status'];
     for (const k of NOTE_KEYS) if (s[k]) out.push(k);
     for (const k of PROMPT_KEYS) if (s[k]) out.push('-', k);
     out.push('-', 'start-stop');
     if (s.active) out.push('copy-notice');
-    out.push('-', 'recent-meetings');
-    if (s.hasMeeting) out.push('save-transcript');
-    out.push('recognize-voices');
+    out.push('-', 'recent-meetings', 'recognize-voices');
     out.push('-', 'detected-apps', 'open-at-login');
     const account = Array.isArray(s.accountItems) ? s.accountItems : [];
     if (account.length) out.push('-', ...account);
