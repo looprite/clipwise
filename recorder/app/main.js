@@ -1798,6 +1798,19 @@ function syncTrayClock() {
 // can't replace, null otherwise.
 let locationNote = null;
 
+// The status line names the day of a call that wasn't today (SAA-285), and the
+// menu is built once per renderTray, so it is drawn again when the Mac's local
+// date changes (tray-menu.js localDateChanged). Checked each minute rather than
+// with a timer set for midnight, which would fire late after sleep. Only on a
+// change of date, so an open menu is not rebuilt under the person reading it.
+// A plain timer: it does not keep the Mac awake or wake it, and it is cleared
+// at will-quit.
+let trayDrawnAtMs = null;
+let trayDayTimer = null;
+function redrawTrayOnNewDay() {
+    if (tray && trayMenu.localDateChanged(trayDrawnAtMs, Date.now())) renderTray();
+}
+
 // The menu (SAA-281): tray-menu.js decides which items show and in what order;
 // this turns each key into its Electron item(s).
 function renderTray() {
@@ -1890,7 +1903,12 @@ function renderTray() {
         server: !!status.server,
         signedIn: status.signedIn,
         lastUpload: status.server ? (listUploadQueue().slice(-1)[0] || null) : null,
-    }, (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }), stemTimeMs);
+        nowMs: Date.now(),
+    }, (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }), stemTimeMs, {
+        weekday: (ms) => new Date(ms).toLocaleDateString(undefined, { weekday: 'short' }),
+        date: (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    });
+    trayDrawnAtMs = Date.now();
 
     const items = [];
     for (const item of order) {
@@ -5848,6 +5866,8 @@ app.whenReady().then(async () => {
     // At launch and then once a day: an app left running for weeks prunes too.
     pruneDayLogsNow();
     setInterval(pruneDayLogsNow, DAY_LOG_PRUNE_INTERVAL_MS);
+    // A new local date redraws the menu, so the status line's day is right.
+    trayDayTimer = setInterval(redrawTrayOnNewDay, 60 * 1000);
     registerIdentityIpc();
     // Unset in normal use: see openIdentityWindowForCheck.
     openIdentityWindowForCheck();
@@ -5900,7 +5920,11 @@ app.on('second-instance', () => {
     if (tray && !setupCompleted()) showSetupWindow('launch');
 });
 
-app.on('will-quit', () => { isQuitting = true; stopDetector(); });
+app.on('will-quit', () => {
+    isQuitting = true;
+    stopDetector();
+    if (trayDayTimer) { clearInterval(trayDayTimer); trayDayTimer = null; }
+});
 
 app.on('window-all-closed', (e) => { e.preventDefault?.(); });
 

@@ -51,9 +51,12 @@ function startStopLabel(active) {
 // s: state (stopped, starting, recording, stalled), startedAtMs (when this
 // capture started), pipeline (the Mac's processing of the last call: null,
 // 'running' or 'failed'), server (a team address is set), signedIn, lastUpload
-// (the newest upload-queue entry, or null). time(ms) is the Mac's local time
-// format, e.g. "9:00 AM"; stemTimeMs(stem) is when a capture started.
-function trayStatusLine(s, time, stemTimeMs) {
+// (the newest upload-queue entry, or null), nowMs (now; without it the last
+// call's time is shown alone). time(ms) is the Mac's local time format, e.g.
+// "9:00 AM"; stemTimeMs(stem) is when a capture started; day is the Mac's
+// local { weekday(ms), date(ms) } formats, e.g. "Mon" and "Nov 3", for
+// dayAndTime.
+function trayStatusLine(s, time, stemTimeMs, day) {
     if (s.state === 'starting') return 'Starting recording…';
     if (s.state === 'recording') return `Recording · started ${time(s.startedAtMs)}`;
     if (s.state === 'stalled') return `Recording · stalled — started ${time(s.startedAtMs)}`;
@@ -65,7 +68,7 @@ function trayStatusLine(s, time, stemTimeMs) {
     if (!u) return 'Stopped';
     if (u.state === 'queued') return u.attempts > 0 ? 'Stopped · last call retrying upload' : 'Stopped · last call processing';
     if (u.state === 'failed') return "Stopped · last call didn't upload — see Recent meetings";
-    if (u.jobState === 'done') return `Stopped · last call ready ${time(stemTimeMs(u.stem))}`;
+    if (u.jobState === 'done') return `Stopped · last call ready ${dayAndTime(stemTimeMs(u.stem), s.nowMs, time, day)}`;
     if (u.jobState === 'failed') return 'Stopped · last call failed to process — see Recent meetings';
     if (u.jobState === 'none') return 'Stopped · last call uploaded';
     if (u.jobState === 'gone') return 'Stopped · last call no longer on the server';
@@ -73,4 +76,27 @@ function trayStatusLine(s, time, stemTimeMs) {
     return 'Stopped · last call processing';
 }
 
-module.exports = { trayMenuOrder, startStopLabel, trayStatusLine, NOTE_KEYS, PROMPT_KEYS };
+// When a call was, by the Mac's local calendar (SAA-285): the time alone on
+// the day of nowMs, "Mon 4:00 PM" from 1 to 6 days before it, and
+// "Nov 3 4:00 PM" from 7 days before it. A time later than nowMs, or no
+// nowMs, is the time alone.
+function dayAndTime(ms, nowMs, time, day) {
+    if (!Number.isFinite(nowMs) || !day) return time(ms);
+    const midnight = (x) => { const d = new Date(x); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+    // Rounded: a day across a clock change is 23 or 25 hours long.
+    const daysAgo = Math.round((midnight(nowMs) - midnight(ms)) / 86400000);
+    if (!(daysAgo >= 1)) return time(ms);
+    return `${daysAgo < 7 ? day.weekday(ms) : day.date(ms)} ${time(ms)}`;
+}
+
+// Whether the Mac's local date at nowMs differs from the one at drawnMs, the
+// last time the menu was drawn: main.js redraws on true, so the status line's
+// day (dayAndTime) is right after midnight. False with no draw yet.
+function localDateChanged(drawnMs, nowMs) {
+    if (!Number.isFinite(drawnMs) || !Number.isFinite(nowMs)) return false;
+    const a = new Date(drawnMs);
+    const b = new Date(nowMs);
+    return a.getFullYear() !== b.getFullYear() || a.getMonth() !== b.getMonth() || a.getDate() !== b.getDate();
+}
+
+module.exports = { trayMenuOrder, startStopLabel, trayStatusLine, dayAndTime, localDateChanged, NOTE_KEYS, PROMPT_KEYS };

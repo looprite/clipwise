@@ -1116,6 +1116,61 @@ const CASES = [
         return body.includes('lastUpload: status.server ? (listUploadQueue().slice(-1)[0] || null) : null,')
             && body.includes('startedAtMs: session ? (session.startedAtMs || stemTimeMs(session.stem)) : null,')
             && body.includes("(ms) => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })"); }],
+    // SAA-285 (1): the day of a call that wasn't today. Local dates, built with
+    // new Date(y, m, d, h, min), so the cases hold in any time zone; made-up
+    // formatters stand in for the Mac's, so they hold in any locale. Now is
+    // Tue Nov 10 2026, 9:30 AM.
+    ['menu: "last call ready" names the day of a call that wasn\'t today: the time alone today, the weekday 1-6 days back, the date from 7 days back', () => {
+        if (!trayMenu) return false;
+        const at = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi).getTime();
+        const NOW = at(2026, 11, 10, 9, 30);
+        const T = (ms) => { const d = new Date(ms); return `${d.getHours() % 12 || 12}:${String(d.getMinutes()).padStart(2, '0')} ${d.getHours() < 12 ? 'AM' : 'PM'}`; };
+        const DAY = {
+            weekday: (ms) => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(ms).getDay()],
+            date: (ms) => `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][new Date(ms).getMonth()]} ${new Date(ms).getDate()}`,
+        };
+        const ready = (callMs) => trayMenu.trayStatusLine(
+            { state: 'stopped', pipeline: null, server: true, signedIn: true, nowMs: NOW, lastUpload: { stem: 'S', state: 'sent', jobState: 'done' } },
+            T, () => callMs, DAY);
+        const cases = [
+            [ready(at(2026, 11, 10, 8, 0)), 'Stopped · last call ready 8:00 AM'],        // today
+            [ready(at(2026, 11, 10, 0, 1)), 'Stopped · last call ready 12:01 AM'],       // today, just after midnight
+            [ready(at(2026, 11, 9, 23, 59)), 'Stopped · last call ready Mon 11:59 PM'],  // yesterday, just before midnight
+            [ready(at(2026, 11, 9, 16, 0)), 'Stopped · last call ready Mon 4:00 PM'],    // the issue's example
+            [ready(at(2026, 11, 4, 16, 0)), 'Stopped · last call ready Wed 4:00 PM'],    // 6 days back
+            [ready(at(2026, 11, 3, 16, 0)), 'Stopped · last call ready Nov 3 4:00 PM'],  // 7 days back
+            [ready(at(2025, 12, 31, 16, 0)), 'Stopped · last call ready Dec 31 4:00 PM'], // last year
+            [ready(at(2026, 11, 10, 11, 0)), 'Stopped · last call ready 11:00 AM'],      // later than now: the time alone
+        ];
+        const wrong = cases.filter(([got, want]) => got !== want);
+        if (wrong.length) console.log(`      day mismatches: ${JSON.stringify(wrong)}`);
+        return wrong.length === 0; }],
+    ['menu: localDateChanged is true across local midnight (and a month or year end) and false within one day or before the first draw', () => {
+        if (!trayMenu || typeof trayMenu.localDateChanged !== 'function') return false;
+        const at = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi).getTime();
+        const changed = trayMenu.localDateChanged;
+        const cases = [
+            [changed(at(2026, 11, 9, 23, 59), at(2026, 11, 10, 0, 1)), true],
+            [changed(at(2026, 11, 30, 23, 59), at(2026, 12, 1, 0, 0)), true],
+            [changed(at(2026, 12, 31, 23, 59), at(2027, 1, 1, 0, 0)), true],
+            [changed(at(2026, 11, 10, 0, 1), at(2026, 11, 10, 23, 59)), false],
+            [changed(at(2026, 11, 10, 9, 30), at(2026, 11, 10, 9, 30)), false],
+            [changed(null, at(2026, 11, 10, 9, 30)), false],
+        ];
+        const wrong = cases.filter(([got, want]) => got !== want);
+        if (wrong.length) console.log(`      localDateChanged mismatches: ${JSON.stringify(wrong)}`);
+        return wrong.length === 0; }],
+    ['menu: renderTray gives the status line now and the Mac\'s weekday and date formats, and records when it drew', () => {
+        const body = fnBody('renderTray');
+        return body.includes('nowMs: Date.now(),')
+            && body.includes("weekday: (ms) => new Date(ms).toLocaleDateString(undefined, { weekday: 'short' }),")
+            && body.includes("date: (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),")
+            && body.includes('trayDrawnAtMs = Date.now();'); }],
+    ['menu: a minute timer redraws only on a new local date, is cleared at will-quit, and nothing keeps the Mac awake (no powerSaveBlocker)', () =>
+        /if \(tray && trayMenu\.localDateChanged\(trayDrawnAtMs, Date\.now\(\)\)\) renderTray\(\);/.test(fnBody('redrawTrayOnNewDay'))
+        && SRC.includes('trayDayTimer = setInterval(redrawTrayOnNewDay, 60 * 1000);')
+        && /app\.on\('will-quit', \(\) => \{[\s\S]{0,200}if \(trayDayTimer\) \{ clearInterval\(trayDayTimer\); trayDayTimer = null; \}/.test(SRC)
+        && !SRC.includes('powerSaveBlocker')],
     ['menu: main.js requires tray-menu.js, and build-app.sh copies it into the bundle', () =>
         SRC.includes("const trayMenu = require('./tray-menu.js');")
         && BUILD.includes('cp "$APP_SRC/tray-menu.js" "$C/Resources/app/tray-menu.js"')],
