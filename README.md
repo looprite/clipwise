@@ -244,6 +244,92 @@ spctl --assess --type execute --verbose=2 /Applications/Clipwise.app
 open /Applications/Clipwise.app
 ```
 
+## Publishing a release
+
+Written from one release, v0.1.202611101156 on 2026-11-10: these are the steps that release
+took, in order, and nothing else. `gh release list` shows earlier releases: the three before it
+(from v0.1.202611032040) carry the same three assets, and the seven before those carry the zip and
+`ffmpeg-9.0.2.tar.xz` only. How the earlier ones were published was not written down.
+
+A release is a GitHub Release whose tag is `v<version>`, holding three files from
+`recorder/app/dist/`: `Clipwise-darwin-arm64-<version>.zip` (what installed copies update to: the
+app asks update.electronjs.org, which serves the newest release's zip), `Clipwise.dmg` (the disk
+image `notarize.sh` makes; `docs/member-setup.md` and "Installing the app" above have a new member
+open the .dmg from a link their admin sends) and `ffmpeg-9.0.2.tar.xz` (the ffmpeg source,
+THIRD_PARTY_NOTICES). `dist/` can also hold zips of earlier builds; only `<version>`'s goes up.
+
+**The build.** Built and notarized with the two steps above, in a worktree at the release commit.
+Its `build-info.json` gave the release commit and `dirty: false`. The release commit was put on
+`main` by a fast-forward, pushed by hash from that worktree, and confirmed by reading the remote
+ref:
+
+```sh
+git push origin <release commit, full hash>:refs/heads/main
+git ls-remote origin refs/heads/main          # <release commit>
+```
+
+**Checks before publishing,** each with its exit code:
+
+```sh
+xcrun stapler validate recorder/app/dist/Clipwise.app
+xcrun stapler validate recorder/app/dist/Clipwise.dmg
+codesign --verify --deep --strict --verbose=2 recorder/app/dist/Clipwise.app
+spctl --assess --type execute --verbose=2 recorder/app/dist/Clipwise.app                                  # source=Notarized Developer ID
+spctl --assess --type open --context context:primary-signature --verbose=2 recorder/app/dist/Clipwise.dmg # source=Notarized Developer ID
+```
+
+The zip, unpacked into a new empty folder outside the repo:
+
+```sh
+mkdir <new folder>
+ditto -x -k recorder/app/dist/Clipwise-darwin-arm64-<version>.zip <new folder>
+cat <new folder>/Clipwise.app/Contents/Resources/app/build-info.json      # the release commit, dirty false
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' <new folder>/Clipwise.app/Contents/Info.plist   # <version>
+xcrun stapler validate <new folder>/Clipwise.app
+codesign --verify --deep --strict <new folder>/Clipwise.app
+```
+
+And `release-zip.sh`'s own check, on copies in a folder outside the repo that it empties first
+(`all cases as expected`):
+
+```sh
+recorder/app/check-release-zip.sh recorder/app/dist/Clipwise.app <scratch folder>
+```
+
+**Notes.** A file outside the repo, in the shape of the previous release's notes: a first line
+`Clipwise <version>`, then one short user-facing line per change, each starting `- `.
+
+**A draft first,** so the update feed does not see it yet:
+
+```sh
+gh release create v<version> --repo looprite/clipwise \
+  --target <release commit, full hash> \
+  --title <version> \
+  --notes-file <notes file> \
+  --draft \
+  recorder/app/dist/Clipwise-darwin-arm64-<version>.zip \
+  recorder/app/dist/Clipwise.dmg \
+  recorder/app/dist/ffmpeg-9.0.2.tar.xz
+gh release view v<version> --repo looprite/clipwise --json isDraft,tagName,name,body,assets
+git ls-remote origin refs/tags/v<version>     # nothing yet: the tag is made when it is published
+```
+
+The view was compared with the local files: each asset's name, its `size` against the file's
+bytes, its `digest` against the file's SHA-256, and the body byte for byte against the notes file.
+
+**Publish, then read back.** The publish command's output is not the confirmation:
+
+```sh
+gh release edit v<version> --repo looprite/clipwise --draft=false
+git ls-remote origin refs/tags/v<version>     # <release commit>
+gh release list --repo looprite/clipwise --limit 3     # <version> marked Latest
+curl -s -w '\nhttp=%{http_code}\n' https://update.electronjs.org/looprite/clipwise/darwin-arm64/<previous version>
+# http=200, and its "url" ends in Clipwise-darwin-arm64-<version>.zip
+```
+
+Not part of that release: installing it by hand on this Mac (installed copies update through the
+feed), and a server deploy (it changed nothing under `server/`).
+
 ## Server database login
 
 The server connects as its own login, which can read and write rows in every table in schema

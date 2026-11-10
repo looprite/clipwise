@@ -13,10 +13,11 @@ it in Linear.
   command included) happens in a separate git worktree, never in the folder
   the recorder runs from, even when both are at the same commit. If no
   worktree exists, ask rather than fall back to the main checkout.
-- When an issue's branch is merged to main, remove its worktree with
-  `git worktree remove` (never `--force`) as part of closing the issue. Keep
-  the branch. If the worktree has uncommitted or untracked files, stop and ask
-  first. Check with `git worktree list`.
+- When a branch is merged to main, remove its worktree in the same session
+  (git worktree remove, never --force), whether or not the issue closes; keep
+  the branch, and if the worktree has uncommitted or untracked files, stop and
+  ask first. Confirm the folder is gone with a check that doesn't go through
+  git (test -e).
 - A check or test run never uses the installed app's identity: not its app
   name, not its keychain item, not its support folder.
 - A push is confirmed by reading the remote ref, not by the push output.
