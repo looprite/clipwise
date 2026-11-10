@@ -435,14 +435,24 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
         return { enrolled: enrol.length, refused: refused.length, removed };
     }
 
+    // Several people's prints at once, from the opt-in screen's checkboxes
+    // (SAA-275 part 1): one load and one save, so the store is written whole
+    // once. Ids with no print are ignored. -> how many were deleted.
+    function deleteProfiles(personIds) {
+        const ids = Array.from(new Set((Array.isArray(personIds) ? personIds : []).filter((x) => typeof x === 'string')));
+        if (ids.length === 0 || !fs.existsSync(profilesPath)) return 0;
+        const store = load();
+        const gone = ids.filter((id) => Object.prototype.hasOwnProperty.call(store.people, id));
+        if (gone.length === 0) return 0;
+        for (const id of gone) delete store.people[id];
+        save(store);
+        return gone.length;
+    }
+
     // One person's print, from the opt-in screen. A later confirmed name makes
     // a new one.
     function deleteProfile(personId) {
-        const store = load();
-        if (!store.people[personId]) return false;
-        delete store.people[personId];
-        save(store);
-        return true;
+        return deleteProfiles([personId]) === 1;
     }
 
     // A recording deleted from the trash: its contributions and its score lines.
@@ -519,7 +529,7 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
     return {
         dir, settingPath, profilesPath, scoresPath,
         setting, isEnabled, enable, disable, removeWhileOff, load, ingestHostPrint, enrolFromMapping,
-        deleteProfile, removeRecording, removeSelfContribution, listProfiles, matchProfiles, appendScoreLines, readScoreLines,
+        deleteProfile, deleteProfiles, removeRecording, removeSelfContribution, listProfiles, matchProfiles, appendScoreLines, readScoreLines,
     };
 }
 

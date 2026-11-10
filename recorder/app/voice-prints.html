@@ -67,6 +67,10 @@
   .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .count { color: var(--muted); font-size: 12px; margin-left: 6px; }
   .empty { color: var(--muted); }
+  .pick { flex: 0 0 auto; margin: 0; }
+  .row .who { flex: 1 1 auto; }
+  #selbar { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+  #selbar[hidden] { display: none; }
   footer { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 8px; padding: 10px 22px 16px; }
   button { font: inherit; padding: 4px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--fg); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -87,6 +91,7 @@
   </div>
   <div id="prints" hidden>
     <h2>Voice prints on this Mac</h2>
+    <div id="selbar" hidden></div>
     <div class="card" id="list"></div>
   </div>
 </main>

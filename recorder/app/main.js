@@ -1455,24 +1455,32 @@ function registerVoicePrintsIpc() {
         }
         sendVoicePrintsData();
     });
+    // One row's Delete sends one id; the checkboxes' "Delete N…" send several
+    // (SAA-275 part 1). Either way: one confirmation, Cancel the default,
+    // naming each print from the store, not from what the window sent.
     ipcMain.on('voice-prints:delete', async (_event, payload) => {
-        const personId = payload && typeof payload.personId === 'string' ? payload.personId : null;
-        if (!personId) return;
-        let shown = null;
+        const sent = payload && Array.isArray(payload.personIds) ? payload.personIds.filter((x) => typeof x === 'string') : [];
+        if (sent.length === 0) return;
+        let picked;
         try {
-            const p = voicePrints().listProfiles().people.find((x) => x.personId === personId);
-            if (!p) { sendVoicePrintsData(); return; }
-            shown = p.name;
+            const byId = new Map(voicePrints().listProfiles().people.map((p) => [p.personId, p]));
+            picked = Array.from(new Set(sent)).filter((id) => byId.has(id)).map((id) => byId.get(id));
         } catch { return; }
-        const { response } = await dialog.showMessageBox(parent(), {
+        if (picked.length === 0) { sendVoicePrintsData(); return; }
+        const detail = 'Clipwise stops comparing new calls against it. A new print is kept the next time you name this person on a call.';
+        const { response } = await dialog.showMessageBox(parent(), picked.length === 1 ? {
             type: 'warning', buttons: ['Cancel', 'Delete'], defaultId: 0, cancelId: 0,
-            message: shown ? `Delete ${shown}’s voice print?` : 'Delete this voice print?',
-            detail: 'Clipwise stops comparing new calls against it. A new print is kept the next time you name this person on a call.',
+            message: picked[0].name ? `Delete ${picked[0].name}’s voice print?` : 'Delete this voice print?',
+            detail,
+        } : {
+            type: 'warning', buttons: ['Cancel', 'Delete'], defaultId: 0, cancelId: 0,
+            message: `Delete these ${picked.length} voice prints?`,
+            detail: `${confirmationList(picked.map((p) => `• ${p.name || 'Someone (no name kept)'}`)).join('\n')}\n\n${detail}`,
         });
         if (response !== 1) return;
         try {
-            voicePrints().deleteProfile(personId);
-            console.error('[clipwise-recorder] voice prints: one print deleted');
+            const n = voicePrints().deleteProfiles(picked.map((p) => p.personId));
+            console.error(`[clipwise-recorder] voice prints: ${n} print(s) deleted`);
         } catch (err) {
             console.error(`[clipwise-recorder] voice prints: delete failed (${err.code || err.name})`);
         }

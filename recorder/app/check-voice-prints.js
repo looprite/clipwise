@@ -581,8 +581,96 @@ function main() {
         return [r === 0 && !fs.existsSync(vp.dir), String(r)];
     });
 
+    // --- SAA-275 part 1: several prints deleted at once -----------------------
+    const PAGE = fs.readFileSync(path.join(__dirname, 'voice-prints-page.js'), 'utf8');
+    const HTML = fs.readFileSync(path.join(__dirname, 'voice-prints.html'), 'utf8');
+    const handlerAt = SRC.indexOf("ipcMain.on('voice-prints:delete'");
+    const HANDLER = handlerAt >= 0 ? SRC.slice(handlerAt, SRC.indexOf("ipcMain.on('voice-prints:disable'", handlerAt)) : '';
+    // A page function, taken from the page's own text, as check-meetings.js does.
+    const pageFunction = (name) => {
+        const m = new RegExp(`\\n( *)function ${name}\\([\\s\\S]*?\\n\\1\\}\\n`).exec(PAGE);
+        if (!m) throw new Error(`${name} not found in voice-prints-page.js`);
+        return new Function(`${m[0]}\nreturn ${name};`)();
+    };
+    const P = (n) => `${String(n).repeat(8)}-${String(n).repeat(4)}-4${String(n).repeat(3)}-8${String(n).repeat(3)}-${String(n).repeat(12)}`;
+    // Five people with prints, and the member's own.
+    const fivePrints = () => {
+        const fx = fixture();
+        const vp = on(fx);
+        const ids = [1, 2, 3, 4, 5].map(P);
+        capture(fx, STEM1, { voices: ids.map((_, i) => v(i + 1, vector(500 + i))), guests: ids.map((_, i) => `Person ${i + 1}`),
+            voiceNames: ids.map((_, i) => ({ voiceIndex: i + 1, name: `Person ${i + 1}` })) });
+        vp.enrolFromMapping(STEM1, { voices: ids.map((personId, i) => ({ voiceIndex: i + 1, personId })), them: null });
+        fx.write(`host-print-${STEM2}.json`, { embedding: SELF });
+        vp.ingestHostPrint(STEM2);
+        return { fx, vp, ids };
+    };
+    add('48. deleteProfiles deletes the 3 picked of 5 in one call, from the encrypted store on disk; the other 2 and your own print stay', () => {
+        if (typeof open({ support: os.tmpdir(), outdir: os.tmpdir() }).deleteProfiles !== 'function') return [false, 'no deleteProfiles'];
+        const { vp, ids } = fivePrints();
+        const n = vp.deleteProfiles([ids[0], ids[2], ids[4]]);
+        const onDisk = JSON.parse(decrypt(fs.readFileSync(vp.profilesPath)));
+        const left = Object.keys(onDisk.people).sort();
+        return [n === 3 && JSON.stringify(left) === JSON.stringify([ids[1], ids[3]].sort()) && !!onDisk.self, JSON.stringify({ n, left, self: !!onDisk.self })];
+    });
+    add('49. control: ids with no print, and repeats, delete nothing more; the store is unchanged', () => {
+        if (typeof open({ support: os.tmpdir(), outdir: os.tmpdir() }).deleteProfiles !== 'function') return [false, 'no deleteProfiles'];
+        const { vp, ids } = fivePrints();
+        const before = fs.readFileSync(vp.profilesPath, 'utf8');
+        const n = vp.deleteProfiles([P(9), P(8)]);
+        const same = fs.readFileSync(vp.profilesPath, 'utf8') === before;
+        const twice = vp.deleteProfiles([ids[0], ids[0], P(9)]);
+        return [n === 0 && same && twice === 1 && Object.keys(vp.load().people).length === 4, JSON.stringify({ n, same, twice })];
+    });
+    add('50. your own print ("You") cannot be deleted through deleteProfiles, whatever id is sent', () => {
+        if (typeof open({ support: os.tmpdir(), outdir: os.tmpdir() }).deleteProfiles !== 'function') return [false, 'no deleteProfiles'];
+        const { vp } = fivePrints();
+        const n = vp.deleteProfiles(['self', '__proto__', 'constructor', 'You', '']);
+        const store = vp.load();
+        return [n === 0 && !!store.self && store.self.count === 1 && Object.keys(store.people).length === 5, JSON.stringify({ n, self: !!store.self, people: Object.keys(store.people).length })];
+    });
+    // True when every delete sender sends { personIds } and the handler reads
+    // only personIds. Run on the files as they are (51) and on altered copies (52).
+    const sendsOnlyPersonIds = (page, handler) => {
+        const senders = page.match(/ipcRenderer\.send\('voice-prints:delete'[^\n]*/g) || [];
+        return senders.length === 1 && senders[0].includes('{ personIds: Array.from(personIds) }')
+            && /del\.addEventListener\('click', \(\) => deletePrints\(\[personId\]\)\);/.test(page)
+            && /d\.addEventListener\('click', \(\) => deletePrints\(picked\)\);/.test(page)
+            && !/\{ personId \}/.test(page) && !/payload\.personId\b/.test(handler) && /payload\.personIds/.test(handler);
+    };
+    add('51. no sender uses personId: the row\'s Delete and "Delete N…" both send { personIds }, and main.js reads only personIds', () =>
+        [sendsOnlyPersonIds(PAGE, HANDLER), JSON.stringify(PAGE.match(/ipcRenderer\.send\('voice-prints:delete'[^\n]*/g) || [])]);
+    add('52. control: the same scan returns false on a page copy whose row Delete sends { personId }, and on a handler copy reading payload.personId', () => {
+        const page = PAGE.replace('deletePrints([personId])', "ipcRenderer.send('voice-prints:delete', { personId })");
+        const handler = HANDLER.replace('const sent = payload && Array.isArray(payload.personIds)',
+            "const one = payload && typeof payload.personId === 'string' ? [payload.personId] : [];\n        const sent = payload && Array.isArray(payload.personIds)");
+        const pageAltered = page !== PAGE;
+        const handlerAltered = handler !== HANDLER;
+        const pageCaught = pageAltered && sendsOnlyPersonIds(page, HANDLER) === false;
+        const handlerCaught = handlerAltered && sendsOnlyPersonIds(PAGE, handler) === false;
+        return [pageCaught && handlerCaught, JSON.stringify({ pageAltered, pageCaught, handlerAltered, handlerCaught })];
+    });
+    add('53. main.js (text): one confirmation for one or several, Cancel the default; several say "Delete these N voice prints?" with the names (first 10, then "and N more") and the current detail line; deleted only after Delete', () => {
+        const ok = (HANDLER.match(/defaultId: 0, cancelId: 0,/g) || []).length === 2
+            && HANDLER.includes('message: `Delete these ${picked.length} voice prints?`,')
+            && HANDLER.includes("const detail = 'Clipwise stops comparing new calls against it. A new print is kept the next time you name this person on a call.';")
+            && HANDLER.includes("detail: `${confirmationList(picked.map((p) => `• ${p.name || 'Someone (no name kept)'}`)).join('\\n')}\\n\\n${detail}`,")
+            && HANDLER.indexOf('if (response !== 1) return;') > HANDLER.indexOf('dialog.showMessageBox(')
+            && HANDLER.indexOf('deleteProfiles(') > HANDLER.indexOf('if (response !== 1) return;');
+        return [ok, `${HANDLER.length} chars`];
+    });
+    add('54. the page: a checkbox on each person\'s row (not on "You"), and a bar that shows "N selected", "Delete N…" and Clear only while some are checked', () => {
+        let sb = null;
+        try { sb = pageFunction('selbarItems'); } catch (err) { return [false, err.message]; }
+        const ok = JSON.stringify(sb(0)) === '[]' && JSON.stringify(sb(3)) === '["count","delete","clear"]'
+            && PAGE.includes('d.textContent = `Delete ${picked.size}…`;')
+            && /if \(personId\) \{\s*const box = document\.createElement\('input'\);\s*box\.type = 'checkbox';/.test(PAGE)
+            && HTML.includes('<div id="selbar" hidden></div>') && HTML.includes('#selbar[hidden] { display: none; }');
+        return [ok, JSON.stringify([sb(0), sb(3)])];
+    });
+
     for (const [name, fn] of cases) {
-        const needsModule = !/^(2[2-5]|39|4[0-2])\./.test(name);
+        const needsModule = !/^(2[2-5]|39|4[0-2]|5[1-4])\./.test(name);
         if (needsModule && !mod) { check(name, false, why); continue; }
         let result;
         try { result = fn(); } catch (err) { result = [false, `threw ${err.message}`]; }
