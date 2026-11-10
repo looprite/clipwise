@@ -4,11 +4,11 @@ Before you record
 
 Clipwise records your calls on your Mac. No bot joins the meeting.
 
-It records two tracks: your microphone, and the sound the call plays through your Mac. Your Mac turns the audio into a transcript. The transcript goes to your team’s server, which pulls out the decisions, commitments and questions from the call so you can ask about them in Claude.
+It records two tracks: your microphone, and the sound the call plays through your Mac. Your Mac turns the audio into a transcript. After each call, use the Clipwise connector in Claude to ask for decisions, commitments and questions.
 
 ## Telling the people on your calls
 
-You are responsible for telling the people on your calls that you are recording. Some places require everyone on the call to agree before you record. Follow the law where you and they are.
+You are responsible for telling the people on your calls that you are recording. Some locations require everyone on the call to agree before you record. Follow the law where you and they are.
 
 Clipwise does not announce itself on the call. Nobody else on the call can see that it is running.
 
