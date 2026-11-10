@@ -18,7 +18,7 @@ When you start recording, Clipwise shows a short line you can say to let everyon
 
 The audio of each call stays on your Mac until you delete it. It is not uploaded.
 
-Turn on FileVault so the recordings are encrypted if your Mac is lost. If you back up your Mac, keep those backups encrypted too: they contain the recordings. Clipwise warns you during setup if FileVault is off. To turn it on, open System Settings, choose Privacy & Security, scroll to FileVault and click Turn On.
+Turn on FileVault so the recordings are encrypted if your Mac is lost. If you back up your Mac, keep those backups encrypted too: they contain the recordings. Clipwise warns you during setup if FileVault is off.
 
 A transcript you save or export is your own copy. Deleting the call in Clipwise does not delete it.
 
@@ -36,7 +36,7 @@ After each call you mark it as work or personal. A personal call is never shown 
 
 During each call, Clipwise compares the voices on your microphone with yours, so it only credits you with what you said.
 
-Recognize voices is optional and off by default. If you turn it on, Clipwise keeps a voice print for people you name, so it can name them on later calls. It starts naming someone only once it’s reliable. Only keep voice prints for people you talk to often. A print just saves you naming them after each call.
+Recognize voices is optional and off by default. If you turn it on, Clipwise keeps a voice print for people you name, so it can name them on later calls. It starts naming someone only once it’s reliable.
 
 Every voice print, yours included, stays on this Mac and is never uploaded. You can delete any one print. Turning Recognize voices off deletes them all; your recordings aren’t affected.
 
@@ -46,7 +46,7 @@ If someone in the room with you spoke on the call through your microphone, tick 
 
 When the box is ticked, nothing on your microphone for that call is credited to you, and Clipwise doesn’t try to work out who else spoke. Those lines show as Unattributed, and no commitments are pinned on you from them. Your voice print stays as it is; this call just doesn’t add to it.
 
-If you don’t tick the box, Clipwise assumes you were alone. If you forgot, open Recent meetings within 7 days of the call, choose ⋯ then Change attendees…, and tick it there. This works only for a call where you answered the window, not one you skipped.
+If you don’t tick the box, Clipwise assumes you were alone.
 
 ## Who else processes your calls
 

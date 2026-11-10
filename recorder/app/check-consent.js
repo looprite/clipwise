@@ -280,6 +280,12 @@ const CASES = [
         return n.version === 2 && consent.noticeAgreeable(n)
             && n.blocks.every((b) => ['h2', 'ul', 'p'].includes(b.tag))
             && texts.every((t) => typeof t === 'string' && t.length > 0 && !/['"<>]/.test(t) && !/^(## |- )/.test(t)); }],
+    // Instructions live in the setup guide, not the full notice (SAA-280, 2026-11-10).
+    ['notice v2: the full notice holds no setup instructions: none of "System Settings", "Change attendees", "Only keep voice prints"', () => {
+        const n = consent.readNotice(2);
+        const text = [n.title, ...n.blocks.flatMap((b) => (b.tag === 'ul' ? b.items : [b.text]))].join('\n');
+        return n.version === 2 && n.blocks.length > 0
+            && ['System Settings', 'Change attendees', 'Only keep voice prints'].every((s) => !text.includes(s)); }],
     ['notice v2: the v1 file is still in the repo, unchanged (v1 control above), beside the v2 file', () =>
         fs.existsSync(path.join(__dirname, 'notice', 'recording-notice-v1.txt'))
         && fs.existsSync(path.join(__dirname, 'notice', 'recording-notice-v2.txt'))],

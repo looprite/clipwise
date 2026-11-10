@@ -50,7 +50,9 @@ If FileVault is off, the setup window shows a red line: *"FileVault is off. Clip
 To turn it on:
 
 1. Click **Open System Settings** in that red line. It opens FileVault's page.
-2. Click to turn FileVault on and follow macOS's steps. [CHECK: macOS's button and step names]
+2. Click to turn FileVault on and follow macOS's steps.
+
+You can also turn it on at any time, during setup or after: open System Settings, choose **Privacy & Security**, scroll to **FileVault** and click **Turn On**. [CHECK: macOS's button and step names]
 
 ## 6. Connect Claude
 
