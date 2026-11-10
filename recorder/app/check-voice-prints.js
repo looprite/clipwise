@@ -85,6 +85,18 @@ function main() {
 
     const open = (fx) => mod.createVoicePrints({ supportDir: fx.support, outdir: fx.outdir, encrypt, decrypt });
     const on = (fx) => { const vp = open(fx); vp.enable(mod.STATEMENT_VERSION); return vp; };
+    // A first qualifying call for each person, through enrolFromMapping on its
+    // own stem (SAA-275 part 2): a print is kept from the second call, so a case
+    // about what a call does to a print needs one before it. Its voices are
+    // unrelated to every other vector here, and no print keeps them. Before the
+    // tally (66e367e, no tallyPath) one call already made a print, so there it
+    // does nothing and those cases run as they always did.
+    const STEM0 = '2026-10-30T09-00-00Z';
+    const firstCall = (fx, vp, ...ids) => {
+        if (!vp.tallyPath) return null;
+        capture(fx, STEM0, { voices: ids.map((_, i) => v(i + 1, vector(900 + i))), guests: ids.map((_, i) => `Earlier ${i + 1}`) });
+        return vp.enrolFromMapping(STEM0, { voices: ids.map((personId, i) => ({ voiceIndex: i + 1, personId })), them: null });
+    };
 
     add('1. off by default: no setting file means off, and enrolling writes nothing', () => {
         const fx = fixture();
@@ -96,6 +108,7 @@ function main() {
     add('2. control: turned on, the same mapping enrols Ann (count 1, her name kept)', () => {
         const fx = fixture();
         const vp = on(fx);
+        firstCall(fx, vp, P_ANN);
         capture(fx, STEM1, { voices: [v(1, ANN)], guests: ['Ann Example'], voiceNames: [{ voiceIndex: 1, name: 'Ann Example' }] });
         const r = vp.enrolFromMapping(STEM1, { voices: [{ voiceIndex: 1, personId: P_ANN }], them: null });
         const list = vp.listProfiles().people;
@@ -104,6 +117,7 @@ function main() {
     add('3. a second call averages the normalised contributions (count 2), and the profile stays a unit vector close to both', () => {
         const fx = fixture();
         const vp = on(fx);
+        firstCall(fx, vp, P_ANN);
         capture(fx, STEM1, { voices: [v(1, annCall(1))], guests: ['Ann Example'], voiceNames: [{ voiceIndex: 1, name: 'Ann Example' }] });
         capture(fx, STEM2, { voices: [v(1, annCall(2), 200)], guests: ['Ann Example'], voiceNames: [{ voiceIndex: 1, name: 'Ann Example' }] });
         vp.enrolFromMapping(STEM1, { voices: [{ voiceIndex: 1, personId: P_ANN }], them: null });
@@ -117,6 +131,7 @@ function main() {
     add('4. the same mapping again changes nothing (count stays 1)', () => {
         const fx = fixture();
         const vp = on(fx);
+        firstCall(fx, vp, P_ANN);
         capture(fx, STEM1, { voices: [v(1, ANN)], guests: ['Ann Example'] });
         const m = { voices: [{ voiceIndex: 1, personId: P_ANN }], them: null };
         vp.enrolFromMapping(STEM1, m);
@@ -127,6 +142,7 @@ function main() {
     add('5. a correction that unnames a voice takes its contribution out; control: the other voice stays', () => {
         const fx = fixture();
         const vp = on(fx);
+        firstCall(fx, vp, P_ANN, P_BOB);
         capture(fx, STEM1, { voices: [v(1, ANN), v(2, BOB)], guests: ['Ann Example', 'Bob Example'] });
         vp.enrolFromMapping(STEM1, { voices: [{ voiceIndex: 1, personId: P_ANN }, { voiceIndex: 2, personId: P_BOB }], them: null });
         const both = Object.keys(vp.load().people).sort().join(',');
@@ -153,6 +169,7 @@ function main() {
     add('8. control: `them` on a call diarize heard as one voice, one guest named, is enrolled', () => {
         const fx = fixture();
         const vp = on(fx);
+        firstCall(fx, vp, P_ANN);
         capture(fx, STEM1, { voices: [v(1, ANN)], guests: ['Ann Example'] });
         const r = vp.enrolFromMapping(STEM1, { voices: [], them: P_ANN });
         const p = vp.load().people[P_ANN];
@@ -171,6 +188,7 @@ function main() {
     add('10. control: a voice unlike the member\'s own print, with a person id, is enrolled', () => {
         const fx = fixture();
         const vp = on(fx);
+        firstCall(fx, vp, P_ANN);
         fx.write(`host-print-${STEM1}.json`, { model: 'm', modelRevision: 'r', seconds: 20, embedding: SELF });
         vp.ingestHostPrint(STEM1);
         capture(fx, STEM2, { voices: [v(1, ANN)], guests: ['Ann Example'] });
@@ -197,6 +215,7 @@ function main() {
     add('13. deleting one profile removes it; control: the other stays', () => {
         const fx = fixture();
         const vp = on(fx);
+        firstCall(fx, vp, P_ANN, P_BOB);
         capture(fx, STEM1, { voices: [v(1, ANN), v(2, BOB)], guests: ['Ann Example', 'Bob Example'] });
         vp.enrolFromMapping(STEM1, { voices: [{ voiceIndex: 1, personId: P_ANN }, { voiceIndex: 2, personId: P_BOB }], them: null });
         const ok = vp.deleteProfile(P_ANN);
@@ -226,6 +245,7 @@ function main() {
     add('16. deleting a recording removes its contributions (self too) and its score lines; control: another recording\'s stay', () => {
         const fx = fixture();
         const vp = on(fx);
+        firstCall(fx, vp, P_ANN);
         fx.write(`host-print-${STEM1}.json`, { embedding: SELF });
         vp.ingestHostPrint(STEM1);
         capture(fx, STEM1, { voices: [v(1, annCall(1))], guests: ['Ann Example'] });
@@ -236,7 +256,7 @@ function main() {
         const store = vp.load();
         const lines = vp.readScoreLines();
         return [r.contributions === 2 && store.self === null && store.people[P_ANN].count === 1 && store.people[P_ANN].sources[0].stem === STEM2
-            && lines.length > 0 && lines.every((l) => l.stem === STEM2), JSON.stringify({ r, lines: lines.map((l) => l.stem) })];
+            && lines.some((l) => l.stem === STEM2) && !lines.some((l) => l.stem === STEM1), JSON.stringify({ r, lines: lines.map((l) => l.stem) })];
     });
     add('17. the folder is mode 700, and the setting, store and score log 600', () => {
         const fx = fixture();
@@ -260,6 +280,7 @@ function main() {
         if (disk) return disk;
         const fx = fixture();
         const vp = on(fx);
+        firstCall(fx, vp, P_ANN);
         fx.write(`host-print-${STEM3}.json`, { embedding: SELF });
         vp.ingestHostPrint(STEM3);
         capture(fx, STEM1, { voices: [v(1, ANN)], guests: ['Ann Example'], voiceNames: [{ voiceIndex: 1, name: 'Ann Example' }] });
@@ -439,6 +460,7 @@ function main() {
         const reasons = vp.readScoreLines().filter((l) => l.stem === STEM1).map((l) => l.reason);
         fx.write(`diarize-${STEM3}.json`, diarizeDoc([fullVoice(1, ANN)]));
         fx.write(`identity-${STEM3}.json`, { self: { name: 'Check Host' }, guests: [{ name: 'Ann Example' }] });
+        firstCall(fx, vp, P_ANN);
         const r3 = vp.enrolFromMapping(STEM3, { voices: [{ voiceIndex: 1, personId: P_ANN }], them: null });
         return [r1.enrolled === 0 && r1.refused === 2 && reasons.length === 2 && reasons.every((x) => x === 'no_embedding') && r3.enrolled === 1, JSON.stringify({ r1, reasons, r3 })];
     });
@@ -477,7 +499,7 @@ function main() {
         const r = mod.runRemovalWhileOff(() => open(fx), { reason: 'launch', log: (l) => lines.push(l) });
         const second = [];
         mod.runRemovalWhileOff(() => open(fx), { reason: 'launch', log: (l) => second.push(l) });
-        const want = '[clipwise-recorder] voice prints off (launch): store none, score log none, host prints 1, embeddings removed from 3 of 3 diarize file(s), 0 skipped, 0 failed';
+        const want = '[clipwise-recorder] voice prints off (launch): store none, score log none, tally none, host prints 1, embeddings removed from 3 of 3 diarize file(s), 0 skipped, 0 failed';
         return [lines.length === 1 && lines[0] === want && !lines[0].includes('/') && !lines[0].includes(STEM1) && second.length === 0 && r.embeddings.changed === 3, JSON.stringify({ lines, second })];
     });
     add('37. a reason the pass does not know is logged as "other"; control: the three it knows are logged as given', () => {
@@ -598,6 +620,7 @@ function main() {
         const fx = fixture();
         const vp = on(fx);
         const ids = [1, 2, 3, 4, 5].map(P);
+        firstCall(fx, vp, ...ids);
         capture(fx, STEM1, { voices: ids.map((_, i) => v(i + 1, vector(500 + i))), guests: ids.map((_, i) => `Person ${i + 1}`),
             voiceNames: ids.map((_, i) => ({ voiceIndex: i + 1, name: `Person ${i + 1}` })) });
         vp.enrolFromMapping(STEM1, { voices: ids.map((personId, i) => ({ voiceIndex: i + 1, personId })), them: null });
@@ -650,11 +673,13 @@ function main() {
         const handlerCaught = handlerAltered && sendsOnlyPersonIds(PAGE, handler) === false;
         return [pageCaught && handlerCaught, JSON.stringify({ pageAltered, pageCaught, handlerAltered, handlerCaught })];
     });
-    add('53. main.js (text): one confirmation for one or several, Cancel the default; several say "Delete these N voice prints?" with the names (first 10, then "and N more") and the current detail line; deleted only after Delete', () => {
+    add('53. main.js (text): one confirmation for one or several, Cancel the default; one keeps its detail line; several say "Delete these N voice prints?" with the names (first 10, then "and N more") and their own detail line; deleted only after Delete', () => {
         const ok = (HANDLER.match(/defaultId: 0, cancelId: 0,/g) || []).length === 2
             && HANDLER.includes('message: `Delete these ${picked.length} voice prints?`,')
-            && HANDLER.includes("const detail = 'Clipwise stops comparing new calls against it. A new print is kept the next time you name this person on a call.';")
-            && HANDLER.includes("detail: `${confirmationList(picked.map((p) => `• ${p.name || 'Someone (no name kept)'}`)).join('\\n')}\\n\\n${detail}`,")
+            && HANDLER.includes("const detail = 'Clipwise stops comparing new calls against it. A new print is kept if you name this person on two more calls.';")
+            && HANDLER.includes("const detailMany = 'Clipwise stops comparing new calls against them. A new print is kept for anyone you name on two more calls.';")
+            && /message: picked\[0\]\.name \? `Delete \$\{picked\[0\]\.name\}’s voice print\?` : 'Delete this voice print\?',\s*detail,\s*\}/.test(HANDLER)
+            && HANDLER.includes("detail: `${confirmationList(picked.map((p) => `• ${p.name || 'Someone (no name kept)'}`)).join('\\n')}\\n\\n${detailMany}`,")
             && HANDLER.indexOf('if (response !== 1) return;') > HANDLER.indexOf('dialog.showMessageBox(')
             && HANDLER.indexOf('deleteProfiles(') > HANDLER.indexOf('if (response !== 1) return;');
         return [ok, `${HANDLER.length} chars`];
@@ -669,8 +694,163 @@ function main() {
         return [ok, JSON.stringify([sb(0), sb(3)])];
     });
 
+    // --- SAA-275 part 2: a print from the second qualifying call ---------------
+    const hasTally = () => !!mod && typeof open({ support: os.tmpdir(), outdir: os.tmpdir() }).tallyPath === 'string';
+    const tallyOf = (vp) => (fs.existsSync(vp.tallyPath) ? JSON.parse(fs.readFileSync(vp.tallyPath, 'utf8')) : null);
+    const annMap = { voices: [{ voiceIndex: 1, personId: P_ANN }], them: null };
+    const annOn = (fx, stem, vec = ANN) => capture(fx, stem, { voices: [v(1, vec)], guests: ['Ann Example'], voiceNames: [{ voiceIndex: 1, name: 'Ann Example' }] });
+
+    // Case A's steps, on any copy of the module: a print a build before the
+    // tally made from one call (store written as that build wrote it, no
+    // tally.json), then that call mapped again with the same names.
+    const preTallyRemap = (m) => {
+        const fx = fixture();
+        const vp = m.createVoicePrints({ supportDir: fx.support, outdir: fx.outdir, encrypt, decrypt });
+        vp.enable(m.STATEMENT_VERSION);
+        annOn(fx, STEM1);
+        const vec = m.normalise(ANN);
+        fs.writeFileSync(vp.profilesPath, encrypt(JSON.stringify({ version: 1, self: null,
+            people: { [P_ANN]: { name: 'Ann Example', embedding: vec, count: 1, sources: [{ stem: STEM1, voice: 1, vec }] } } })), { mode: 0o600 });
+        const hadTallyFile = fs.existsSync(vp.tallyPath);
+        vp.enrolFromMapping(STEM1, annMap);
+        const p = vp.load().people[P_ANN];
+        return { hadTallyFile, exists: !!p, count: p ? p.count : 0, tally: tallyOf(vp) };
+    };
+    add('55. A: a print made before the tally from one call (no tally.json), its call mapped again with the same names: the print is kept, count 1', () => {
+        if (!hasTally()) return [false, 'no tally'];
+        const r = preTallyRemap(mod);
+        return [!r.hadTallyFile && r.exists && r.count === 1 && JSON.stringify(r.tally.people[P_ANN]) === JSON.stringify([STEM1]), JSON.stringify(r)];
+    });
+    add('56. control for A: the same steps on a copy of voice-prints.js without the hadPrint guard lose the print', () => {
+        if (!hasTally()) return [false, 'no tally'];
+        const src = fs.readFileSync(path.join(__dirname, 'voice-prints.js'), 'utf8');
+        const cut = src.replace('!hadPrint.has(e.personId) && ', '');
+        if (cut === src) return [false, 'guard not found in voice-prints.js'];
+        const m = { exports: {} };
+        new Function('require', 'module', 'exports', '__dirname', cut)(require, m, m.exports, __dirname);
+        const r = preTallyRemap(m.exports);
+        return [!r.exists, JSON.stringify(r)];
+    });
+    add('57. B: a print made under the new rule at call 2, then call 2 corrected so it no longer names them: no print, tally of 1', () => {
+        if (!hasTally()) return [false, 'no tally'];
+        const fx = fixture();
+        const vp = on(fx);
+        annOn(fx, STEM1, annCall(1));
+        annOn(fx, STEM2, annCall(2));
+        vp.enrolFromMapping(STEM1, annMap);
+        const after1 = !!vp.load().people[P_ANN];
+        vp.enrolFromMapping(STEM2, annMap);
+        const p2 = vp.load().people[P_ANN];
+        vp.enrolFromMapping(STEM2, { voices: [], them: null });
+        const p3 = vp.load().people[P_ANN];
+        const t = tallyOf(vp);
+        return [!after1 && !!p2 && p2.count === 1 && p2.sources[0].stem === STEM2 && !p3 && JSON.stringify(t.people[P_ANN]) === JSON.stringify([STEM1]),
+            JSON.stringify({ after1, p2: p2 && p2.count, p3: !!p3, tally: t })];
+    });
+    add('58. one qualifying call: no print, and tally.json (600) holds only { version, people: { id: [stem] } }: no name, no numbers', () => {
+        if (!hasTally()) return [false, 'no tally'];
+        const fx = fixture();
+        const vp = on(fx);
+        annOn(fx, STEM1);
+        const r = vp.enrolFromMapping(STEM1, annMap);
+        const raw = fs.readFileSync(vp.tallyPath, 'utf8');
+        const mode = fs.statSync(vp.tallyPath).mode & 0o777;
+        const exact = JSON.stringify(JSON.parse(raw)) === JSON.stringify({ version: 1, people: { [P_ANN]: [STEM1] } });
+        return [r.enrolled === 0 && r.deferred === 1 && !vp.load().people[P_ANN] && exact && mode === 0o600 && !raw.includes('Ann') && !/\d\.\d/.test(raw),
+            JSON.stringify({ r, raw, mode: mode.toString(8) })];
+    });
+    add('59. the same call mapped twice counts once: still no print, tally of 1', () => {
+        if (!hasTally()) return [false, 'no tally'];
+        const fx = fixture();
+        const vp = on(fx);
+        annOn(fx, STEM1);
+        vp.enrolFromMapping(STEM1, annMap);
+        vp.enrolFromMapping(STEM1, annMap);
+        const t = tallyOf(vp);
+        return [!vp.load().people[P_ANN] && JSON.stringify(t.people[P_ANN]) === JSON.stringify([STEM1]), JSON.stringify(t)];
+    });
+    add('60. a print that exists grows from one new call (count 1 -> 2)', () => {
+        if (!hasTally()) return [false, 'no tally'];
+        const fx = fixture();
+        const vp = on(fx);
+        annOn(fx, STEM1, annCall(1));
+        annOn(fx, STEM2, annCall(2));
+        annOn(fx, STEM3, annCall(3));
+        vp.enrolFromMapping(STEM1, annMap);
+        vp.enrolFromMapping(STEM2, annMap);
+        const before = vp.load().people[P_ANN].count;
+        vp.enrolFromMapping(STEM3, annMap);
+        const after = vp.load().people[P_ANN].count;
+        return [before === 1 && after === 2, `${before} -> ${after}`];
+    });
+    add('61. turning off deletes tally.json; and the launch pass while off deletes one left by a turn-off cut short', () => {
+        if (!hasTally()) return [false, 'no tally'];
+        const fx = fixture();
+        const vp = on(fx);
+        annOn(fx, STEM1);
+        vp.enrolFromMapping(STEM1, annMap);
+        const had = fs.existsSync(vp.tallyPath);
+        const gone = vp.disable();
+        const afterOff = fs.existsSync(vp.tallyPath);
+        // Cut short: the setting says off, but the tally is still there. The
+        // turn-off above stripped STEM1's embeddings, so its files are written again.
+        vp.enable(mod.STATEMENT_VERSION);
+        annOn(fx, STEM1);
+        vp.enrolFromMapping(STEM1, annMap);
+        fs.writeFileSync(vp.settingPath, JSON.stringify({ enabled: false, turnedOffAt: '2026-11-10T00:00:00.000Z' }) + '\n');
+        const left = fs.existsSync(vp.tallyPath);
+        const lines = [];
+        mod.runRemovalWhileOff(() => open(fx), { reason: 'launch', log: (l) => lines.push(l) });
+        const afterPass = fs.existsSync(vp.tallyPath);
+        return [had && gone.tally === true && !afterOff && left && !afterPass && lines.length === 1 && lines[0].includes('tally deleted'),
+            JSON.stringify({ had, goneTally: gone.tally, afterOff, left, afterPass, lines })];
+    });
+    add('62. deleting a recording takes its call out of the tally; control: the other call stays', () => {
+        if (!hasTally()) return [false, 'no tally'];
+        const fx = fixture();
+        const vp = on(fx);
+        annOn(fx, STEM1, annCall(1));
+        annOn(fx, STEM2, annCall(2));
+        vp.enrolFromMapping(STEM1, annMap);
+        vp.enrolFromMapping(STEM2, annMap);
+        const r = vp.removeRecording(STEM1);
+        const t = tallyOf(vp);
+        return [r.tallied === 1 && JSON.stringify(t.people[P_ANN]) === JSON.stringify([STEM2]), JSON.stringify({ r, t })];
+    });
+    add('63. deleting a print clears that person\'s tally: their next call alone makes no new print; control: another person\'s tally stays', () => {
+        if (!hasTally()) return [false, 'no tally'];
+        const fx = fixture();
+        const vp = on(fx);
+        const both = (stem, a, b) => capture(fx, stem, { voices: [v(1, a), v(2, b)], guests: ['Ann Example', 'Bob Example'] });
+        const map2 = { voices: [{ voiceIndex: 1, personId: P_ANN }, { voiceIndex: 2, personId: P_BOB }], them: null };
+        both(STEM1, annCall(1), BOB);
+        both(STEM2, annCall(2), BOB);
+        vp.enrolFromMapping(STEM1, map2);
+        vp.enrolFromMapping(STEM2, map2);
+        const n = vp.deleteProfiles([P_ANN]);
+        const t = tallyOf(vp);
+        annOn(fx, STEM3, annCall(3));
+        vp.enrolFromMapping(STEM3, annMap);
+        const again = !!vp.load().people[P_ANN];
+        return [n === 1 && !(P_ANN in t.people) && JSON.stringify(t.people[P_BOB]) === JSON.stringify([STEM1, STEM2]) && !again,
+            JSON.stringify({ n, t, again })];
+    });
+    add('64. the wording (text): empty list, single and several delete detail, and member-setup.md lines 114 and 117', () => {
+        const DOC = fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'member-setup.md'), 'utf8');
+        const ok = PAGE.includes("e.textContent = 'None yet. A print is kept once you name someone on two calls.';")
+            && HANDLER.includes("const detail = 'Clipwise stops comparing new calls against it. A new print is kept if you name this person on two more calls.';")
+            && HANDLER.includes("const detailMany = 'Clipwise stops comparing new calls against them. A new print is kept for anyone you name on two more calls.';")
+            && DOC.includes("A print is kept once you've named someone on two calls.")
+            && DOC.includes("It keeps a voice print for you, and for each person you name once you've named them on two calls, on this Mac only, and never uploads them.")
+            && !DOC.includes('It keeps a voice print for you and for each person you name, on this Mac only')
+            && !DOC.includes('A print is kept as soon as you name someone on one call')
+            && !PAGE.includes('A print is kept once you name someone on a call.')
+            && !SRC.includes('A new print is kept the next time you name this person on a call.');
+        return [ok, ''];
+    });
+
     for (const [name, fn] of cases) {
-        const needsModule = !/^(2[2-5]|39|4[0-2]|5[1-4])\./.test(name);
+        const needsModule = !/^(2[2-5]|39|4[0-2]|5[1-4]|64)\./.test(name);
         if (needsModule && !mod) { check(name, false, why); continue; }
         let result;
         try { result = fn(); } catch (err) { result = [false, `threw ${err.message}`]; }

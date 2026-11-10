@@ -24,6 +24,13 @@
 //                  says someone else spoke into the member's mic
 //   scores.jsonl   the matcher's log (voice-match.js), plain: person ids,
 //                  scores and stems only, never a name or an embedding
+//   tally.json     which calls each person qualified on (SAA-275 part 2),
+//                  plain: { version, people: { <personId>: [<stem>, ...] } },
+//                  person ids and stems only, never a name or an embedding.
+//                  A person gets a print once they have qualified on
+//                  PRINT_AFTER_CALLS calls; a print that already exists keeps
+//                  growing call by call. Deleting a person's print clears
+//                  their tally. Deleted with everything else when turned off.
 //
 // Nothing in this folder is ever uploaded. The server only ever sends person
 // ids back (POST /captures' `people`), and the capture body is built from the
@@ -54,6 +61,10 @@ const STATEMENT_VERSION = 1;
 // a tap voice this close to the member's own print is the member.
 const SELF_MATCH_CUTOFF = 0.55;
 const STORE_VERSION = 1;
+// A person's print is kept from their second qualifying call (SAA-275 part 2,
+// decided 2026-11-10): a second meeting is the first sign someone recurs.
+const PRINT_AFTER_CALLS = 2;
+const TALLY_VERSION = 1;
 const STEM = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$/;
 
 function norm(v) {
@@ -219,8 +230,8 @@ function runRemovalWhileOff(getStore, { reason, stem = null, skip, log }) {
         const r = getStore().removeWhileOff({ stem, skip });
         if (r.skipped) return r;
         const e = r.embeddings;
-        if (r.profiles || r.scores || r.hostPrints || e.changed || e.skipped || e.failed) {
-            log(`[clipwise-recorder] voice prints off (${why}): store ${r.profiles ? 'deleted' : 'none'}, score log ${r.scores ? 'deleted' : 'none'}, host prints ${r.hostPrints}, `
+        if (r.profiles || r.scores || r.tally || r.hostPrints || e.changed || e.skipped || e.failed) {
+            log(`[clipwise-recorder] voice prints off (${why}): store ${r.profiles ? 'deleted' : 'none'}, score log ${r.scores ? 'deleted' : 'none'}, tally ${r.tally ? 'deleted' : 'none'}, host prints ${r.hostPrints}, `
                 + `embeddings removed from ${e.changed} of ${e.files} diarize file(s), ${e.skipped} skipped, ${e.failed} failed`);
         }
         return r;
@@ -238,6 +249,7 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
     const settingPath = path.join(dir, 'setting.json');
     const profilesPath = path.join(dir, 'profiles.json');
     const scoresPath = path.join(dir, 'scores.jsonl');
+    const tallyPath = path.join(dir, 'tally.json');
 
     const ensureDir = () => {
         fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -303,6 +315,31 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
         }
     }
 
+    // The tally (SAA-275 part 2): { <personId>: [<stem>, ...] }. A missing or
+    // unreadable file is an empty tally: at worst a person waits one call
+    // more for a print. Written whole, 600; removed when it empties.
+    function readTally() {
+        try {
+            const t = JSON.parse(fs.readFileSync(tallyPath, 'utf8'));
+            if (!t || t.version !== TALLY_VERSION || !t.people || typeof t.people !== 'object') return {};
+            const out = {};
+            for (const [id, stems] of Object.entries(t.people)) {
+                if (isPersonId(id) && Array.isArray(stems)) out[id] = stems.filter((s) => typeof s === 'string' && STEM.test(s));
+            }
+            return out;
+        } catch {
+            return {};
+        }
+    }
+    function writeTally(people) {
+        const kept = Object.fromEntries(Object.entries(people).filter(([, stems]) => stems.length > 0));
+        if (Object.keys(kept).length === 0) {
+            try { fs.unlinkSync(tallyPath); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+            return;
+        }
+        writePrivate(tallyPath, JSON.stringify({ version: TALLY_VERSION, people: kept }) + '\n');
+    }
+
     // Removes every host-print-<stem>.json in the recordings folder, or only
     // the given stem's.
     function removeHostPrints(stem = null) {
@@ -316,14 +353,14 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
         return removed;
     }
 
-    // With prints off: the store, the score log, waiting host prints and the
-    // diarize files' embeddings are deleted. With a stem, only that capture's
-    // host print and embeddings. Throws only if the store or score log is
-    // there and cannot be deleted.
+    // With prints off: the store, the score log, the tally, waiting host prints
+    // and the diarize files' embeddings are deleted. With a stem, only that capture's
+    // host print and embeddings. Throws only if the store, score log or tally
+    // is there and cannot be deleted.
     function removeAllOff({ stem = null, skip = () => false } = {}) {
-        const gone = { profiles: false, scores: false, hostPrints: 0, embeddings: null };
+        const gone = { profiles: false, scores: false, tally: false, hostPrints: 0, embeddings: null };
         if (!stem) {
-            for (const [key, file] of [['profiles', profilesPath], ['scores', scoresPath]]) {
+            for (const [key, file] of [['profiles', profilesPath], ['scores', scoresPath], ['tally', tallyPath]]) {
                 try { fs.unlinkSync(file); gone[key] = true; } catch (err) { if (err.code !== 'ENOENT') throw err; }
             }
         }
@@ -334,7 +371,7 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
 
     // Turning prints off: the setting says off first, so a turn-off cut short
     // anywhere after it is finished by removeWhileOff at the next launch; then
-    // every print, the score log, any waiting host print and each diarize
+    // every print, the score log, the tally, any waiting host print and each diarize
     // file's embeddings are deleted. skip as removeDiarizeEmbeddings's.
     function disable({ skip } = {}) {
         writePrivate(settingPath, JSON.stringify({ enabled: false, turnedOffAt: now().toISOString() }) + '\n');
@@ -412,6 +449,10 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
             const entry = (voiceNames && Array.isArray(voiceNames.voices) ? voiceNames.voices : []).find((v) => v && v.voiceIndex === e.voiceIndex);
             return cleanName(entry && entry.name);
         };
+        // Who had a print before this capture's contributions come out: a print
+        // that exists, from before the tally or not, is kept and keeps growing
+        // (SAA-275 part 2), even when this capture was its only call.
+        const hadPrint = new Set(Object.keys(store.people));
         let removed = 0;
         for (const [pid, p] of Object.entries(store.people)) {
             const before = p.sources.length;
@@ -420,19 +461,32 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
             if (p.sources.length === 0) delete store.people[pid];
             else withTotals(p);
         }
+        // The tally, replaced for this capture as the prints are: a correction
+        // that unnames someone takes this call out of their count too.
+        const tally = readTally();
+        for (const pid of Object.keys(tally)) tally[pid] = tally[pid].filter((s) => s !== stem);
+        // A print is kept for someone who had one, or once this call makes
+        // PRINT_AFTER_CALLS for them. Otherwise this call is only counted: no
+        // voice data is kept for it.
+        let deferred = 0;
         for (const e of enrol) {
+            const calls = tally[e.personId] || [];
+            if (!calls.includes(stem)) calls.push(stem);
+            tally[e.personId] = calls;
+            if (!hadPrint.has(e.personId) && calls.length < PRINT_AFTER_CALLS) { deferred++; continue; }
             const p = store.people[e.personId] || { name: null, sources: [] };
             p.sources.push({ stem, voice: e.voice, vec: e.vec });
             p.name = nameFor(e) || p.name;
             store.people[e.personId] = withTotals(p);
         }
         save(store);
+        writeTally(tally);
         const at = now().toISOString();
         appendScoreLines([
             ...enrol.map((e) => ({ kind: 'confirmed', at, stem, voice: e.voiceIndex, track: e.voice === 'them' ? 'them' : 'voice', personId: e.personId })),
             ...refused.map((r) => ({ kind: 'confirmed', at, stem, voice: r.voice, personId: null, reason: r.reason })),
         ]);
-        return { enrolled: enrol.length, refused: refused.length, removed };
+        return { enrolled: enrol.length - deferred, deferred, refused: refused.length, removed };
     }
 
     // Several people's prints at once, from the opt-in screen's checkboxes
@@ -446,6 +500,13 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
         if (gone.length === 0) return 0;
         for (const id of gone) delete store.people[id];
         save(store);
+        // Their tally is cleared with the print (SAA-275 part 2, decided
+        // 2026-11-10): a new print needs two more calls.
+        const tally = readTally();
+        if (gone.some((id) => Object.prototype.hasOwnProperty.call(tally, id))) {
+            for (const id of gone) delete tally[id];
+            writeTally(tally);
+        }
         return gone.length;
     }
 
@@ -481,7 +542,18 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
             if (kept.length) writePrivate(scoresPath, kept.map((l) => JSON.stringify(l)).join('\n') + '\n');
             else fs.unlinkSync(scoresPath);
         }
-        return { contributions: changed, scoreLines: lines.length - kept.length };
+        // Its calls in the tally go too (SAA-275 part 2).
+        let tallied = 0;
+        if (fs.existsSync(tallyPath)) {
+            const tally = readTally();
+            for (const pid of Object.keys(tally)) {
+                const before = tally[pid].length;
+                tally[pid] = tally[pid].filter((s) => s !== stem);
+                tallied += before - tally[pid].length;
+            }
+            if (tallied) writeTally(tally);
+        }
+        return { contributions: changed, scoreLines: lines.length - kept.length, tallied };
     }
 
     // One capture's contribution to the member's own print, taken out: an
@@ -527,7 +599,7 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
     }
 
     return {
-        dir, settingPath, profilesPath, scoresPath,
+        dir, settingPath, profilesPath, scoresPath, tallyPath,
         setting, isEnabled, enable, disable, removeWhileOff, load, ingestHostPrint, enrolFromMapping,
         deleteProfile, deleteProfiles, removeRecording, removeSelfContribution, listProfiles, matchProfiles, appendScoreLines, readScoreLines,
     };

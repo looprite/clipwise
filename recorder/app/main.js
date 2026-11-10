@@ -1347,7 +1347,7 @@ function voicePrintsAfterPipeline(stem) {
 function voicePrintsAfterSend(stem, people) {
     try {
         const r = voicePrints().enrolFromMapping(stem, people);
-        if (!r.skipped) console.error(`[clipwise-recorder] voice prints ${stem}: enrolled ${r.enrolled}, refused ${r.refused}, replaced ${r.removed}`);
+        if (!r.skipped) console.error(`[clipwise-recorder] voice prints ${stem}: enrolled ${r.enrolled}, counted ${r.deferred}, refused ${r.refused}, replaced ${r.removed}`);
         sendVoicePrintsData();
     } catch (err) {
         console.error(`[clipwise-recorder] voice prints ${stem}: enrolment failed (${err.code || err.name})`);
@@ -1467,7 +1467,8 @@ function registerVoicePrintsIpc() {
             picked = Array.from(new Set(sent)).filter((id) => byId.has(id)).map((id) => byId.get(id));
         } catch { return; }
         if (picked.length === 0) { sendVoicePrintsData(); return; }
-        const detail = 'Clipwise stops comparing new calls against it. A new print is kept the next time you name this person on a call.';
+        const detail = 'Clipwise stops comparing new calls against it. A new print is kept if you name this person on two more calls.';
+        const detailMany = 'Clipwise stops comparing new calls against them. A new print is kept for anyone you name on two more calls.';
         const { response } = await dialog.showMessageBox(parent(), picked.length === 1 ? {
             type: 'warning', buttons: ['Cancel', 'Delete'], defaultId: 0, cancelId: 0,
             message: picked[0].name ? `Delete ${picked[0].name}’s voice print?` : 'Delete this voice print?',
@@ -1475,7 +1476,7 @@ function registerVoicePrintsIpc() {
         } : {
             type: 'warning', buttons: ['Cancel', 'Delete'], defaultId: 0, cancelId: 0,
             message: `Delete these ${picked.length} voice prints?`,
-            detail: `${confirmationList(picked.map((p) => `• ${p.name || 'Someone (no name kept)'}`)).join('\n')}\n\n${detail}`,
+            detail: `${confirmationList(picked.map((p) => `• ${p.name || 'Someone (no name kept)'}`)).join('\n')}\n\n${detailMany}`,
         });
         if (response !== 1) return;
         try {
@@ -1498,7 +1499,7 @@ function registerVoicePrintsIpc() {
             // runs, is left to that process's exit (voicePrintsRemoveWhileOff).
             const gone = voicePrints().disable({ skip: voicePrintsModule.removalSkip({ pipeline, recovering: !!recoveryProc }) });
             const e = gone.embeddings;
-            console.error(`[clipwise-recorder] voice prints: turned off (prints ${gone.profiles ? 'deleted' : 'none'}, scores ${gone.scores ? 'deleted' : 'none'}, host prints ${gone.hostPrints}, `
+            console.error(`[clipwise-recorder] voice prints: turned off (prints ${gone.profiles ? 'deleted' : 'none'}, scores ${gone.scores ? 'deleted' : 'none'}, tally ${gone.tally ? 'deleted' : 'none'}, host prints ${gone.hostPrints}, `
                 + `embeddings removed from ${e.changed} of ${e.files} diarize file(s), ${e.skipped} skipped, ${e.failed} failed)`);
         } catch (err) {
             console.error(`[clipwise-recorder] voice prints: turn off failed (${err.code || err.name})`);

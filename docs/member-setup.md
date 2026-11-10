@@ -111,10 +111,10 @@ Open **Recent meetings…** from the menu bar. It lists the past seven days; old
 Clipwise can learn the voices of people you talk to, so that one day it can tell you who was on a call. It's off unless you turn it on. Today it only learns; it doesn't name anyone yet.
 
 1. Open **Recognize voices…** from the menu bar (the "Who was on this call?" window also offers it).
-2. Read what it does. It keeps a voice print for you and for each person you name, on this Mac only, and never uploads them. Some places require the other person's consent; that's your responsibility.
+2. Read what it does. It keeps a voice print for you, and for each person you name once you've named them on two calls, on this Mac only, and never uploads them. Some places require the other person's consent; that's your responsibility.
 3. Click **Turn on**, or **Not now**.
 
-Once it's on, **Voice prints on this Mac** lists **You** and each person, with the number of calls they're learned from. A print is kept as soon as you name someone on one call, so keep prints only for people you talk to often: click **Delete** next to anyone else. **Turn off and delete prints** removes every print. Your recordings aren't affected.
+Once it's on, **Voice prints on this Mac** lists **You** and each person, with the number of calls they're learned from. A print is kept once you've named someone on two calls. Keep prints only for people you talk to often: click **Delete** next to anyone else. **Turn off and delete prints** removes every print. Your recordings aren't affected.
 
 ## 10. Trash, deleting, and signing out
 

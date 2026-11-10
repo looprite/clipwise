@@ -101,7 +101,7 @@ function render(data) {
   if (!self && people.length === 0) {
     const e = document.createElement('div');
     e.className = 'empty';
-    e.textContent = 'None yet. A print is kept once you name someone on a call.';
+    e.textContent = 'None yet. A print is kept once you name someone on two calls.';
     list.appendChild(e);
   }
   renderSelbar();
