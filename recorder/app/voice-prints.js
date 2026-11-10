@@ -605,7 +605,27 @@ function createVoicePrints({ supportDir, outdir, encrypt, decrypt, now = () => n
     };
 }
 
+// The turn-off confirmation (SAA-275, the 11-10 finding): it says how many
+// prints go, yours included, counted from the store when the button is
+// clicked. listing is listProfiles()'s { self, people }, or null when the
+// store couldn't be read, which keeps the count out. Cancel stays the default.
+function turnOffDialog(listing) {
+    let deletes = 'This deletes all voice prints.';
+    if (listing) {
+        const self = !!listing.self;
+        const n = (Array.isArray(listing.people) ? listing.people.length : 0) + (self ? 1 : 0);
+        if (n === 0) deletes = 'No voice prints are kept yet.';
+        else if (n === 1) deletes = self ? 'This deletes your voice print.' : 'This deletes 1 voice print.';
+        else deletes = `This deletes all ${n} voice prints${self ? ', including yours' : ''}.`;
+    }
+    return {
+        type: 'warning', buttons: ['Cancel', 'Turn off and delete prints'], defaultId: 0, cancelId: 0,
+        message: 'Turn off voice recognition?',
+        detail: `${deletes} Your recordings aren’t affected.`,
+    };
+}
+
 module.exports = {
     STATEMENT_VERSION, SELF_MATCH_CUTOFF, normalise, cosine, meanOf, decideEnrolment,
-    removeDiarizeEmbeddings, removalSkip, runRemovalWhileOff, createVoicePrints,
+    removeDiarizeEmbeddings, removalSkip, runRemovalWhileOff, createVoicePrints, turnOffDialog,
 };

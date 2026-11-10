@@ -1488,11 +1488,11 @@ function registerVoicePrintsIpc() {
         sendVoicePrintsData();
     });
     ipcMain.on('voice-prints:disable', async () => {
-        const { response } = await dialog.showMessageBox(parent(), {
-            type: 'warning', buttons: ['Cancel', 'Turn off and delete prints'], defaultId: 0, cancelId: 0,
-            message: 'Turn off voice recognition?',
-            detail: 'All voice prints are deleted. Your recordings aren’t affected.',
-        });
+        // The dialog counts the prints in the store now, not what the window
+        // showed (SAA-275); an unreadable store leaves the count out.
+        let listing = null;
+        try { listing = voicePrints().listProfiles(); } catch {}
+        const { response } = await dialog.showMessageBox(parent(), voicePrintsModule.turnOffDialog(listing));
         if (response !== 1) return;
         try {
             // A running pipeline's capture, or every capture while recovery

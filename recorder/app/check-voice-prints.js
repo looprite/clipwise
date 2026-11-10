@@ -884,8 +884,66 @@ function main() {
         return [altered && adviceAbove(inside) === false && adviceAbove(none) === false, JSON.stringify({ altered, inside: adviceAbove(inside), none: adviceAbove(none) })];
     });
 
+    // --- SAA-275, the 11-10 finding: the turn-off button and its dialog --------
+    add('67. the page: the bottom button is "Delete N…" while N prints are checked, doing what the selection bar\'s "Delete N…" does, and "Turn off and delete prints" with none', () => {
+        let ob = null;
+        try { ob = pageFunction('offButton'); } catch (err) { return [false, err.message]; }
+        const got = [0, 1, 3].map((n) => ob(n));
+        const ok = JSON.stringify(got) === JSON.stringify([
+            { label: 'Turn off and delete prints', action: 'disable' },
+            { label: 'Delete 1…', action: 'delete' },
+            { label: 'Delete 3…', action: 'delete' },
+        ])
+            && PAGE.includes("$('off').addEventListener('click', () => { if (offButton(picked.size).action === 'delete') deletePrints(picked); else ipcRenderer.send('voice-prints:disable'); });")
+            && (PAGE.match(/ipcRenderer\.send\('voice-prints:disable'/g) || []).length === 1;
+        return [ok, JSON.stringify(got)];
+    });
+    add('68. the page (text): the bottom button\'s label is redrawn in renderSelbar, which both render and each checkbox change run', () => {
+        const at = PAGE.indexOf('\nfunction renderSelbar() {');
+        const body = at >= 0 ? PAGE.slice(at, PAGE.indexOf('\n}\n', at)) : '';
+        const ok = body.includes("$('off').textContent = offButton(picked.size).label;")
+            && PAGE.includes("box.addEventListener('change', () => { if (box.checked) picked.add(personId); else picked.delete(personId); renderSelbar(); });")
+            && (PAGE.match(/\n  renderSelbar\(\);\n\}/g) || []).length === 1
+            && PAGE.includes('if (!on) { picked.clear(); renderSelbar(); return; }');
+        return [ok, `${body.length} chars`];
+    });
+    add('69. turnOffDialog: "all N voice prints, including yours" from a real store of 5 people and yours; without yours no "including yours"; 1, 0 and an unreadable store each say so; Cancel the default', () => {
+        if (typeof mod.turnOffDialog !== 'function') return [false, 'no turnOffDialog'];
+        const { vp } = fivePrints();
+        const d = (l) => mod.turnOffDialog(l).detail;
+        const shape = mod.turnOffDialog(vp.listProfiles());
+        const people = (n) => Array.from({ length: n }, (_, i) => ({ personId: P(i + 1), name: `Person ${i + 1}`, count: 2 }));
+        const got = {
+            six: d(vp.listProfiles()),
+            twoNoSelf: d({ self: null, people: people(2) }),
+            selfOnly: d({ self: { count: 3 }, people: [] }),
+            oneNoSelf: d({ self: null, people: people(1) }),
+            none: d({ self: null, people: [] }),
+            unread: d(null),
+        };
+        const ok = got.six === 'This deletes all 6 voice prints, including yours. Your recordings aren’t affected.'
+            && got.twoNoSelf === 'This deletes all 2 voice prints. Your recordings aren’t affected.'
+            && got.selfOnly === 'This deletes your voice print. Your recordings aren’t affected.'
+            && got.oneNoSelf === 'This deletes 1 voice print. Your recordings aren’t affected.'
+            && got.none === 'No voice prints are kept yet. Your recordings aren’t affected.'
+            && got.unread === 'This deletes all voice prints. Your recordings aren’t affected.'
+            && shape.type === 'warning' && shape.message === 'Turn off voice recognition?'
+            && JSON.stringify(shape.buttons) === '["Cancel","Turn off and delete prints"]' && shape.defaultId === 0 && shape.cancelId === 0;
+        return [ok, JSON.stringify(got)];
+    });
+    add('70. main.js (text): the turn-off handler builds its dialog with turnOffDialog from listProfiles read at the click, and turns off only after the second button', () => {
+        const at = SRC.indexOf("ipcMain.on('voice-prints:disable'");
+        const body = at >= 0 ? SRC.slice(at, SRC.indexOf('\n    });\n', at)) : '';
+        const ok = body.includes('try { listing = voicePrints().listProfiles(); } catch {}')
+            && body.includes('await dialog.showMessageBox(parent(), voicePrintsModule.turnOffDialog(listing));')
+            && body.indexOf('if (response !== 1) return;') > body.indexOf('turnOffDialog(listing)')
+            && body.indexOf('voicePrints().disable(') > body.indexOf('if (response !== 1) return;')
+            && !SRC.includes('All voice prints are deleted.');
+        return [ok, `${body.length} chars`];
+    });
+
     for (const [name, fn] of cases) {
-        const needsModule = !/^(2[2-5]|39|4[0-2]|5[1-4]|6[4-6])\./.test(name);
+        const needsModule = !/^(2[2-5]|39|4[0-2]|5[1-4]|6[4-8]|70)\./.test(name);
         if (needsModule && !mod) { check(name, false, why); continue; }
         let result;
         try { result = fn(); } catch (err) { result = [false, `threw ${err.message}`]; }

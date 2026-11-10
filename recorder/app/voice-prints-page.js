@@ -25,7 +25,19 @@ function deletePrints(personIds) {
   ipcRenderer.send('voice-prints:delete', { personIds: Array.from(personIds) });
 }
 
+// The bottom button (SAA-275, the 11-10 finding): while any print is checked
+// it is "Delete N…", the selection bar's action, so it can't be read as acting
+// on the checked prints while it turns everything off. With none checked it is
+// "Turn off and delete prints" again. check-voice-prints.js runs this copy.
+function offButton(pickedCount) {
+  return pickedCount > 0
+    ? { label: `Delete ${pickedCount}…`, action: 'delete' }
+    : { label: 'Turn off and delete prints', action: 'disable' };
+}
+
+// Also run on each checkbox change, so the bottom button follows the checks.
 function renderSelbar() {
+  $('off').textContent = offButton(picked.size).label;
   const bar = $('selbar');
   bar.textContent = '';
   const items = selbarItems(picked.size);
@@ -108,7 +120,7 @@ function render(data) {
 }
 
 $('on').addEventListener('click', () => ipcRenderer.send('voice-prints:enable', { statementVersion: STATEMENT_VERSION }));
-$('off').addEventListener('click', () => ipcRenderer.send('voice-prints:disable'));
+$('off').addEventListener('click', () => { if (offButton(picked.size).action === 'delete') deletePrints(picked); else ipcRenderer.send('voice-prints:disable'); });
 $('later').addEventListener('click', () => window.close());
 $('done').addEventListener('click', () => window.close());
 ipcRenderer.on('voice-prints:data', (_e, data) => render(data));
