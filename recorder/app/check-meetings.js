@@ -670,6 +670,91 @@ check('without the processing capture, the tray item is the newest ready meeting
         initText.length > 0 && !sendsSaved(initText.replace('answerForPage(readAnswer(', '(readAnswer(')));
 }
 
+// --- SAA-262: select-all in the trash, every selected one deleted in runs of
+// 100, and a confirmation that stays readable at any count ------------------
+{
+    const mod = require('./meetings.js');
+    const MAIN_SRC = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+    const PAGE_SRC = fs.readFileSync(path.join(__dirname, 'meetings-page.js'), 'utf8');
+    const fnText = (src, name) => {
+        const a = src.search(new RegExp(`\\n(async )?function ${name}\\(`));
+        const b = src.indexOf('\n}\n', a + 1);
+        return a >= 0 && b > a ? src.slice(a, b) : '';
+    };
+    const changeTrash = fnText(MAIN_SRC, 'changeTrash');
+
+    // inBatches: every item in exactly one run, in order, at most 100 a run.
+    const items = Array.from({ length: 250 }, (_, i) => `s${i}`);
+    const runs = typeof mod.inBatches === 'function' ? mod.inBatches(items, 100) : null;
+    check('SAA-262: inBatches cuts 250 into 100, 100, 50, every one once and in order',
+        !!runs && JSON.stringify(runs.map((r) => r.length)) === '[100,100,50]' && JSON.stringify(runs.flat()) === JSON.stringify(items),
+        runs ? JSON.stringify(runs.map((r) => r.length)) : 'no inBatches');
+    check('SAA-262: inBatches gives one run for 100, and none for an empty list',
+        !!runs && mod.inBatches(items.slice(0, 100), 100).length === 1 && mod.inBatches([], 100).length === 0);
+
+    // changeTrash: no cap, and every stem goes to the server in runs of TRASH_BATCH.
+    check('SAA-262: changeTrash no longer caps what it acts on at 100',
+        changeTrash.length > 0 && !changeTrash.includes('.slice(0, 100)'), `${changeTrash.length} chars`);
+    check('control: the same scan finds the cap in a copy of changeTrash with it put back',
+        changeTrash.replace("STEM_PATTERN.test(s))));", "STEM_PATTERN.test(s)))).slice(0, 100);").includes('.slice(0, 100)'));
+    check('SAA-262: changeTrash sends every stem to the server in runs of TRASH_BATCH = 100, redrawing after each',
+        MAIN_SRC.includes('const TRASH_BATCH = 100;')
+        && /for \(const batch of inBatches\(stems, TRASH_BATCH\)\) \{[\s\S]*?const done = await runTrashOnServer\(action, batch\);[\s\S]*?sendMeetingsData\(\);/.test(changeTrash)
+        && !/await runTrashOnServer\(action, stems\)/.test(changeTrash));
+
+    // The confirmation: required, Cancel the default, the count in the message,
+    // at most 10 names then "and N more".
+    const lines = Array.from({ length: 300 }, (_, i) => `• Meeting ${i + 1}`);
+    const shown = typeof mod.confirmationList === 'function' ? mod.confirmationList(lines) : null;
+    check('SAA-262: confirmationList shows 300 as the first 10 lines and "and 290 more"',
+        !!shown && shown.length === 11 && JSON.stringify(shown.slice(0, 10)) === JSON.stringify(lines.slice(0, 10)) && shown[10] === 'and 290 more',
+        shown ? JSON.stringify(shown.slice(-2)) : 'no confirmationList');
+    check('SAA-262: confirmationList leaves 10 lines, 11 lines minus one, and 1 line as they are, as today',
+        !!shown && JSON.stringify(mod.confirmationList(lines.slice(0, 10))) === JSON.stringify(lines.slice(0, 10))
+        && JSON.stringify(mod.confirmationList(lines.slice(0, 11))) === JSON.stringify([...lines.slice(0, 10), 'and 1 more'])
+        && JSON.stringify(mod.confirmationList(lines.slice(0, 1))) === JSON.stringify(lines.slice(0, 1)));
+    const dialogAt = changeTrash.indexOf('dialog.showMessageBox(');
+    const dialogText = dialogAt >= 0 ? changeTrash.slice(dialogAt, changeTrash.indexOf('});', dialogAt)) : '';
+    const answered = changeTrash.indexOf('if (response !== 1) return;');
+    const firstRun = changeTrash.indexOf('runTrashOnServer(');
+    check('SAA-262: the delete confirmation is still asked first: warning, Cancel / Delete permanently, Cancel the default, the count in the message, the list through confirmationList',
+        dialogText.includes("type: 'warning',")
+        && dialogText.includes("buttons: ['Cancel', 'Delete permanently'],")
+        && dialogText.includes('defaultId: 0,') && dialogText.includes('cancelId: 0,')
+        && dialogText.includes("message: stems.length === 1 ? 'Permanently delete this meeting?' : `Permanently delete these ${stems.length} meetings?`,")
+        && dialogText.includes("detail: `${confirmationList(lines).join('\\n')}\\n\\nThe audio, the transcript and everything taken from it are deleted. This can't be undone.`,")
+        && answered > dialogAt && firstRun > answered,
+        `${dialogText.length} chars`);
+
+    // The notification after a run: "Nothing was deleted" only when nothing
+    // was. The condition is taken from changeTrash's text and run on made-up
+    // results: 2 deleted, then the server dropped for 1.
+    const condMatch = /if \(([^\n]*)\) \{\s*notify\('trash-unreachable'/.exec(changeTrash);
+    const pickNothing = (cond, results) => new Function('results', 'failed', `return (${cond});`)(results, results.filter((r) => !r.ok));
+    const mixed = [{ ok: true }, { ok: true }, { ok: false, code: 'server_unreachable' }];
+    const allDown = [{ ok: false, code: 'server_unreachable' }, { ok: false, code: 'server_unreachable' }];
+    check('SAA-262: after some were deleted and the server dropped, the notification is not "Nothing was deleted"; with none done, it is',
+        !!condMatch && pickNothing(condMatch[1], mixed) === false && pickNothing(condMatch[1], allDown) === true,
+        condMatch ? condMatch[1] : 'no condition found');
+    check('control: the old condition picks "Nothing was deleted" when some succeeded',
+        pickNothing("failed.every((r) => r.code === 'server_unreachable')", mixed) === true);
+
+    // The page: Select all in the Trash, from the page's own selbarItems.
+    let selbarItems = null;
+    try { selbarItems = pageFunction('meetings-page.js', 'selbarItems'); } catch (err) { console.log(`      ${err.message}`); }
+    const sb = (...a) => (selbarItems ? JSON.stringify(selbarItems(...a)) : 'no selbarItems');
+    check('SAA-262: the Trash offers Select all with none picked', sb('trash', 0, 3) === '["select-all"]', sb('trash', 0, 3));
+    check('SAA-262: the Trash offers Select all beside Restore and Delete while some are picked', sb('trash', 2, 3) === '["count","select-all","restore","delete","clear"]', sb('trash', 2, 3));
+    check('SAA-262: once all are picked, Select all goes and Restore, Delete and Clear stay', sb('trash', 3, 3) === '["count","restore","delete","clear"]', sb('trash', 3, 3));
+    check('SAA-262: an empty Trash shows no bar', sb('trash', 0, 0) === '[]', sb('trash', 0, 0));
+    check('SAA-262: Meetings is as before: no bar with none picked; count, Move to trash, Clear with some',
+        sb('meetings', 0, 3) === '[]' && sb('meetings', 2, 3) === '["count","move","clear"]', `${sb('meetings', 0, 3)} ${sb('meetings', 2, 3)}`);
+    const renderSelbar = fnText(PAGE_SRC, 'renderSelbar');
+    check('SAA-262: Select all picks every row the Trash lists, and Delete still sends meetings:delete with the picked rows',
+        /'Select all'\);[\s\S]{0,120}for \(const s of listed\) picked\.add\(s\); render\(\);/.test(renderSelbar)
+        && renderSelbar.includes("send('meetings:delete', picked)"));
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);

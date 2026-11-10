@@ -38,7 +38,7 @@ const {
     failureResolved,
 } = require('./last-meeting.js');
 // The recent-meetings window's rows (SAA-217).
-const { listMeetings, listTrashed } = require('./meetings.js');
+const { listMeetings, listTrashed, inBatches, confirmationList } = require('./meetings.js');
 const { removeCaptureFiles } = require('./capture-files.js');
 // The body of POST /captures (SAA-260 step 3 moved it out for its check).
 const { buildCapturePayload: buildCapturePayloadIn } = require('./capture-payload.js');
@@ -1147,10 +1147,16 @@ function meetingLine(r) {
     return `\u2022 ${r.title || 'Untitled'} \u00b7 ${who} \u2014 ${when}`;
 }
 
+// How many captures go to the server in one run (SAA-262). Select-all in the
+// trash can pick more: they go in runs of this many until every one is done.
+const TRASH_BATCH = 100;
+
 async function changeTrash(action, rawStems) {
     if (trashBusy) return;
     if (!Array.isArray(rawStems)) return;
-    const unique = Array.from(new Set(rawStems.filter((s) => typeof s === 'string' && STEM_PATTERN.test(s)))).slice(0, 100);
+    // No count limit (SAA-262): what the window sent is re-checked against the
+    // disk just below, so only captures this Mac has go on.
+    const unique = Array.from(new Set(rawStems.filter((s) => typeof s === 'string' && STEM_PATTERN.test(s))));
     // Re-checked at click time: what the window showed may be stale.
     let stems;
     if (action === 'trash') {
@@ -1161,8 +1167,9 @@ async function changeTrash(action, rawStems) {
     if (stems.length === 0) { sendMeetingsData(); return; }
 
     if (action === 'delete') {
-        // The confirmation names each meeting, from what is on disk, not from
-        // what the window sent. Cancel is the default and deletes nothing.
+        // The confirmation names the first 10 meetings (confirmationList) and
+        // counts the rest, from what is on disk, not from what the window sent.
+        // Cancel is the default and deletes nothing.
         const byStem = new Map(listTrashed(OUTDIR).map((r) => [r.stem, r]));
         const lines = stems.map((s) => meetingLine(byStem.get(s) || { startedAtMs: stemTimeMs(s), title: null, participants: [] }));
         try { app.focus({ steal: true }); } catch {}
@@ -1172,7 +1179,7 @@ async function changeTrash(action, rawStems) {
             defaultId: 0,
             cancelId: 0,
             message: stems.length === 1 ? 'Permanently delete this meeting?' : `Permanently delete these ${stems.length} meetings?`,
-            detail: `${lines.join('\n')}\n\nThe audio, the transcript and everything taken from it are deleted. This can't be undone.`,
+            detail: `${confirmationList(lines).join('\n')}\n\nThe audio, the transcript and everything taken from it are deleted. This can't be undone.`,
         });
         if (response !== 1) return;
         // Restored while the dialog was open? Only what is still in the trash.
@@ -1180,12 +1187,25 @@ async function changeTrash(action, rawStems) {
         if (stems.length === 0) { sendMeetingsData(); return; }
     }
 
-    // The server decides and this Mac follows it (SAA-227 part L decision 8).
+    // The server decides and this Mac follows it (SAA-227 part L decision 8),
+    // in runs of TRASH_BATCH, the window redrawn after each. A run in which the
+    // server couldn't be reached at all ends it: the rest are reported as not
+    // done rather than each waiting out its own timeout.
     trashBusy = true;
     sendMeetingsData();
-    let results;
+    const results = [];
     try {
-        results = await runTrashOnServer(action, stems);
+        let unreachable = false;
+        for (const batch of inBatches(stems, TRASH_BATCH)) {
+            if (unreachable) {
+                results.push(...batch.map((stem) => ({ action, stem, ok: false, code: 'server_unreachable', message: 'not tried: the server could not be reached' })));
+                continue;
+            }
+            const done = await runTrashOnServer(action, batch);
+            results.push(...done);
+            unreachable = done.length > 0 && done.every((r) => r.code === 'server_unreachable');
+            sendMeetingsData();
+        }
     } finally {
         trashBusy = false;
     }
@@ -1195,7 +1215,9 @@ async function changeTrash(action, rawStems) {
     }
     if (failed.length > 0) {
         const verb = { trash: 'moved to trash', restore: 'restored', delete: 'deleted' }[action];
-        if (failed.every((r) => r.code === 'server_unreachable')) {
+        // "Nothing was …" only when nothing was: a run that reached the server
+        // for some before it dropped says how many were not done (SAA-262).
+        if (failed.length === results.length && failed.every((r) => r.code === 'server_unreachable')) {
             notify('trash-unreachable', `Clipwise: not ${verb}`, `Couldn't reach the Clipwise server. Nothing was ${verb}.`);
         } else {
             notify('trash-refused', `Clipwise: ${failed.length} not ${verb}`, `${failed[0].message || failed[0].code}`);

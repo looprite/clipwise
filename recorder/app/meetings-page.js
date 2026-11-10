@@ -87,31 +87,54 @@ function renderFilter() {
 
 function send(channel, stems) { ipcRenderer.send(channel, { stems: Array.from(stems) }); picked.clear(); openMenu = null; }
 
+// What the selection bar shows, in order, from the view and how many rows are
+// picked and listed. The Trash view offers Select all whenever it lists one
+// not yet picked, even with none picked (SAA-262); Meetings is as before. The
+// page's own, so it loads no module; check-meetings.js runs this copy.
+function selbarItems(view, pickedCount, listedCount) {
+  const all = view === 'trash' && listedCount > 0 && pickedCount < listedCount ? ['select-all'] : [];
+  if (pickedCount === 0) return all;
+  const acts = view === 'meetings' ? ['move'] : ['restore', 'delete'];
+  return ['count', ...all, ...acts, 'clear'];
+}
+
 function renderSelbar(listed) {
   for (const s of Array.from(picked)) if (!listed.has(s)) picked.delete(s);
   selbarEl.textContent = '';
-  selbarEl.classList.toggle('on', picked.size > 0);
-  if (picked.size === 0) return;
-  selbarEl.appendChild(el('span', null, `${picked.size} selected`));
+  const items = selbarItems(view, picked.size, listed.size);
+  selbarEl.classList.toggle('on', items.length > 0);
   const busy = last.busy;
-  if (view === 'meetings') {
-    const t = el('button', null, `Move ${picked.size} to trash`);
-    t.disabled = busy;
-    t.addEventListener('click', () => send('meetings:trash', picked));
-    selbarEl.appendChild(t);
-  } else {
-    const r = el('button', null, `Restore ${picked.size}`);
-    r.disabled = busy;
-    r.addEventListener('click', () => send('meetings:restore', picked));
-    selbarEl.appendChild(r);
-    const d = el('button', 'danger', `Delete ${picked.size} permanently…`);
-    d.disabled = busy;
-    d.addEventListener('click', () => send('meetings:delete', picked));
-    selbarEl.appendChild(d);
+  for (const item of items) {
+    if (item === 'count') {
+      selbarEl.appendChild(el('span', null, `${picked.size} selected`));
+    } else if (item === 'select-all') {
+      // Every row the Trash lists, not only those on screen: Delete then goes
+      // through the same confirmation (the first 10 named, the rest counted).
+      const a = el('button', null, 'Select all');
+      a.disabled = busy;
+      a.addEventListener('click', () => { for (const s of listed) picked.add(s); render(); });
+      selbarEl.appendChild(a);
+    } else if (item === 'move') {
+      const t = el('button', null, `Move ${picked.size} to trash`);
+      t.disabled = busy;
+      t.addEventListener('click', () => send('meetings:trash', picked));
+      selbarEl.appendChild(t);
+    } else if (item === 'restore') {
+      const r = el('button', null, `Restore ${picked.size}`);
+      r.disabled = busy;
+      r.addEventListener('click', () => send('meetings:restore', picked));
+      selbarEl.appendChild(r);
+    } else if (item === 'delete') {
+      const d = el('button', 'danger', `Delete ${picked.size} permanently…`);
+      d.disabled = busy;
+      d.addEventListener('click', () => send('meetings:delete', picked));
+      selbarEl.appendChild(d);
+    } else if (item === 'clear') {
+      const c = el('button', null, 'Clear');
+      c.addEventListener('click', () => { picked.clear(); render(); });
+      selbarEl.appendChild(c);
+    }
   }
-  const c = el('button', null, 'Clear');
-  c.addEventListener('click', () => { picked.clear(); render(); });
-  selbarEl.appendChild(c);
 }
 
 function checkbox(stem, enabled) {

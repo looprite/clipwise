@@ -144,4 +144,22 @@ function listTrashed(dir) {
     return rows;
 }
 
-module.exports = { listMeetings, listTrashed, identifyingLine, DAYS };
+// A list in order, cut into runs of at most `size`: main.js's changeTrash asks
+// the server about the trash in these (SAA-262). Every item lands in exactly
+// one run; an empty list gives none.
+function inBatches(list, size) {
+    const n = Number.isInteger(size) && size > 0 ? size : 1;
+    const out = [];
+    for (let i = 0; i < list.length; i += n) out.push(list.slice(i, i + n));
+    return out;
+}
+
+// The delete confirmation's list (SAA-262): the first `shown` lines, then
+// "and N more" for the rest, so select-all over a full trash still fits on
+// screen. The count is in the dialog's message.
+function confirmationList(lines, shown = 10) {
+    if (lines.length <= shown) return lines.slice();
+    return [...lines.slice(0, shown), `and ${lines.length - shown} more`];
+}
+
+module.exports = { listMeetings, listTrashed, identifyingLine, inBatches, confirmationList, DAYS };
