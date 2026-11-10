@@ -1,0 +1,79 @@
+Before you record
+
+## What Clipwise does
+
+Clipwise records your calls on your Mac. No bot joins the meeting.
+
+It records two tracks: your microphone, and the sound the call plays through your Mac. Your Mac turns the audio into a transcript. The transcript goes to your team’s server, which pulls out the decisions, commitments and questions from the call so you can ask about them in Claude.
+
+## Telling the people on your calls
+
+You are responsible for telling the people on your calls that you are recording. Some places require everyone on the call to agree before you record. Follow the law where you and they are.
+
+Clipwise does not announce itself on the call. Nobody else on the call can see that it is running.
+
+When you start recording, Clipwise shows a short line you can say to let everyone know. On calls with a chat, “Copy recording notice” in the menu bar copies it for you.
+
+## What stays on your Mac
+
+The audio of each call stays on your Mac until you delete it. It is not uploaded.
+
+Turn on FileVault so the recordings are encrypted if your Mac is lost. If you back up your Mac, keep those backups encrypted too: they contain the recordings. Clipwise warns you during setup if FileVault is off. To turn it on, open System Settings, choose Privacy & Security, scroll to FileVault and click Turn On.
+
+A transcript you save or export is your own copy. Deleting the call in Clipwise does not delete it.
+
+## What goes to the team server, and who can see it
+
+The server receives each call’s transcript, the names of the people on it, and the moments pulled from it. It does not receive the audio.
+
+Transcripts and moments are stored encrypted on the team server.
+
+A call is private to you by default. Teammates see it only if you share it with the team.
+
+After each call you mark it as work or personal. A personal call is never shown to teammates, even if shared, and Claude leaves it out of searches unless you ask for personal calls. Otherwise it is processed like any other call.
+
+## Voices
+
+During each call, Clipwise compares the voices on your microphone with yours, so it only credits you with what you said.
+
+Recognize voices is optional and off by default. If you turn it on, Clipwise keeps a voice print for people you name, so it can name them on later calls. It starts naming someone only once it’s reliable. Only keep voice prints for people you talk to often. A print just saves you naming them after each call.
+
+Every voice print, yours included, stays on this Mac and is never uploaded. You can delete any one print. Turning Recognize voices off deletes them all; your recordings aren’t affected.
+
+## When someone else speaks into your mic
+
+If someone in the room with you spoke on the call through your microphone, tick the box saying so in the window after the call.
+
+When the box is ticked, nothing on your microphone for that call is credited to you, and Clipwise doesn’t try to work out who else spoke. Those lines show as Unattributed, and no commitments are pinned on you from them. Your voice print stays as it is; this call just doesn’t add to it.
+
+If you don’t tick the box, Clipwise assumes you were alone. If you forgot, open Recent meetings within 7 days of the call, choose ⋯ then Change attendees…, and tick it there. This works only for a call where you answered the window, not one you skipped.
+
+## Who else processes your calls
+
+Two outside services handle text from your calls. Neither receives audio.
+
+- Anthropic: the server sends each transcript to Claude to pull out the moments.
+- Voyage: the server sends each moment’s title and summary, and the words of your searches, so moments can be found.
+
+Anthropic deletes what it receives within 30 days and does not train on it. If its safety systems flag something as breaking its usage policy, it keeps that content for up to 2 years and the related safety scores for up to 7. It also keeps content longer if the law requires it.
+
+Voyage deletes what it receives after processing and does not train on it.
+
+## Deleting a call
+
+Moving a call to the trash hides it but keeps it, so you can bring it back. Deleting it removes the audio from your Mac and the transcript and moments from the team server.
+
+Some copies outlive a delete:
+
+- your own Mac backups, until they roll over;
+- the server’s database backups, for up to 14 days;
+- anything Anthropic or Voyage keeps under their terms;
+- any transcript you saved or exported yourself, and Clipwise’s own logs on your Mac.
+
+## Signing out, being removed, and a lost Mac
+
+Signing out stops uploads from this Mac. Your recordings stay on the Mac and upload when you sign back in. Your calls stay on the team server.
+
+If the admin removes you from the team, every Mac and Claude connection you have loses access at once. Calls you shared stay visible to the team. Your private calls stay on the server, but no one can see them through Clipwise.
+
+If your Mac is lost or stolen, tell the admin straight away. Today the only way to cut off its access is to remove you from the team; there is no way yet to cut off one Mac alone. FileVault protects the recordings on the Mac itself.

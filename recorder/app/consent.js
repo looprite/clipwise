@@ -25,7 +25,7 @@ const path = require('path');
 // version counts as not acknowledged; a higher one (a newer build's file read
 // by an older build) does not. Each version's text is
 // notice/recording-notice-v<N>.txt (readNotice, below).
-const STATEMENT_VERSION = 1;
+const STATEMENT_VERSION = 2;
 
 // Single line, plain ASCII, on purpose. A line break in a pasted chat message
 // can send it in two pieces, and a curly quote or a dash is the kind of

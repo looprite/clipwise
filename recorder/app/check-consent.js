@@ -126,6 +126,38 @@ const APPROVED_NOTICE = {
     ],
 };
 
+// Notice v2 (Gate 1, SAA-280): its title, its headings in order, its two lists,
+// and how many paragraphs it has. The words are the file's; these pin its shape.
+// The 26 is a hand count of the file's layout (2, 3, 3, 4, 3, 3, 3, 2, 3 across
+// the nine sections), not taken from readNotice's output.
+const APPROVED_NOTICE_V2 = {
+    title: 'Before you record',
+    headings: [
+        'What Clipwise does',
+        'Telling the people on your calls',
+        'What stays on your Mac',
+        'What goes to the team server, and who can see it',
+        'Voices',
+        'When someone else speaks into your mic',
+        'Who else processes your calls',
+        'Deleting a call',
+        'Signing out, being removed, and a lost Mac',
+    ],
+    lists: [
+        [
+            'Anthropic: the server sends each transcript to Claude to pull out the moments.',
+            'Voyage: the server sends each moment’s title and summary, and the words of your searches, so moments can be found.',
+        ],
+        [
+            'your own Mac backups, until they roll over;',
+            'the server’s database backups, for up to 14 days;',
+            'anything Anthropic or Voyage keeps under their terms;',
+            'any transcript you saved or exported yourself, and Clipwise’s own logs on your Mac.',
+        ],
+    ],
+    paragraphs: 26,
+};
+
 const holds = (...keys) => (k) => keys.includes(k);
 const trig = { key: 'com.google.Chrome.helper', name: 'Google Chrome' };
 
@@ -215,6 +247,38 @@ const CASES = [
         return n.version === 1 && n.title === APPROVED_NOTICE.title
             && JSON.stringify(n.blocks) === JSON.stringify(APPROVED_NOTICE.paragraphs.map((text) => ({ tag: 'p', text })))
             && JSON.stringify(n.paragraphs) === JSON.stringify(APPROVED_NOTICE.paragraphs); }],
+    // Notice v2 (Gate 1, SAA-280): the current version, its text, and that an
+    // answer given to v1 alone no longer counts.
+    ['notice v2: the current version is 2', () => consent.STATEMENT_VERSION === 2],
+    ['notice v2: readNotice() for the current version gives the v2 title, its nine headings in order, its two lists and its 26 paragraphs', () => {
+        const n = consent.readNotice();
+        const of = (tag) => n.blocks.filter((b) => b.tag === tag);
+        return n.version === 2 && n.title === APPROVED_NOTICE_V2.title
+            && JSON.stringify(of('h2').map((b) => b.text)) === JSON.stringify(APPROVED_NOTICE_V2.headings)
+            && JSON.stringify(of('ul').map((b) => b.items)) === JSON.stringify(APPROVED_NOTICE_V2.lists)
+            && of('p').length === APPROVED_NOTICE_V2.paragraphs
+            && n.blocks[0].tag === 'h2' && n.blocks[0].text === APPROVED_NOTICE_V2.headings[0]; }],
+    ['notice v2: every block is one the page draws (h2, ul, p), it can be agreed to, and no markup, straight quote or leftover "## "/"- " is in its text', () => {
+        const n = consent.readNotice();
+        const texts = [n.title, ...n.blocks.flatMap((b) => (b.tag === 'ul' ? b.items : [b.text]))];
+        return n.version === 2 && consent.noticeAgreeable(n)
+            && n.blocks.every((b) => ['h2', 'ul', 'p'].includes(b.tag))
+            && texts.every((t) => typeof t === 'string' && t.length > 0 && !/['"<>]/.test(t) && !/^(## |- )/.test(t)); }],
+    ['notice v2: the v1 file is still in the repo, unchanged (v1 control above), beside the v2 file', () =>
+        fs.existsSync(path.join(__dirname, 'notice', 'recording-notice-v1.txt'))
+        && fs.existsSync(path.join(__dirname, 'notice', 'recording-notice-v2.txt'))],
+    ['notice v2: someone who accepted only v1 is asked again: not agreed to, no stamp, no report, and the tray offers the notice', () => withDir(d => {
+        put(d, good(1));
+        return !isAcknowledged(d) && consent.noticeStamp(d) === null && consent.noticeReport(d) === null
+            && setup.trayAccountItems({ ...ALL_DONE, acknowledged: consent.isAcknowledged(d), setupCompleted: true }).includes('recording-notice'); })],
+    ['notice v2: agreeing over a v1 answer records version 2 with the new time', () => withDir(d => {
+        put(d, good(1));
+        consent.recordAcknowledgement(d, new Date('2026-11-09T12:00:00Z'));
+        const doc = consent.readConsent(d);
+        return doc.version === 2 && doc.acknowledged_at === '2026-11-09T12:00:00.000Z'
+            && JSON.stringify(consent.noticeReport(d)) === JSON.stringify({ version: 2, acknowledgedAt: '2026-11-09T12:00:00.000Z' }); })],
+    ['notice v2: the admin window heading for this build reads "Current notice: version 2"', () =>
+        teamNotice && teamNotice.formatTeamNotice([], consent.STATEMENT_VERSION).heading === 'Current notice: version 2'],
     ['notice: a heading, a two-item list and a paragraph read in order as h2, ul with both items, p', () => withDir(d => {
         fs.writeFileSync(path.join(d, 'recording-notice-v8.txt'),
             'The title\n\n## What is stored\n- Your microphone\n- The sound your Mac plays\n\nA closing paragraph\nthat runs over two lines.\n');
