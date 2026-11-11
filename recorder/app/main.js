@@ -1777,6 +1777,27 @@ function openAcknowledgements() {
     });
 }
 
+// "About Clipwise", from the menu bar and the application menu (SAA-281):
+// trayMenu.aboutDialog's message box, whose "Acknowledgements…" opens the
+// bundled notices. One at a time, like Quit's question.
+let aboutOpen = false;
+async function showAbout() {
+    if (aboutOpen) return;
+    aboutOpen = true;
+    try { app.focus({ steal: true }); } catch {}
+    let response;
+    try {
+        ({ response } = await dialog.showMessageBox(trayMenu.aboutDialog({
+            version: app.getVersion(),
+            commit: BUILD_INFO ? BUILD_INFO.commit : null,
+            dirty: !!(BUILD_INFO && BUILD_INFO.dirty),
+        })));
+    } finally {
+        aboutOpen = false;
+    }
+    if (response === 0) openAcknowledgements();
+}
+
 // Title stays down to a few characters whatever the state vocabulary grows
 // into: the recording time while a capture runs ("Rec 3:52", Jon's call 8,
 // counting up from the spawn), and single glyphs for anything wanting
@@ -2017,9 +2038,7 @@ function renderTray() {
         } else if (item === 'sign-out') {
             items.push({ label: 'Sign out', click: signOutFromTray });
         } else if (item === 'about') {
-            items.push({ label: 'About Clipwise', click: () => app.showAboutPanel() });
-        } else if (item === 'acknowledgements') {
-            items.push({ label: 'Acknowledgements…', click: openAcknowledgements });
+            items.push({ label: 'About Clipwise', click: showAbout });
         } else if (item === 'quit') {
             items.push({ label: 'Quit…', click: confirmQuit });
         }
@@ -5463,7 +5482,7 @@ function stopRecording(cause) {
 function installAppMenu() {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
         { label: app.name, submenu: [
-            { role: 'about' },
+            { label: 'About Clipwise', click: showAbout },
             { type: 'separator' },
             { role: 'services' },
             { type: 'separator' },
@@ -5781,31 +5800,6 @@ function startUpdates(parentWritable) {
 }
 
 // --- app boot -------------------------------------------------------------
-
-// The standard macOS About window, opened by the tray's "About Clipwise"
-// item. Third-party model credits (SAA-194 §7) moved out of here and into
-// their own "Acknowledgements…" item below, which opens the bundled
-// THIRD_PARTY_NOTICES file directly — full attribution text belongs in that
-// file, not crammed into the About panel's one-line description.
-// The bundle's build number: CFBundleVersion in its Info.plist (build-app.sh),
-// which is XML as Electron ships it and PlistBuddy keeps it. Null from a
-// checkout, or when it cannot be read; About then shows the version alone.
-const BUNDLE_VERSION = (() => {
-    if (!BUILD_INFO) return null;
-    try {
-        const plist = fs.readFileSync(path.join(RESOURCES_DIR, '..', 'Info.plist'), 'utf8');
-        const m = plist.match(/<key>CFBundleVersion<\/key>\s*<string>([^<]+)<\/string>/);
-        return m ? m[1] : null;
-    } catch {
-        return null;
-    }
-})();
-app.setAboutPanelOptions({
-    applicationName: 'Clipwise',
-    applicationVersion: app.getVersion(),
-    ...(BUNDLE_VERSION ? { version: BUNDLE_VERSION } : {}),
-    credits: 'Meeting recordings captured on your Mac, intelligence surfaced through Claude.',
-});
 
 const DAY_LOG_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 

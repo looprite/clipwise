@@ -1068,14 +1068,37 @@ const CASES = [
 
     // 10. The menu (SAA-281): tray-menu.js's order and status line, and how
     // main.js's renderTray uses them.
-    ['menu: stopped, signed-in admin, with a meeting to save: exactly status / Start or Stop / Recent meetings, Recognize voices / Detected applications, Open at login / Read the recording notice, Who accepted the notice, Sign out / About, Acknowledgements, Quit', () =>
+    ['menu: stopped, signed-in admin, with a meeting to save: exactly status / Start or Stop / Recent meetings, Recognize voices / Detected applications, Open at login / Read the recording notice, Who accepted the notice, Sign out / About, Quit', () =>
         !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: false, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
             === JSON.stringify(['status', '-', 'start-stop', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
-                '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'acknowledgements', 'quit'])],
+                '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'quit'])],
     ['menu: recording: the same order, with "Copy recording notice" right under Start or Stop', () =>
         !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: true, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
             === JSON.stringify(['status', '-', 'start-stop', 'copy-notice', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
-                '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'acknowledgements', 'quit'])],
+                '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'quit'])],
+    ['menu: no "Acknowledgements…" item (SAA-281): none in the order, renderTray draws none, and its "About Clipwise" opens showAbout', () => {
+        if (!trayMenu) return false;
+        const body = fnBody('renderTray');
+        return !trayMenu.trayMenuOrder({ active: false }).includes('acknowledgements') && !trayMenu.trayMenuOrder({ active: true }).includes('acknowledgements')
+            && !body.includes("'acknowledgements'") && !body.includes("label: 'Acknowledgements…'")
+            && body.includes("items.push({ label: 'About Clipwise', click: showAbout });"); }],
+    ['about: aboutDialog: "Clipwise", the version and the short build commit; buttons "Acknowledgements…" and OK, OK the default; a checkout says so', () => {
+        if (!trayMenu || typeof trayMenu.aboutDialog !== 'function') return false;
+        const built = trayMenu.aboutDialog({ version: '0.1.202611101719', commit: '503d9f76fa8e57e3ee9790625732fbeff8416b5b', dirty: false });
+        const dirty = trayMenu.aboutDialog({ version: '0.1.202611101719', commit: '503d9f76fa8e57e3ee9790625732fbeff8416b5b', dirty: true });
+        const checkout = trayMenu.aboutDialog({ version: '0.1.0', commit: null, dirty: false });
+        return built.message === 'Clipwise' && built.detail === 'Version 0.1.202611101719\nBuilt from commit 503d9f7'
+            && dirty.detail === 'Version 0.1.202611101719\nBuilt from commit 503d9f7 (dirty)'
+            && checkout.detail === 'Version 0.1.0\nRun from a checkout, not a built app'
+            && JSON.stringify(built.buttons) === '["Acknowledgements…","OK"]' && built.defaultId === 1 && built.cancelId === 1; }],
+    ['about: showAbout shows aboutDialog with the app\'s version and build-info\'s commit, and calls openAcknowledgements only on the "Acknowledgements…" button; the application menu\'s About uses it; no macOS About panel is left', () => {
+        const body = fnBody('showAbout');
+        return body.includes('await dialog.showMessageBox(trayMenu.aboutDialog({')
+            && body.includes('version: app.getVersion(),') && body.includes('commit: BUILD_INFO ? BUILD_INFO.commit : null,')
+            && body.includes('if (response === 0) openAcknowledgements();') && (body.match(/openAcknowledgements\(/g) || []).length === 1
+            && fnBody('installAppMenu').includes("{ label: 'About Clipwise', click: showAbout },")
+            && !SRC.includes('showAboutPanel') && !SRC.includes('setAboutPanelOptions') && !SRC.includes("role: 'about'")
+            && /\nfunction openAcknowledgements\(\) \{\n    const noticesPath = path\.join\(process\.resourcesPath, 'THIRD_PARTY_NOTICES'\);/.test(SRC); }],
     ['menu: no "Save transcript" item (SAA-281): none in the order with a meeting to save, renderTray draws none and looks up no last meeting; Recent meetings still saves through saveTranscript', () => {
         if (!trayMenu) return false;
         const body = fnBody('renderTray');

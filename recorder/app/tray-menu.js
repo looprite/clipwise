@@ -11,7 +11,7 @@
 //   the account items (setup.js trayAccountItems): Read the recording notice,
 //     Who accepted the notice (admins only), Sign out; before setup or sign-in
 //     is done, Finish setting up, Recording notice or Sign in in their place
-//   About, Acknowledgements, Quit
+//   About (its message box opens the acknowledgements), Quit
 //
 // Split out of main.js, like setup.js and team-notice.js, so no Electron is
 // needed to check it.
@@ -36,7 +36,7 @@ function trayMenuOrder(s) {
     out.push('-', 'detected-apps', 'open-at-login');
     const account = Array.isArray(s.accountItems) ? s.accountItems : [];
     if (account.length) out.push('-', ...account);
-    out.push('-', 'about', 'acknowledgements', 'quit');
+    out.push('-', 'about', 'quit');
     return out;
 }
 
@@ -97,4 +97,18 @@ function localDateChanged(drawnMs, nowMs) {
     return a.getFullYear() !== b.getFullYear() || a.getMonth() !== b.getMonth() || a.getDate() !== b.getDate();
 }
 
-module.exports = { trayMenuOrder, startStopLabel, trayStatusLine, dayAndTime, localDateChanged, NOTE_KEYS, PROMPT_KEYS };
+// "About Clipwise" (SAA-281): a message box with the name, version and build
+// commit, and the acknowledgements one button away, since the macOS About
+// panel's text can't hold a link. OK is the default; main.js opens the
+// acknowledgements on response 0. commit is build-info.json's (a full hash,
+// shown short), null when run from a checkout.
+function aboutDialog({ version, commit, dirty }) {
+    const build = commit ? `Built from commit ${String(commit).slice(0, 7)}${dirty ? ' (dirty)' : ''}` : 'Run from a checkout, not a built app';
+    return {
+        buttons: ['Acknowledgements…', 'OK'], defaultId: 1, cancelId: 1,
+        message: 'Clipwise',
+        detail: `Version ${version}\n${build}`,
+    };
+}
+
+module.exports = { trayMenuOrder, startStopLabel, trayStatusLine, dayAndTime, localDateChanged, aboutDialog, NOTE_KEYS, PROMPT_KEYS };
