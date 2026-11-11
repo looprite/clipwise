@@ -1,0 +1,5 @@
+Clipwise learns the voices of people you talk to, so it can tell you who was on a call. It starts naming people once it's reliable.
+
+- Keeps a voice print for you and each person you name, on this Mac only. Never uploaded.
+- Some places require the other person's consent. That's up to you.
+- Turn it off anytime to delete all voice prints. Your recordings aren't affected.

@@ -14,9 +14,11 @@
      affected: each keeps its own files, the diarize file's per-voice
      measurements included, until that recording is deleted.
 
-     The statement below is version 1 (voice-prints.js STATEMENT_VERSION): change
-     its words and bump both together. Turning on sends the version shown here,
-     and main.js refuses any other.
+     The statement is not in this page: it is the repo's copy for the current
+     version, notice/voice-prints-statement-v<N>.txt, which main.js reads
+     (voice-prints.js readStatement) and sends with the window's data, with the
+     advice line above it. The setup window's voices step shows the same file.
+     Turning on sends the version shown, and main.js refuses any other.
 
      Loaded from file:// with no Node, like the other windows (SAA-243 window
      hardening): voice-prints-preload.js is all it reaches of the main process.
@@ -67,6 +69,8 @@
   .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .count { color: var(--muted); font-size: 12px; margin-left: 6px; }
   .empty { color: var(--muted); }
+  .error { color: var(--danger); }
+  .error:empty { display: none; }
   .pick { flex: 0 0 auto; margin: 0; }
   .row .who { flex: 1 1 auto; }
   #selbar { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; color: var(--muted); font-size: 12px; }
@@ -84,15 +88,9 @@
   <!-- Advice, not part of the statement (SAA-275 part 3, decided 2026-11-10):
        outside #statement, so the statement's words and its version stay as
        members agreed to them. -->
-  <p id="advice">Only keep voice prints for people you talk to often. A print just saves you naming them after each call.</p>
-  <div id="statement">
-    <p>Clipwise learns the voices of people you talk to, so it can tell you who was on a call. It starts naming people once it's reliable.</p>
-    <ul>
-      <li>Keeps a voice print for you and each person you name, on this Mac only. Never uploaded.</li>
-      <li>Some places require the other person's consent. That's up to you.</li>
-      <li>Turn it off anytime to delete all voice prints. Your recordings aren't affected.</li>
-    </ul>
-  </div>
+  <p id="advice"></p>
+  <div id="statement"></div>
+  <p class="error" id="statement-error"></p>
   <div id="prints" hidden>
     <h2>Voice prints on this Mac</h2>
     <div id="selbar" hidden></div>
@@ -101,7 +99,7 @@
 </main>
 <footer>
   <button id="later">Not now</button>
-  <button id="on" class="primary">Turn on</button>
+  <button id="on" class="primary" disabled>Turn on</button>
   <button id="off" class="danger" hidden>Turn off and delete prints</button>
   <button id="done" hidden>Done</button>
 </footer>

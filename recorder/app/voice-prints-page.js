@@ -5,9 +5,35 @@
 
 // No Node here (SAA-243 window hardening): voice-prints-preload.js's channels.
 const ipcRenderer = window.clipwise;
-// The statement on this page (see the comment at the top).
-const STATEMENT_VERSION = 1;
 const $ = (id) => document.getElementById(id);
+
+// The statement and the advice above it, as main.js sends them (voice-prints.js
+// readStatement and ADVICE): blocks of two kinds only, every string put in as
+// textContent, so nothing the file holds can become markup. A statement that
+// could not be read (null) is said so, and "Turn on" is off.
+const STATEMENT_TAGS = new Set(['p', 'ul']);
+function drawStatement(statement, advice) {
+  $('advice').textContent = typeof advice === 'string' ? advice : '';
+  const box = $('statement');
+  box.replaceChildren();
+  for (const b of (statement && statement.blocks) || []) {
+    if (!STATEMENT_TAGS.has(b.tag)) continue;
+    const el = document.createElement(b.tag);
+    if (b.tag === 'ul') {
+      for (const item of b.items || []) {
+        const li = document.createElement('li');
+        li.textContent = item;
+        el.appendChild(li);
+      }
+    } else {
+      el.textContent = b.text;
+    }
+    box.appendChild(el);
+  }
+  const shown = box.childElementCount > 0;
+  $('statement-error').textContent = shown ? '' : "The statement couldn't be loaded";
+  $('on').disabled = !shown;
+}
 
 // Checked rows, by person id (SAA-275 part 1). Kept across redraws, and
 // pruned to the prints the store still lists.
@@ -65,6 +91,7 @@ function renderSelbar() {
 
 function render(data) {
   lastData = data;
+  drawStatement(data && data.statement, data && data.advice);
   const on = !!(data && data.enabled);
   $('prints').hidden = !on;
   $('on').hidden = on;
@@ -119,7 +146,12 @@ function render(data) {
   renderSelbar();
 }
 
-$('on').addEventListener('click', () => ipcRenderer.send('voice-prints:enable', { statementVersion: STATEMENT_VERSION }));
+// The version of the statement this page showed, never one of its own.
+$('on').addEventListener('click', () => {
+  const statement = lastData && lastData.statement;
+  if (!statement || $('on').disabled) return;
+  ipcRenderer.send('voice-prints:enable', { statementVersion: statement.version });
+});
 $('off').addEventListener('click', () => { if (offButton(picked.size).action === 'delete') deletePrints(picked); else ipcRenderer.send('voice-prints:disable'); });
 $('later').addEventListener('click', () => window.close());
 $('done').addEventListener('click', () => window.close());

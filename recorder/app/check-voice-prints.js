@@ -849,39 +849,45 @@ function main() {
         return [ok, ''];
     });
 
-    // --- SAA-275 part 3: the advice line, above the statement and outside it --
+    // --- The statement in one file (SAA-260 proposal 7, decided 2026-11-11) ---
+    // notice/voice-prints-statement-v<N>.txt, read by main.js and sent to every
+    // page that shows it; the advice line (SAA-275 part 3) stays outside it.
     const ADVICE = 'Only keep voice prints for people you talk to often. A print just saves you naming them after each call.';
-    // #statement exactly as members agreed to it (version 1), from 66e367e.
-    const STATEMENT_V1 = [
-        '  <div id="statement">',
-        "    <p>Clipwise learns the voices of people you talk to, so it can tell you who was on a call. It starts naming people once it's reliable.</p>",
-        '    <ul>',
-        '      <li>Keeps a voice print for you and each person you name, on this Mac only. Never uploaded.</li>',
-        "      <li>Some places require the other person's consent. That's up to you.</li>",
-        '      <li>Turn it off anytime to delete all voice prints. Your recordings aren\'t affected.</li>',
-        '    </ul>',
-        '  </div>',
-    ].join('\n');
-    // True when the advice is its own paragraph right above #statement and
-    // outside it, and #statement is exactly version 1's.
-    const adviceAbove = (html) => {
-        const at = html.indexOf('  <div id="statement">');
-        const block = at >= 0 ? html.slice(at, html.indexOf('\n  </div>', at) + '\n  </div>'.length) : '';
-        const before = at >= 0 ? html.slice(0, at) : '';
-        return block === STATEMENT_V1 && !block.includes(ADVICE)
-            && before.trimEnd().endsWith(`<p id="advice">${ADVICE}</p>`)
-            && (html.match(new RegExp(ADVICE.replace(/[.]/g, '\\.'), 'g')) || []).length === 1;
+    // Version 1's words exactly as members agreed to them (#statement at 66e367e).
+    const STATEMENT_V1_BLOCKS = [
+        { tag: 'p', text: "Clipwise learns the voices of people you talk to, so it can tell you who was on a call. It starts naming people once it's reliable." },
+        { tag: 'ul', items: [
+            'Keeps a voice print for you and each person you name, on this Mac only. Never uploaded.',
+            "Some places require the other person's consent. That's up to you.",
+            "Turn it off anytime to delete all voice prints. Your recordings aren't affected.",
+        ] },
+    ];
+    // <p id="advice"> comes before <div id="statement">, both present.
+    const adviceFirst = (html) => {
+        const a = html.indexOf('<p id="advice">');
+        const s = html.indexOf('<div id="statement">');
+        return a >= 0 && s >= 0 && a < s;
     };
-    add('65. the advice line is its own paragraph right above #statement, outside it; #statement is unchanged from 66e367e and its version stays 1', () => {
-        const pageVersion = /const STATEMENT_VERSION = 1;/.test(PAGE);
-        const modVersion = !!mod && mod.STATEMENT_VERSION === 1;
-        return [adviceAbove(HTML) && pageVersion && modVersion, JSON.stringify({ advice: adviceAbove(HTML), pageVersion, modVersion })];
+    const statementWords = (blocks) => blocks.flatMap((b) => (b.tag === 'ul' ? b.items : [b.text]));
+    add('65. readStatement(1) gives version 1 word for word as members agreed to it (#statement at 66e367e): one paragraph, then three bullets', () => {
+        if (typeof mod.readStatement !== 'function') return [false, 'no readStatement'];
+        const s = mod.readStatement(1);
+        return [s.version === 1 && JSON.stringify(s.blocks) === JSON.stringify(STATEMENT_V1_BLOCKS), JSON.stringify(s.blocks)];
     });
-    add('66. control: the same scan returns false on a copy with the advice as #statement\'s first bullet, and on a copy with no advice', () => {
-        const inside = HTML.replace(`  <p id="advice">${ADVICE}</p>\n`, '').replace('    <ul>\n', `    <ul>\n      <li>${ADVICE}</li>\n`);
-        const none = HTML.replace(`  <p id="advice">${ADVICE}</p>\n`, '');
-        const altered = inside !== HTML && none !== HTML;
-        return [altered && adviceAbove(inside) === false && adviceAbove(none) === false, JSON.stringify({ altered, inside: adviceAbove(inside), none: adviceAbove(none) })];
+    add('66. control: readStatement reads a copy with the advice added as a bullet as different blocks, and throws for a missing version and a blank file; statementAgreeable refuses null, another version and no blocks', () => {
+        if (typeof mod.readStatement !== 'function' || typeof mod.statementAgreeable !== 'function') return [false, 'no readStatement'];
+        const d = fs.mkdtempSync(path.join(os.tmpdir(), 'check-voice-prints-statement-'));
+        const real = fs.readFileSync(path.join(mod.STATEMENT_DIR, mod.statementFile(1)), 'utf8');
+        fs.writeFileSync(path.join(d, mod.statementFile(1)), real.replace('\n- ', `\n- ${ADVICE}\n- `));
+        fs.writeFileSync(path.join(d, mod.statementFile(2)), '\n  \n');
+        const changed = JSON.stringify(mod.readStatement(1, d).blocks) !== JSON.stringify(STATEMENT_V1_BLOCKS);
+        const throws = (fn) => { try { fn(); return false; } catch { return true; } };
+        const ok = changed && throws(() => mod.readStatement(2, d)) && throws(() => mod.readStatement(99, d))
+            && !mod.statementAgreeable(null)
+            && !mod.statementAgreeable({ version: mod.STATEMENT_VERSION + 1, blocks: STATEMENT_V1_BLOCKS })
+            && !mod.statementAgreeable({ version: mod.STATEMENT_VERSION, blocks: [] })
+            && mod.statementAgreeable(mod.readStatement());
+        return [ok, JSON.stringify({ changed })];
     });
 
     // --- SAA-275, the 11-10 finding: the turn-off button and its dialog --------
@@ -942,8 +948,38 @@ function main() {
         return [ok, `${body.length} chars`];
     });
 
+    add('71. the page (text): voice-prints.html and voice-prints-page.js hold none of the statement\'s or the advice\'s words and no version of their own; #advice and #statement are empty, #advice first; the page draws with textContent only and sends the version it was given', () => {
+        const words = [...statementWords(STATEMENT_V1_BLOCKS), ADVICE];
+        const ok = words.every((w) => !HTML.includes(w) && !PAGE.includes(w))
+            && HTML.includes('<p id="advice"></p>') && HTML.includes('<div id="statement"></div>')
+            && adviceFirst(HTML)
+            // Control: the same order test is false on a copy with the two swapped.
+            && !adviceFirst(HTML.replace('<p id="advice"></p>\n  <div id="statement"></div>', '<div id="statement"></div>\n  <p id="advice"></p>'))
+            && !/STATEMENT_VERSION/.test(PAGE) && !/innerHTML|insertAdjacentHTML|outerHTML/.test(PAGE)
+            && PAGE.includes("ipcRenderer.send('voice-prints:enable', { statementVersion: statement.version });")
+            && /function drawStatement\(statement, advice\) \{/.test(PAGE)
+            && PAGE.includes("drawStatement(data && data.statement, data && data.advice);");
+        return [ok, JSON.stringify(words.filter((w) => HTML.includes(w) || PAGE.includes(w)))];
+    });
+    add('72. main.js (text): the window\'s data carries the statement read by readStatement and voice-prints.js\'s ADVICE; the enable handler refuses before anything else when the statement is not agreeable', () => {
+        const at = SRC.indexOf("ipcMain.on('voice-prints:enable'");
+        const body = at >= 0 ? SRC.slice(at, SRC.indexOf('\n    });\n', at)) : '';
+        const ok = /function voicePrintsStatementForPage\(\) \{\s*try \{\s*return voicePrintsModule\.readStatement\(\);/.test(SRC)
+            && SRC.includes('const text = { statement: voicePrintsStatementForPage(), advice: voicePrintsModule.ADVICE };')
+            && body.indexOf('if (!voicePrintsModule.statementAgreeable(voicePrintsStatementForPage())) {') >= 0
+            && body.indexOf('statementAgreeable') < body.indexOf('voicePrints().enable(version)');
+        return [ok, `${body.length} chars`];
+    });
+    add('73. ADVICE is the advice line from 66e367e and is not in the statement file; build-app.sh bundles the notice folder, where the statement file is', () => {
+        const file = fs.readFileSync(path.join(mod.STATEMENT_DIR, mod.statementFile(mod.STATEMENT_VERSION)), 'utf8');
+        const ok = mod.ADVICE === ADVICE && !file.includes(ADVICE)
+            && path.basename(mod.STATEMENT_DIR) === 'notice'
+            && BUILD.includes('cp -R "$APP_SRC/notice" "$C/Resources/app/notice"');
+        return [ok, ''];
+    });
+
     for (const [name, fn] of cases) {
-        const needsModule = !/^(2[2-5]|39|4[0-2]|5[1-4]|6[4-8]|70)\./.test(name);
+        const needsModule = !/^(2[2-5]|39|4[0-2]|5[1-4]|64|6[7-8]|7[0-2])\./.test(name);
         if (needsModule && !mod) { check(name, false, why); continue; }
         let result;
         try { result = fn(); } catch (err) { result = [false, `threw ${err.message}`]; }

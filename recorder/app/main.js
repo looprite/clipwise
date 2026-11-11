@@ -1379,12 +1379,26 @@ function voicePrintsRemoveRecording(stem) {
     }
 }
 
+// The opt-in statement for a page: this build's version of notice/voice-prints-
+// statement-v<N>.txt (voice-prints.js readStatement). Missing or unreadable is
+// logged and gives null: the page then shows that it couldn't be loaded, with
+// "Turn on" off, and the enable handler turns nothing on.
+function voicePrintsStatementForPage() {
+    try {
+        return voicePrintsModule.readStatement();
+    } catch (err) {
+        console.error(`[clipwise-recorder] voice prints: could not read the statement v${voicePrintsModule.STATEMENT_VERSION} (${err.code || err.name})`);
+        return null;
+    }
+}
+
 function sendVoicePrintsData() {
     if (!voicePrintsWindow || voicePrintsWindow.isDestroyed()) return;
-    let data = { enabled: false, profiles: null };
+    const text = { statement: voicePrintsStatementForPage(), advice: voicePrintsModule.ADVICE };
+    let data = { enabled: false, profiles: null, ...text };
     try {
         const vp = voicePrints();
-        data = { enabled: vp.isEnabled(), profiles: vp.isEnabled() ? vp.listProfiles() : null };
+        data = { enabled: vp.isEnabled(), profiles: vp.isEnabled() ? vp.listProfiles() : null, ...text };
     } catch (err) {
         console.error(`[clipwise-recorder] voice prints: could not read the store (${err.code || err.name})`);
     }
@@ -1425,6 +1439,13 @@ function registerVoicePrintsIpc() {
     ipcMain.on('voice-prints:ready', () => sendVoicePrintsData());
     ipcMain.on('voice-prints:enable', async (_event, payload) => {
         const version = payload && payload.statementVersion;
+        // A statement that could not be read can't be agreed to, whatever the
+        // page sent: its button is off, and nothing is turned on here either.
+        if (!voicePrintsModule.statementAgreeable(voicePrintsStatementForPage())) {
+            console.error('[clipwise-recorder] voice prints: not turned on (the statement could not be loaded)');
+            sendVoicePrintsData();
+            return;
+        }
         if (!safeStorage.isEncryptionAvailable()) {
             await dialog.showMessageBox(parent(), {
                 type: 'warning', buttons: ['OK'],

@@ -55,8 +55,17 @@
 const fs = require('fs');
 const path = require('path');
 
-// The opt-in screen's statement (voice-prints.html). Bump with its text.
+// The opt-in screen's statement: the version of notice/voice-prints-statement-
+// v<N>.txt in force (readStatement, below). Bump with its text, adding the next
+// file; the earlier ones stay as the record of what each version said.
 const STATEMENT_VERSION = 1;
+// Where the statement files are: beside the recording notice's, in the repo
+// and the bundle (build-app.sh copies the whole folder).
+const STATEMENT_DIR = path.join(__dirname, 'notice');
+// Advice shown right above the statement and outside it (SAA-275 part 3,
+// decided 2026-11-10): not part of what is agreed to, so changing it changes
+// no version. One copy, sent to every page that shows the statement.
+const ADVICE = 'Only keep voice prints for people you talk to often. A print just saves you naming them after each call.';
 // diarize's hostEchoCosineThreshold (recorder/diarize/Sources/diarize/main.swift):
 // a tap voice this close to the member's own print is the member.
 const SELF_MATCH_CUTOFF = 0.55;
@@ -625,7 +634,48 @@ function turnOffDialog(listing) {
     };
 }
 
+// The statement's text, one file per version: notice/voice-prints-statement-
+// v<N>.txt. Plain text, no title:
+//   "- " at a line's start   a bullet; consecutive bullets are one list
+//   any other lines          a paragraph; lines run together
+// and a blank line ends either. -> { version, blocks: [{ tag: 'p', text } |
+// { tag: 'ul', items }] }. Every page draws these with textContent only, so
+// nothing in the file can become markup. Throws when the file is missing or
+// holds nothing, so a bundle without it can't show a statement to agree to.
+function statementFile(version) {
+    return `voice-prints-statement-v${version}.txt`;
+}
+function readStatement(version = STATEMENT_VERSION, dir = STATEMENT_DIR) {
+    const file = statementFile(version);
+    const lines = fs.readFileSync(path.join(dir, file), 'utf8').replace(/\r\n/g, '\n').split('\n');
+    const clean = (s) => s.replace(/\s+/g, ' ').trim();
+    const blocks = [];
+    let open = null;
+    for (const raw of lines) {
+        const line = raw.trimEnd();
+        if (line.trim() === '') { open = null; continue; }
+        if (line.startsWith('- ')) {
+            if (!open || open.tag !== 'ul') { open = { tag: 'ul', items: [] }; blocks.push(open); }
+            open.items.push(clean(line.slice(2)));
+        } else if (open && open.tag === 'p') {
+            open.text = clean(`${open.text} ${line}`);
+        } else {
+            open = { tag: 'p', text: clean(line) };
+            blocks.push(open);
+        }
+    }
+    if (blocks.length === 0) throw new Error(`${file} has no text`);
+    return { version, blocks };
+}
+
+// Whether a statement as a page gets it can be agreed to: this build's version,
+// with at least one block. Null (it could not be read) cannot.
+function statementAgreeable(statement) {
+    return !!(statement && statement.version === STATEMENT_VERSION && Array.isArray(statement.blocks) && statement.blocks.length > 0);
+}
+
 module.exports = {
-    STATEMENT_VERSION, SELF_MATCH_CUTOFF, normalise, cosine, meanOf, decideEnrolment,
+    STATEMENT_VERSION, STATEMENT_DIR, ADVICE, statementFile, readStatement, statementAgreeable,
+    SELF_MATCH_CUTOFF, normalise, cosine, meanOf, decideEnrolment,
     removeDiarizeEmbeddings, removalSkip, runRemovalWhileOff, createVoicePrints, turnOffDialog,
 };
