@@ -868,6 +868,16 @@ function main() {
         const s = html.indexOf('<div id="statement">');
         return a >= 0 && s >= 0 && a < s;
     };
+    // Version 2 (decided 2026-11-11): version 1 with its second and third
+    // bullets changed, everything else word for word.
+    const STATEMENT_V2_BLOCKS = [
+        STATEMENT_V1_BLOCKS[0],
+        { tag: 'ul', items: [
+            STATEMENT_V1_BLOCKS[1].items[0],
+            "Some locations require the other person's consent. That's up to you.",
+            "Delete any one print, or turn it off anytime to delete them all. Your recordings aren't affected.",
+        ] },
+    ];
     const statementWords = (blocks) => blocks.flatMap((b) => (b.tag === 'ul' ? b.items : [b.text]));
     add('65. readStatement(1) gives version 1 word for word as members agreed to it (#statement at 66e367e): one paragraph, then three bullets', () => {
         if (typeof mod.readStatement !== 'function') return [false, 'no readStatement'];
@@ -949,7 +959,7 @@ function main() {
     });
 
     add('71. the page (text): voice-prints.html and voice-prints-page.js hold none of the statement\'s or the advice\'s words and no version of their own; #advice and #statement are empty, #advice first; the page draws with textContent only and sends the version it was given', () => {
-        const words = [...statementWords(STATEMENT_V1_BLOCKS), ADVICE];
+        const words = [...statementWords(STATEMENT_V1_BLOCKS), ...statementWords(STATEMENT_V2_BLOCKS), ADVICE];
         const ok = words.every((w) => !HTML.includes(w) && !PAGE.includes(w))
             && HTML.includes('<p id="advice"></p>') && HTML.includes('<div id="statement"></div>')
             && adviceFirst(HTML)
@@ -976,6 +986,34 @@ function main() {
             && path.basename(mod.STATEMENT_DIR) === 'notice'
             && BUILD.includes('cp -R "$APP_SRC/notice" "$C/Resources/app/notice"');
         return [ok, ''];
+    });
+
+    add('74. the statement in force is version 2: readStatement() gives v2 word for word (v1 with its second and third bullets changed), and enable refuses version 1', () => {
+        if (typeof mod.readStatement !== 'function') return [false, 'no readStatement'];
+        const s = mod.readStatement();
+        const fx = fixture();
+        let refusedV1 = false;
+        try { open(fx).enable(1); } catch { refusedV1 = true; }
+        const ok = mod.STATEMENT_VERSION === 2 && s.version === 2
+            && JSON.stringify(s.blocks) === JSON.stringify(STATEMENT_V2_BLOCKS)
+            && refusedV1 && !fs.existsSync(path.join(fx.support, 'voice-prints', 'setting.json'));
+        return [ok, JSON.stringify({ version: mod.STATEMENT_VERSION, blocks: s.blocks, refusedV1 })];
+    });
+    add('75. a Mac that agreed to version 1 is asked again: its setting.json (on, statement 1) reads as off, the window gets "off" with the v2 statement, and the launch pass deletes the prints, score log and tally it kept', () => {
+        // No early return on code without readStatement (42de118), so the
+        // control shows what that code does with the file: on, nothing removed.
+        const { vp } = fivePrints();
+        const before = { prints: vp.listProfiles().people.length, self: !!vp.listProfiles().self, tally: fs.existsSync(vp.tallyPath), scores: fs.existsSync(vp.scoresPath) };
+        // What 42de118 wrote when its "Turn on" was clicked.
+        fs.writeFileSync(path.join(vp.dir, 'setting.json'), JSON.stringify({ enabled: true, statementVersion: 1, consentedAt: '2026-11-01T10:00:00.000Z' }) + '\n', { mode: 0o600 });
+        const offNow = vp.isEnabled() === false;
+        const pageStatement = typeof mod.readStatement === 'function' ? mod.readStatement() : null;
+        const r = mod.runRemovalWhileOff(() => vp, { reason: 'launch', skip: () => false, log: () => {} });
+        const gone = !fs.existsSync(vp.profilesPath) && !fs.existsSync(vp.tallyPath) && !fs.existsSync(vp.scoresPath);
+        const ok = before.prints === 5 && before.self && before.tally && before.scores
+            && offNow && !!pageStatement && pageStatement.version === 2 && mod.statementAgreeable(pageStatement)
+            && r.profiles === true && gone;
+        return [ok, JSON.stringify({ before, offNow, removed: r.skipped ? r : { profiles: r.profiles, tally: r.tally, scores: r.scores }, gone, statement: pageStatement && pageStatement.version })];
     });
 
     for (const [name, fn] of cases) {

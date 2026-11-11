@@ -58,7 +58,10 @@ const path = require('path');
 // The opt-in screen's statement: the version of notice/voice-prints-statement-
 // v<N>.txt in force (readStatement, below). Bump with its text, adding the next
 // file; the earlier ones stay as the record of what each version said.
-const STATEMENT_VERSION = 1;
+// Version 2 (2026-11-11): "Some locations require…" and "Delete any one print,
+// or turn it off…". A setting.json agreed at version 1 reads as off, so the
+// prints it kept are deleted at the next launch and the member is asked again.
+const STATEMENT_VERSION = 2;
 // Where the statement files are: beside the recording notice's, in the repo
 // and the bundle (build-app.sh copies the whole folder).
 const STATEMENT_DIR = path.join(__dirname, 'notice');
