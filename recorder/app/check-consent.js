@@ -263,11 +263,10 @@ const CASES = [
         return n.version === 1 && n.title === APPROVED_NOTICE.title
             && JSON.stringify(n.blocks) === JSON.stringify(APPROVED_NOTICE.paragraphs.map((text) => ({ tag: 'p', text })))
             && JSON.stringify(n.paragraphs) === JSON.stringify(APPROVED_NOTICE.paragraphs); }],
-    // Notice v2 (Gate 1, SAA-280): the current version, its text, and that an
-    // answer given to v1 alone no longer counts.
-    ['notice v2: the current version is 2', () => consent.STATEMENT_VERSION === 2],
-    ['notice v2: readNotice() for the current version gives the v2 title, its nine headings in order, its two lists and its 26 paragraphs', () => {
-        const n = consent.readNotice();
+    // Notice v2 (Gate 1, SAA-280), kept as the record of what was agreed to: its
+    // text, and that an answer given to v1 alone no longer counts.
+    ['notice v2: readNotice(2) gives the v2 title, its nine headings in order, its two lists and its 26 paragraphs', () => {
+        const n = consent.readNotice(2);
         const of = (tag) => n.blocks.filter((b) => b.tag === tag);
         return n.version === 2 && n.title === APPROVED_NOTICE_V2.title
             && JSON.stringify(of('h2').map((b) => b.text)) === JSON.stringify(APPROVED_NOTICE_V2.headings)
@@ -275,7 +274,7 @@ const CASES = [
             && of('p').length === APPROVED_NOTICE_V2.paragraphs
             && n.blocks[0].tag === 'h2' && n.blocks[0].text === APPROVED_NOTICE_V2.headings[0]; }],
     ['notice v2: every block is one the page draws (h2, ul, p), it can be agreed to, and no markup, straight quote or leftover "## "/"- " is in its text', () => {
-        const n = consent.readNotice();
+        const n = consent.readNotice(2);
         const texts = [n.title, ...n.blocks.flatMap((b) => (b.tag === 'ul' ? b.items : [b.text]))];
         return n.version === 2 && consent.noticeAgreeable(n)
             && n.blocks.every((b) => ['h2', 'ul', 'p'].includes(b.tag))
@@ -293,18 +292,63 @@ const CASES = [
         put(d, good(1));
         return !isAcknowledged(d) && consent.noticeStamp(d) === null && consent.noticeReport(d) === null
             && setup.trayAccountItems({ ...ALL_DONE, acknowledged: consent.isAcknowledged(d), setupCompleted: true }).includes('recording-notice'); })],
-    ['notice v2: agreeing over a v1 answer records version 2 with the new time', () => withDir(d => {
+    ['notice: agreeing over a v1 answer records the current version with the new time', () => withDir(d => {
         put(d, good(1));
         consent.recordAcknowledgement(d, new Date('2026-11-09T12:00:00Z'));
         const doc = consent.readConsent(d);
-        return doc.version === 2 && doc.acknowledged_at === '2026-11-09T12:00:00.000Z'
-            && JSON.stringify(consent.noticeReport(d)) === JSON.stringify({ version: 2, acknowledgedAt: '2026-11-09T12:00:00.000Z' }); })],
-    ['notice v2: the admin window heading for this build reads "Current notice: updated Nov 10, 2026"', () =>
+        return doc.version === consent.STATEMENT_VERSION && doc.acknowledged_at === '2026-11-09T12:00:00.000Z'
+            && JSON.stringify(consent.noticeReport(d)) === JSON.stringify({ version: consent.STATEMENT_VERSION, acknowledgedAt: '2026-11-09T12:00:00.000Z' }); })],
+    ['notice v3: the admin window heading for this build reads "Current notice: updated Nov 11, 2026"', () =>
         teamNotice && teamNotice.formatTeamNotice([], consent.STATEMENT_VERSION, consent.NOTICE_UPDATED && consent.NOTICE_UPDATED[consent.STATEMENT_VERSION]).heading
-            === 'Current notice: updated Nov 10, 2026'],
+            === 'Current notice: updated Nov 11, 2026'],
     ['notice: this build\'s version has a published day (consent.js NOTICE_UPDATED), a real YYYY-MM-DD', () =>
         !!consent.NOTICE_UPDATED && /^\d{4}-\d{2}-\d{2}$/.test(consent.NOTICE_UPDATED[consent.STATEMENT_VERSION] || '')
         && !Number.isNaN(Date.parse(`${consent.NOTICE_UPDATED[consent.STATEMENT_VERSION]}T00:00:00Z`))],
+    // Notice v3 (decided 2026-11-11): v2 with two changes in its voice
+    // sections, and v2's short notice word for word. Old files stay as the
+    // record, byte for byte (SHA-256 at 42de118).
+    ['notice v3: the current version is 3, published 2026-11-11', () =>
+        consent.STATEMENT_VERSION === 3 && !!consent.NOTICE_UPDATED && consent.NOTICE_UPDATED[3] === '2026-11-11'],
+    ['notice v3: readNotice(3) is readNotice(2) block for block, except a paragraph added at the end of Voices and one sentence of the shared-mic paragraph changed', () => {
+        const v2 = consent.readNotice(2);
+        const v3 = consent.readNotice(3);
+        const expected = JSON.parse(JSON.stringify(v2.blocks));
+        const voices = expected.findIndex((b) => b.tag === 'h2' && b.text === 'Voices');
+        const nextHeading = expected.findIndex((b, i) => i > voices && b.tag === 'h2');
+        expected.splice(nextHeading, 0, { tag: 'p', text: 'Some locations require the other person’s consent. That’s up to you.' });
+        const old = 'Your voice print stays as it is; this call just doesn’t add to it.';
+        const shared = expected.filter((b) => b.tag === 'p' && b.text.endsWith(old));
+        if (voices < 0 || nextHeading < 0 || shared.length !== 1) return false;
+        shared[0].text = shared[0].text.slice(0, -old.length) + 'If Recognize voices is on, your voice print stays as it is; this call just doesn’t add to it.';
+        return v3.version === 3 && v3.title === v2.title && JSON.stringify(v3.blocks) === JSON.stringify(expected)
+            && v3.blocks.filter((b) => b.tag === 'p').length === 27; }],
+    ['notice v3: control: the same comparison fails for v2 itself (the two changes are really there)', () =>
+        JSON.stringify(consent.readNotice(2).blocks) !== JSON.stringify(consent.readNotice(3).blocks)],
+    ['notice v3: every block is one the page draws, it can be agreed to, and no markup, straight quote or leftover "## "/"- " is in its text', () => {
+        const n = consent.readNotice(3);
+        const texts = [n.title, ...n.blocks.flatMap((b) => (b.tag === 'ul' ? b.items : [b.text]))];
+        return consent.noticeAgreeable(n) && n.blocks.every((b) => ['h2', 'ul', 'p'].includes(b.tag))
+            && texts.every((t) => typeof t === 'string' && t.length > 0 && !/['"<>]/.test(t) && !/^(## |- )/.test(t)); }],
+    ['notice v3: the short notice, readNotice(3, ack), is v2\'s word for word, and is what the acknowledgement window gets', () =>
+        JSON.stringify(consent.readNotice(3, consent.NOTICE_DIR, 'ack').blocks) === JSON.stringify(consent.readNotice(2, consent.NOTICE_DIR, 'ack').blocks)
+        && consent.readNotice(3, consent.NOTICE_DIR, 'ack').title === APPROVED_NOTICE_V2_ACK.title
+        && consent.readNotice(consent.STATEMENT_VERSION, consent.NOTICE_DIR, 'ack').version === 3],
+    ['notice v3: the v1 and v2 files, full and short, are byte for byte as at 42de118', () => {
+        const sha = (f) => require('crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname, 'notice', f))).digest('hex');
+        return sha('recording-notice-v1.txt') === '9871a369ce121fd95f379b62f1eeaf9bdfd345a88364e9d77d114bc9f5ac872f'
+            && sha('recording-notice-v2.txt') === 'bb7909c7c0ba34ac5d054d5158b85ba30eb51fe11a2cd2a87a2cca3a253841a1'
+            && sha('recording-notice-v2-ack.txt') === 'c4711e5daefe664360614ca7b6d3a029007f87d38bb03a92610fad0715e5c0de'; }],
+    ['notice v3: a Mac that agreed to v2 is asked again: not agreed to, no stamp, no report, the tray offers the notice, and a finished setup opens the notice alone', () => withDir(d => {
+        put(d, good(2));
+        setup.recordSetupCompleted(d);
+        const asked = !isAcknowledged(d) && consent.noticeStamp(d) === null && consent.noticeReport(d) === null
+            && setup.trayAccountItems({ ...ALL_DONE, acknowledged: consent.isAcknowledged(d), setupCompleted: setup.isSetupCompleted(d) }).includes('recording-notice');
+        // showSetupWindow returns before opening only when setup is finished,
+        // the window isn't a reread, and the notice is agreed to.
+        const gate = /const noticeOnly = setupCompleted\(\) && !forPermissions;\s*if \(noticeOnly && mode !== 'reread' && consent\.isAcknowledged\(SUPPORT_DIR\)\) return;/.test(fnBody('showSetupWindow'))
+            && /showSetupWindow\('launch'\);/.test(SRC)
+            && /if \(!consent\.isAcknowledged\(SUPPORT_DIR\)\) \{\s*blockedStart = \{ trigger, at: Date\.now\(\), reason: 'notice' \};/.test(SRC);
+        return asked && gate; })],
     // The short acknowledgement and the full notice, one version (Gate 1, SAA-280).
     ['notice ack: readNotice(2, NOTICE_DIR, \'ack\') gives the approved title and exactly the four approved paragraphs, with no headings or lists', () => {
         const n = consent.readNotice(2, consent.NOTICE_DIR, 'ack');

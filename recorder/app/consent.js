@@ -25,11 +25,14 @@ const path = require('path');
 // version counts as not acknowledged; a higher one (a newer build's file read
 // by an older build) does not. Each version's text is
 // notice/recording-notice-v<N>.txt (readNotice, below).
-const STATEMENT_VERSION = 2;
+// Version 3 (2026-11-11): the Voices section says some locations require the
+// other person's consent, and that a shared-mic call leaves your print as it is
+// only if Recognize voices is on. Its short notice is v2's, word for word.
+const STATEMENT_VERSION = 3;
 // The day each version was published, for the admin's "Who accepted the
 // notice" heading (team-notice.js, SAA-285). Raising STATEMENT_VERSION means
 // adding its day here; check-consent.js fails without it.
-const NOTICE_UPDATED = { 2: '2026-11-10' };
+const NOTICE_UPDATED = { 2: '2026-11-10', 3: '2026-11-11' };
 
 // Single line, plain ASCII, on purpose. A line break in a pasted chat message
 // can send it in two pieces, and a curly quote or a dash is the kind of
