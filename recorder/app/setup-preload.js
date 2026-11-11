@@ -17,7 +17,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const SEND = ['setup:ready', 'setup:acknowledge', 'setup:later', 'setup:address', 'setup:change-address',
     'setup:signin', 'setup:permission-request', 'setup:permission-settings', 'setup:filevault-settings',
-    'setup:done', 'setup:copy-claude-address'];
+    'setup:done', 'setup:copy-claude-address', 'setup:voices'];
 const ON = ['setup:state'];
 
 function allowed(list, how, channel) {

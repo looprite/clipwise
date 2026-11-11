@@ -155,6 +155,18 @@
     <p class="error" id="perm-error"></p>
   </div>
 
+  <!-- The voices step (SAA-260 proposal 7): the Recognize voices opt-in, as
+       its own window shows it. The advice and the statement are not in this
+       page: main.js sends them (voice-prints.js ADVICE, and readStatement for
+       notice/voice-prints-statement-v<N>.txt), and setup-page.js draws them as
+       text. Nothing is pre-ticked; "Not now" and "Turn on" both answer it. -->
+  <div class="screen" id="screen-voices">
+    <h1>Recognize voices</h1>
+    <p id="voices-advice"></p>
+    <div id="voices-statement"></div>
+    <p class="error" id="voices-error"></p>
+  </div>
+
   <div class="screen" id="screen-claude">
     <h1>Use Clipwise in Claude</h1>
     <p>Ask Claude about your calls. Add this address to Claude as a custom connector:</p>

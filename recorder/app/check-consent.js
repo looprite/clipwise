@@ -914,7 +914,10 @@ const CASES = [
             && SETUP_PAGE.includes("$('later').addEventListener('click', () => { if (view && view.screen === 'voices') send('setup:voices', { answer: 'later' }); else send('setup:later'); });")
             && SETUP_PAGE.includes("else if (view.screen === 'voices') send('setup:voices', { answer: 'on', statementVersion: view.voicesStatement.version });")
             && /\} else if \(v\.screen === 'voices'\) \{[\s\S]{0,400}primary\.textContent = 'Turn on';[\s\S]{0,200}primary\.disabled = !!v\.busy \|\| !shown;/.test(SETUP_PAGE)
-            && !/later\.disabled/.test(SETUP_PAGE) && !/innerHTML|insertAdjacentHTML|outerHTML/.test(SETUP_PAGE); }],
+            && !/later\.disabled/.test(SETUP_PAGE) && !/innerHTML|insertAdjacentHTML|outerHTML/.test(SETUP_PAGE)
+            // The secondary button's label, from the page's own rule, run for the voices screen.
+            && (() => { const m = /\n  later\.textContent = ([^;\n]+);/.exec(SETUP_PAGE);
+                try { return !!m && new Function('v', `return ${m[1]};`)({ screen: 'voices' }) === 'Not now'; } catch { return false; } })(); }],
     ['voices step: it is step 5 of 6', () =>
         setup.SCREENS.indexOf('voices') + 1 === 5 && setup.SCREENS.length === 6
         && fnBody('setupView').includes('stepText: w.noticeOnly ? \'\' : `Step ${setup.SCREENS.indexOf(screen) + 1} of ${setup.SCREENS.length}`,')],

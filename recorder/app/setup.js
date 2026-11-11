@@ -24,29 +24,40 @@
 const fs = require('fs');
 const path = require('path');
 
-// The fifth, 'claude' (Jon's call 9, SAA-198 step 6), has no "done" of its own:
-// it is what the window shows once the four before it are done, and Done there
+// The fifth, 'voices' (SAA-260 proposal 7), is optional: the Recognize voices
+// opt-in, its statement from the one file the Recognize voices window shows.
+// "Not now" and "Turn on" both answer it, recorded as setup.json's
+// voices_answered_at, and the window moves on. That key says only that the
+// step was answered, never what: consent is voice-prints/setting.json alone.
+// It doesn't count toward setup being finished (firstIncompleteScreen reads the
+// four), so an install that finished setup before it existed never sees it.
+//
+// The sixth, 'claude' (Jon's call 9, SAA-198 step 6), has no "done" of its own:
+// it is what the window shows once the steps before it are done, and Done there
 // finishes setup. Nothing records whether it was seen, and nothing checks the
 // connection; an install that already had all four done never opens the window
 // as setup, so never shows it.
-const SCREENS = ['notice', 'address', 'signin', 'permissions', 'claude'];
+const SCREENS = ['notice', 'address', 'signin', 'permissions', 'voices', 'claude'];
 
 function setupPath(supportDir) {
     return path.join(supportDir, 'setup.json');
 }
 
 // Written atomically, creating the directory first. Idempotent: the first time is
-// kept. Throws if it cannot be written, so the caller does not treat it as saved.
+// kept. Any other keys already in the file are kept too (setup.json holds two).
+// Throws if it cannot be written, so the caller does not treat it as saved.
 function writeOnce(file, key, now) {
+    let doc = {};
     try {
-        const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
-        if (doc && typeof doc[key] === 'string' && doc[key]) return doc;
+        const read = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (read && typeof read === 'object' && !Array.isArray(read)) doc = read;
     } catch {}
+    if (typeof doc[key] === 'string' && doc[key]) return doc;
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const doc = { [key]: now.toISOString() };
-    fs.writeFileSync(`${file}.tmp`, JSON.stringify(doc, null, 2) + '\n');
+    const out = { ...doc, [key]: now.toISOString() };
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify(out, null, 2) + '\n');
     fs.renameSync(`${file}.tmp`, file);
-    return doc;
+    return out;
 }
 
 function readStamp(file, key) {
@@ -66,6 +77,15 @@ function recordSetupCompleted(supportDir, now = new Date()) {
     return writeOnce(setupPath(supportDir), 'completed_at', now);
 }
 
+// The voices step was answered, "Not now" or "Turn on". Not consent.
+function isVoicesAnswered(supportDir) {
+    return readStamp(setupPath(supportDir), 'voices_answered_at');
+}
+
+function recordVoicesAnswered(supportDir, now = new Date()) {
+    return writeOnce(setupPath(supportDir), 'voices_answered_at', now);
+}
+
 // A grant counts as settled unless it is unanswered or refused. "restricted",
 // "unavailable" and an unexpected value are not statements about this person's
 // answer (main.js deniedServices reads them the same way), so they do not hold
@@ -83,6 +103,13 @@ function firstIncompleteScreen(status) {
     if (!status.signedIn) return 'signin';
     if (!permissionSettled(status.mic) || !permissionSettled(status.tap)) return 'permissions';
     return null;
+}
+
+// The screen the window shows: the first of the four not done, then the voices
+// step until it is answered, then 'claude'.
+//   status: as firstIncompleteScreen's, plus voicesAnswered
+function nextScreen(status) {
+    return firstIncompleteScreen(status) || (status.voicesAnswered ? 'claude' : 'voices');
 }
 
 // Whether setup counts as finished, given what is done now. Not yet recorded but
@@ -248,8 +275,8 @@ function locationWarning({ bundled, inApplications, appPath, home, parentWritabl
 
 module.exports = {
     SCREENS,
-    setupPath, isSetupCompleted, recordSetupCompleted,
-    permissionSettled, firstIncompleteScreen, settleSetup,
+    setupPath, isSetupCompleted, recordSetupCompleted, isVoicesAnswered, recordVoicesAnswered,
+    permissionSettled, firstIncompleteScreen, nextScreen, settleSetup,
     normalizeTeamAddress, isClipwiseDiscovery, claudeAddress,
     trayAccountItems, formatElapsed,
     loginItemPath, loginDefaultApplied, recordLoginDefaultApplied, shouldApplyLoginDefault,

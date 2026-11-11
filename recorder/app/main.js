@@ -4624,6 +4624,9 @@ function setupStatus() {
         mic: lastPermissions.mic,
         tap: lastPermissions.tap,
         teamRole,
+        // The voices step (SAA-260 proposal 7): answered in setup, or prints
+        // already on and agreed to this build's statement, so it isn't asked.
+        voicesAnswered: setup.isVoicesAnswered(SUPPORT_DIR) || voicePrintsOn(),
     };
 }
 
@@ -4753,10 +4756,11 @@ function noticeForPage(mode) {
 function setupView() {
     const w = setupWindow;
     const status = setupStatus();
-    // With the four done, the last screen: Use Clipwise in Claude (SAA-198 step 6).
+    // With the four done, the voices step until it is answered (SAA-260
+    // proposal 7), then the last screen: Use Clipwise in Claude (SAA-198 step 6).
     const screen = w.noticeOnly
         ? 'notice'
-        : (w.override || setup.firstIncompleteScreen(status) || 'claude');
+        : (w.override || setup.nextScreen(status));
     const host = status.server ? new URL(status.server).host : '';
     return {
         screen,
@@ -4779,6 +4783,10 @@ function setupView() {
         tap: status.tap,
         permissionsSettled: setup.permissionSettled(status.mic) && setup.permissionSettled(status.tap),
         claudeAddress: setup.claudeAddress(status.server),
+        // The voices step's text: the statement and the advice above it, read as
+        // the Recognize voices window reads them. Null on every other screen.
+        voicesStatement: screen === 'voices' ? voicePrintsStatementForPage() : null,
+        voicesAdvice: screen === 'voices' ? voicePrintsModule.ADVICE : null,
         // Null until fdesetup has answered, and for the notice alone.
         fileVaultWarning: w.noticeOnly || !w.fileVault ? null : filevault.fileVaultWarning(w.fileVault),
     };
@@ -5059,6 +5067,56 @@ function registerSetupIpc() {
                 : `[clipwise-recorder] setup: "Not now" at "${screen}"`);
         closeSetupWindow();
         renderTray();
+    });
+    // The voices step (SAA-260 proposal 7). Both answers are recorded as
+    // answered, and the window moves on to Use Clipwise in Claude. "Not now"
+    // turns nothing on. "Turn on" does what the Recognize voices window's does,
+    // with the version this window showed. Closing the window answers nothing.
+    ipcMain.on('setup:voices', (_event, payload) => {
+        if (!fromWindow(payload) || setupView().screen !== 'voices') return;
+        const w = setupWindow;
+        if (payload.answer === 'later') {
+            try {
+                setup.recordVoicesAnswered(SUPPORT_DIR);
+            } catch (err) {
+                console.error(`setup: could not save the voices answer: ${String(err)}`);
+                w.error = 'Couldn’t save your answer. Try again.';
+                sendSetupState();
+                return;
+            }
+            console.error('[clipwise-recorder] setup: voices "Not now"');
+            w.error = '';
+            sendSetupState();
+            return;
+        }
+        if (payload.answer !== 'on') return;
+        if (!voicePrintsModule.statementAgreeable(voicePrintsStatementForPage()) || payload.statementVersion !== voicePrintsModule.STATEMENT_VERSION) {
+            console.error('[clipwise-recorder] voice prints: not turned on from setup (the statement could not be loaded, or was not this build\'s)');
+            sendSetupState();
+            return;
+        }
+        if (!safeStorage.isEncryptionAvailable()) {
+            w.error = 'This Mac can’t encrypt the prints right now, so none will be kept.';
+            sendSetupState();
+            return;
+        }
+        try {
+            voicePrints().enable(payload.statementVersion);
+        } catch (err) {
+            console.error(`[clipwise-recorder] voice prints: not turned on from setup (${err.code || err.name})`);
+            w.error = 'Couldn’t turn it on. Try again, or choose Not now.';
+            sendSetupState();
+            return;
+        }
+        console.error(`[clipwise-recorder] voice prints: turned on (statement ${payload.statementVersion}, from setup)`);
+        // Already counted as answered by voicePrintsOn; written so it stays
+        // answered if prints are turned off later.
+        try { setup.recordVoicesAnswered(SUPPORT_DIR); } catch (err) {
+            console.error(`setup: could not save the voices answer: ${String(err)}`);
+        }
+        w.error = '';
+        sendVoicePrintsData();
+        sendSetupState();
     });
     ipcMain.on('setup:address', (_event, payload) => {
         if (!fromWindow(payload) || setupWindow.busy) return;

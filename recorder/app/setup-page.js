@@ -40,6 +40,31 @@ function drawNotice(notice) {
   }
 }
 
+// The voices step's advice and statement, as main.js sends them (voice-prints.js
+// ADVICE and readStatement): paragraphs and one list only, every string as
+// textContent. -> whether a statement was drawn, so "Turn on" is off without one.
+const STATEMENT_TAGS = new Set(['p', 'ul']);
+function drawVoices(statement, advice) {
+  $('voices-advice').textContent = typeof advice === 'string' ? advice : '';
+  const box = $('voices-statement');
+  box.replaceChildren();
+  for (const b of (statement && statement.blocks) || []) {
+    if (!STATEMENT_TAGS.has(b.tag)) continue;
+    const el = document.createElement(b.tag);
+    if (b.tag === 'ul') {
+      for (const item of b.items || []) {
+        const li = document.createElement('li');
+        li.textContent = item;
+        el.appendChild(li);
+      }
+    } else {
+      el.textContent = b.text;
+    }
+    box.appendChild(el);
+  }
+  return box.childElementCount > 0;
+}
+
 // Any other state audiodevs reports (restricted, unavailable, unexpected) is
 // "Not available" in the muted style: it does not hold setup open
 // (setup.js permissionSettled), but it is not a grant either.
@@ -97,6 +122,11 @@ function draw(v) {
     drawPerm('mic', v.mic, v.asking === 'mic');
     drawPerm('tap', v.tap, v.asking === 'tap');
     $('perm-error').textContent = v.error || '';
+  } else if (v.screen === 'voices') {
+    const shown = drawVoices(v.voicesStatement, v.voicesAdvice);
+    $('voices-error').textContent = shown ? (v.error || '') : "The statement couldn't be loaded";
+    primary.textContent = 'Turn on';
+    primary.disabled = !!v.busy || !shown;
   } else if (v.screen === 'claude') {
     $('claude-address').textContent = v.claudeAddress || '';
     primary.textContent = 'Done';
@@ -119,6 +149,7 @@ $('primary').addEventListener('click', () => {
   else if (view.screen === 'notice') send('setup:acknowledge');
   else if (view.screen === 'address') send('setup:address', { address: $('address').value });
   else if (view.screen === 'signin') send('setup:signin');
+  else if (view.screen === 'voices') send('setup:voices', { answer: 'on', statementVersion: view.voicesStatement.version });
   else if (view.screen === 'claude') send('setup:done');
 });
 $('copy-address').addEventListener('click', () => {
@@ -127,7 +158,9 @@ $('copy-address').addEventListener('click', () => {
   setTimeout(() => { $('copy-address').textContent = 'Copy'; }, 2000);
 });
 $('address').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('primary').click(); });
-$('later').addEventListener('click', () => send('setup:later'));
+// On the voices step, "Not now" is an answer and the window moves on; on every
+// other screen it closes the window, as before.
+$('later').addEventListener('click', () => { if (view && view.screen === 'voices') send('setup:voices', { answer: 'later' }); else send('setup:later'); });
 // "Read the full notice": the full text in place of the short one. Nothing is sent.
 $('notice-full-link').addEventListener('click', () => { if (!view) return; showingFull = true; draw(view); });
 $('change-address').addEventListener('click', () => send('setup:change-address'));
