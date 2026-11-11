@@ -3,15 +3,16 @@
 // keys there are and in what order, so the order can be checked without Electron
 // (check-consent.js), like setup.js's trayAccountItems.
 //
-// Order, groups separated by dividers ('-'):
+// Order, groups separated by dividers ('-'), as revised 2026-11-10 (SAA-281):
 //   status, then any action notes and prompts right under it
 //   Start or Stop recording, and "Copy recording notice" while recording
 //   Recent meetings, Recognize voices (Save transcript is in Recent meetings)
-//   Detected applications, Open at login
-//   the account items (setup.js trayAccountItems): Read the recording notice,
-//     Who accepted the notice (admins only), Sign out; before setup or sign-in
-//     is done, Finish setting up, Recording notice or Sign in in their place
-//   About (its message box opens the acknowledgements), Quit
+//   Detected applications, then the notice items of setup.js trayAccountItems:
+//     Read the recording notice, Who accepted the notice (admins only); before
+//     setup or the notice is done, Finish setting up or Recording notice in
+//     their place
+//   About (its message box opens the acknowledgements), Open at login, Sign out
+//     (Sign in in its place while signed out), Quit
 //
 // Split out of main.js, like setup.js and team-notice.js, so no Electron is
 // needed to check it.
@@ -22,6 +23,9 @@
 const NOTE_KEYS = ['allow-audio', 'location-note', 'update', 'pipeline-note', 'permission-note'];
 // The prompts, each its own group under the notes, each after a divider.
 const PROMPT_KEYS = ['detect-prompt', 'permission-fixes', 'retry-pipeline', 'pending-identity', 'voice-naming', 'fix-speaker-names'];
+// The account items that go in the last group, between Open at login and Quit;
+// the rest of trayAccountItems (the notice items) go after Detected applications.
+const SESSION_KEYS = ['sign-in', 'sign-out'];
 
 // s: which notes and prompts are showing (booleans named by key), active (a
 // capture is starting, running or stalled), accountItems (setup.js
@@ -33,10 +37,9 @@ function trayMenuOrder(s) {
     out.push('-', 'start-stop');
     if (s.active) out.push('copy-notice');
     out.push('-', 'recent-meetings', 'recognize-voices');
-    out.push('-', 'detected-apps', 'open-at-login');
     const account = Array.isArray(s.accountItems) ? s.accountItems : [];
-    if (account.length) out.push('-', ...account);
-    out.push('-', 'about', 'quit');
+    out.push('-', 'detected-apps', ...account.filter((k) => !SESSION_KEYS.includes(k)));
+    out.push('-', 'about', 'open-at-login', ...account.filter((k) => SESSION_KEYS.includes(k)), 'quit');
     return out;
 }
 

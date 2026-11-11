@@ -1068,14 +1068,18 @@ const CASES = [
 
     // 10. The menu (SAA-281): tray-menu.js's order and status line, and how
     // main.js's renderTray uses them.
-    ['menu: stopped, signed-in admin, with a meeting to save: exactly status / Start or Stop / Recent meetings, Recognize voices / Detected applications, Open at login / Read the recording notice, Who accepted the notice, Sign out / About, Quit', () =>
+    ['menu: stopped, signed-in admin, with a meeting to save: exactly status / Start or Stop / Recent meetings, Recognize voices / Detected applications, Read the recording notice, Who accepted the notice / About, Open at login, Sign out, Quit', () =>
         !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: false, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
-            === JSON.stringify(['status', '-', 'start-stop', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
-                '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'quit'])],
+            === JSON.stringify(['status', '-', 'start-stop', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'read-notice', 'team-notice',
+                '-', 'about', 'open-at-login', 'sign-out', 'quit'])],
     ['menu: recording: the same order, with "Copy recording notice" right under Start or Stop', () =>
         !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: true, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
-            === JSON.stringify(['status', '-', 'start-stop', 'copy-notice', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'open-at-login',
-                '-', 'read-notice', 'team-notice', 'sign-out', '-', 'about', 'quit'])],
+            === JSON.stringify(['status', '-', 'start-stop', 'copy-notice', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'read-notice', 'team-notice',
+                '-', 'about', 'open-at-login', 'sign-out', 'quit'])],
+    ['menu: stopped, signed-in member: the same order without "Who accepted the notice…"', () =>
+        !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: false, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'member' }) }))
+            === JSON.stringify(['status', '-', 'start-stop', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'read-notice',
+                '-', 'about', 'open-at-login', 'sign-out', 'quit'])],
     ['menu: no "Acknowledgements…" item (SAA-281): none in the order, renderTray draws none, and its "About Clipwise" opens showAbout', () => {
         if (!trayMenu) return false;
         const body = fnBody('renderTray');
@@ -1121,11 +1125,16 @@ const CASES = [
             === JSON.stringify(['status', 'allow-audio', 'location-note', 'update', 'pipeline-note', 'permission-note',
                 '-', 'detect-prompt', '-', 'permission-fixes', '-', 'retry-pipeline', '-', 'pending-identity', '-', 'voice-naming', '-', 'fix-speaker-names', '-'])
         && trayMenu.trayMenuOrder(Object.fromEntries([...trayMenu.NOTE_KEYS, ...trayMenu.PROMPT_KEYS].map((k) => [k, true])))[19] === 'start-stop'],
-    ['menu: before setup or sign-in is done, Finish setting up, Recording notice and Sign in take the account group\'s slots', () => {
+    ['menu: before setup or sign-in is done, Finish setting up and Recording notice take the notice slot after Detected applications, and Sign in takes Sign out\'s slot before Quit', () => {
         if (!trayMenu) return false;
-        const acct = (o) => { const o2 = trayMenu.trayMenuOrder({ accountItems: o }); const a = o2.indexOf('open-at-login') + 2; return o2.slice(a, o2.indexOf('about') - 1); };
-        return JSON.stringify(acct(setup.trayAccountItems({ setupCompleted: false, acknowledged: false, server: null, signedIn: false }))) === JSON.stringify(['finish-setup'])
-            && JSON.stringify(acct(setup.trayAccountItems({ setupCompleted: true, acknowledged: false, server: 'https://t.example.com', signedIn: false }))) === JSON.stringify(['recording-notice', 'sign-in']); }],
+        const order = (o) => JSON.stringify(trayMenu.trayMenuOrder({ active: false, accountItems: setup.trayAccountItems(o) }));
+        const head = ['status', '-', 'start-stop', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps'];
+        return order({ setupCompleted: false, acknowledged: false, server: null, signedIn: false })
+                === JSON.stringify([...head, 'finish-setup', '-', 'about', 'open-at-login', 'quit'])
+            && order({ setupCompleted: true, acknowledged: false, server: 'https://t.example.com', signedIn: false })
+                === JSON.stringify([...head, 'recording-notice', '-', 'about', 'open-at-login', 'sign-in', 'quit'])
+            && order({ setupCompleted: true, acknowledged: true, server: 'https://t.example.com', signedIn: false })
+                === JSON.stringify([...head, 'read-notice', '-', 'about', 'open-at-login', 'sign-in', 'quit']); }],
     ['menu: "Who accepted the notice…" only for a signed-in admin: not a member, not a signed-out admin, not an unknown role', () => {
         if (!trayMenu) return false;
         const has = (o) => trayMenu.trayMenuOrder({ accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, ...o }) }).includes('team-notice');
