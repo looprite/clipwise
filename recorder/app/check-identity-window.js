@@ -54,6 +54,13 @@
 // each page it shows the page's own script ran, that require, process and
 // module are undefined, that an inserted inline script does not run, that its
 // own preload is in force, and what Electron applied (hardeningChecks).
+// The groupCall fixture (SAA-283): 11 invitees and 12 voices, longer than the
+// window. Save and Skip must be in view without scrolling, and the people and
+// voices part (#middle) must scroll to its last voice. The window being within
+// the screen is a guard: with the 600 ceiling it passes at base on a 982- or
+// 878-point screen. With CHECK_SCREENSHOT_DIR set, the fixture takes the window
+// with screencapture before and after the scroll (Terminal needs Screen
+// Recording for that).
 // The check refuses to start when the recorder's capture binaries are built in
 // this checkout (call detection could start a capture), or when the installed
 // app's name is the one it would run under.
@@ -222,6 +229,22 @@ const FIXTURES = [
         // Rows the member didn't touch are saved unnamed (decided 2026-11-01),
         // the two behind "+2 more voices — show" included.
         expectVoiceNames: [{ voiceIndex: 1, name: null }, { voiceIndex: 2, name: null }, { voiceIndex: 3, name: null }, { voiceIndex: 4, name: null }],
+    },
+    // SAA-283: a group call longer than the window (11 invitees, 12 voices).
+    {
+        name: 'groupCall',
+        preview: { matched: true, title: 'Quarterly Planning Sync',
+            named: ['N1 Person', 'N2 Person', 'N3 Person', 'N4 Person', 'N5 Person', 'N6 Person', 'N7 Person'],
+            unnamed: ['x1@example.test', 'x2@example.test', 'x3@example.test', 'x4@example.test'] },
+        voices: 'ready', talk: [1500, 1200, 900, 800, 700, 600, 500, 400, 300, 200, 150, 100],
+        drive: [{ showLarge: 11 }],
+        expectLargeLabel: '11 invited · not confirmed',
+        expectGuests: [],
+        expectNoPairsFile: true,
+        expectVoicesMore: '+10 more voices — show',
+        expandVoices: 12,
+        tall: true,
+        expectVoiceNames: Array.from({ length: 12 }, (_, i) => ({ voiceIndex: i + 1, name: null })),
     },
     // Three voices, the second with no clip (SAA-260 11-07 items 3, 4 and 8):
     // one row behind "+1 more voice — show", which expands the list; the
@@ -1138,6 +1161,38 @@ async function runFixture(fx, n, ctx) {
             check(t('a two-person call shows no voices part'), !shown);
         }
 
+        // SAA-283: a call longer than the window.
+        if (fx.tall) {
+            const shoot = async (label) => {
+                const dir = process.env.CHECK_SCREENSHOT_DIR;
+                if (!dir) return;
+                const b = await ev(`({ x: window.screenX, y: window.screenY, w: window.outerWidth, h: window.outerHeight })`);
+                const file = path.join(dir, `${fx.name}-${label}.png`);
+                const r = spawnSync('screencapture', ['-x', '-R', `${b.x},${b.y},${b.w},${b.h}`, file]);
+                console.log(`      screenshot ${file}: exit ${r.status}`);
+            };
+            const geo = await ev(`(() => { const r = (s) => { const e = __check.q(s); if (!e) return null; const b = e.getBoundingClientRect(); return { top: b.top, bottom: b.bottom }; };
+                return { screenTop: screen.availTop, screenHeight: screen.availHeight, winTop: window.screenY, winHeight: window.outerHeight, inner: window.innerHeight,
+                    pageScroll: document.documentElement.scrollTop, save: r('#save'), skip: r('#skip') }; })()`);
+            console.log(`      ${fx.name}: screen ${geo.screenHeight} pt usable from ${geo.screenTop}; window ${geo.winHeight} pt at ${geo.winTop}; content ${geo.inner}`);
+            check(t('guard (passes at base under the 600 ceiling): the window is within the screen\'s usable height'),
+                geo.winTop >= geo.screenTop && geo.winTop + geo.winHeight <= geo.screenTop + geo.screenHeight, JSON.stringify(geo));
+            const inView = (b) => !!b && b.top >= 0 && b.bottom <= geo.inner;
+            check(t('Save and Skip are inside the window without scrolling'), geo.pageScroll === 0 && inView(geo.save) && inView(geo.skip), JSON.stringify(geo));
+            const mid = await ev(`(() => { const m = __check.q('#middle'); return m ? { scrollHeight: m.scrollHeight, clientHeight: m.clientHeight } : null; })()`);
+            check(t('control: the people and voices part holds more than it shows, so there is something to scroll'), !!mid && mid.scrollHeight > mid.clientHeight, JSON.stringify(mid));
+            await shoot('before-scroll');
+            const last = await ev(`(() => { const m = __check.q('#middle'); const rows = __check.qa('.voice-row[data-voice]'); if (!m || !rows.length) return null;
+                m.scrollTop = m.scrollHeight; const mb = m.getBoundingClientRect(); const lb = rows[rows.length - 1].getBoundingClientRect();
+                return { rows: rows.length, rowTop: lb.top, rowBottom: lb.bottom, midTop: mb.top, midBottom: mb.bottom, inner: window.innerHeight }; })()`);
+            check(t(`scrolling the people and voices part brings the last of the ${fx.expandVoices} voice rows fully into view`),
+                !!last && last.rows === fx.expandVoices && last.rowTop >= last.midTop && last.rowBottom <= last.midBottom && last.rowBottom <= last.inner, JSON.stringify(last));
+            const save = await ev(`(() => { const b = __check.q('#save').getBoundingClientRect(); return { top: b.top, bottom: b.bottom }; })()`);
+            check(t('and Save is still in view after that scroll'), inView(save), JSON.stringify(save));
+            await pause(300);
+            await shoot('after-scroll');
+        }
+
         // What the field shows before Save.
         const chips = await ev(`__check.chips()`);
         if (fx.expectNewLine) {
@@ -1149,10 +1204,12 @@ async function runFixture(fx, n, ctx) {
             check(t(`"${name}" is tagged "${tag}"`), chips.some((c) => c.text.includes(name) && c.tag === tag), JSON.stringify(chips));
         }
 
-        // No scrolling (B.13), and the height the real page asks for (A.2's fixtures).
+        // The page never scrolls (B.13), the window is never above the ceiling,
+        // and A.2's fixtures still ask for no more than it (a tall one may).
         const fit = await ev(`__check.fit()`);
-        check(t(`the window never scrolls (scrollHeight ${fit.scrollHeight} <= clientHeight ${fit.clientHeight}; page asks for ${fit.measured}, window ${fit.innerHeight})`),
-            fit.scrollHeight <= fit.clientHeight && fit.measured !== null && fit.measured <= IDENTITY_WINDOW.maxHeight, JSON.stringify(fit));
+        check(t(`the page never scrolls (scrollHeight ${fit.scrollHeight} <= clientHeight ${fit.clientHeight}; page asks for ${fit.measured}, window ${fit.innerHeight})`),
+            fit.scrollHeight <= fit.clientHeight && fit.measured !== null && fit.innerHeight <= IDENTITY_WINDOW.maxHeight
+                && (fx.tall || fit.measured <= IDENTITY_WINDOW.maxHeight), JSON.stringify(fit));
 
         // Nothing but this check wrote the pipeline record: the recovery pass
         // left it alone.

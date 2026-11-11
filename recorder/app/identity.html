@@ -58,8 +58,14 @@
     }
   }
   * { box-sizing: border-box; }
-  html { overflow: hidden; background: var(--bg); }
+  /* SAA-283: the page is the window's height. The header and Save / Skip keep
+     their size; the people and voices part between them (#middle) scrolls when
+     the call is longer than the window. The page itself never scrolls. */
+  html { height: 100%; overflow: hidden; background: var(--bg); }
   body {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
     margin: 0;
     padding: 16px 18px 14px;
     font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
@@ -68,6 +74,8 @@
     user-select: none;
   }
   h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+  h1, #call-line, #actions { flex: none; }
+  #middle { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
   #call-line { color: var(--muted); font-size: 11px; margin: 0 0 10px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   input, select, button { font: inherit; color: var(--fg); }
@@ -84,7 +92,7 @@
   button:disabled { opacity: 0.5; }
 
   /* The field: chips, then the text box. The chip box stops at four rows and
-     scrolls inside; the page itself never scrolls. */
+     scrolls inside; past that, #middle scrolls. */
   #field-box { border: 1px solid var(--field-border); border-radius: 6px;
     background: var(--field-bg); padding: 4px; }
   #chips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 100px; overflow-y: auto; }
@@ -154,6 +162,7 @@
   <h1>Who was on this call?</h1>
   <p id="call-line"></p>
 
+  <div id="middle">
   <div id="field-box">
     <div id="chips"></div>
     <div id="large"></div>
@@ -185,6 +194,7 @@
     <div id="voices-finding">Finding voices… You can save now; Clipwise will ask you to name them from the menu bar.</div>
     <div id="voice-rows"></div>
     <div id="voices-links"></div>
+  </div>
   </div>
 
   <div id="actions">

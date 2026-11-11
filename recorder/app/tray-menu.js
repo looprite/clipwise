@@ -100,18 +100,48 @@ function localDateChanged(drawnMs, nowMs) {
     return a.getFullYear() !== b.getFullYear() || a.getMonth() !== b.getMonth() || a.getDate() !== b.getDate();
 }
 
-// "About Clipwise" (SAA-281): a message box with the name, version and build
-// commit, and the acknowledgements one button away, since the macOS About
-// panel's text can't hold a link. OK is the default; main.js opens the
-// acknowledgements on response 0. commit is build-info.json's (a full hash,
-// shown short), null when run from a checkout.
-function aboutDialog({ version, commit, dirty }) {
-    const build = commit ? `Built from commit ${String(commit).slice(0, 7)}${dirty ? ' (dirty)' : ''}` : 'Run from a checkout, not a built app';
+// "About Clipwise" (SAA-281): a message box with the name and version, and the
+// acknowledgements one button away, since the macOS About panel's text can't
+// hold a link. OK is the default; main.js opens the acknowledgements on
+// response 0. commit is build-info.json's, which build-app.sh writes into
+// every bundle it builds; it is null only when there is no build-info.json,
+// that is, when the app runs from source. The commit itself is not shown:
+// jargon for members, and each version is one build (SAA-281, 11-11). A run
+// from source adds a line saying so.
+function aboutDialog({ version, commit }) {
     return {
         buttons: ['Acknowledgements…', 'OK'], defaultId: 1, cancelId: 1,
         message: 'Clipwise',
-        detail: `Version ${version}\n${build}`,
+        detail: commit ? `Version ${version}` : `Version ${version}\nRun from a checkout, not a built app`,
     };
 }
 
-module.exports = { trayMenuOrder, startStopLabel, trayStatusLine, dayAndTime, localDateChanged, aboutDialog, NOTE_KEYS, PROMPT_KEYS };
+// The item for a call whose "Who was on this call?" was left unanswered
+// (SAA-284): its start time by the Mac's local calendar (dayAndTime), and its
+// title once the server's calendar match is on disk, so calls on the same day
+// read differently. A long title is cut, and the item's own "…" marks the cut.
+const PENDING_TITLE_MAX = 40;
+function pendingIdentityLabel({ startedAtMs, title, autoStopped, nowMs }, time, day) {
+    const call = Number.isFinite(startedAtMs) ? `the ${dayAndTime(startedAtMs, nowMs, time, day)} call` : 'this call';
+    const t = typeof title === 'string' ? title.trim().replace(/\s+/g, ' ') : '';
+    const named = t ? ` — ${t.length > PENDING_TITLE_MAX ? t.slice(0, PENDING_TITLE_MAX - 1).trimEnd() : t}` : '';
+    return `Who was on ${call}${named}…${autoStopped ? ' (auto-stopped)' : ''}`;
+}
+
+// The permission finding as the menu shows it (SAA-271 edges 1 and 2). issue is
+// main.js's permissionIssue: { denied, note, dismissed }. Dismiss warning takes
+// away the ⚠, the note line and itself, never the "Open … settings…" items: they
+// stay until a start gets past the permission gate. -> { note, open, dismiss,
+// attention }.
+function permissionView(issue) {
+    if (!issue) return { note: null, open: [], dismiss: false, attention: false };
+    const dismissed = !!issue.dismissed;
+    return {
+        note: dismissed ? null : issue.note || null,
+        open: Array.isArray(issue.denied) ? issue.denied.slice() : [],
+        dismiss: !dismissed,
+        attention: !dismissed,
+    };
+}
+
+module.exports = { trayMenuOrder, startStopLabel, trayStatusLine, dayAndTime, localDateChanged, aboutDialog, pendingIdentityLabel, permissionView, NOTE_KEYS, PROMPT_KEYS };

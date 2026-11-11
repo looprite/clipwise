@@ -15,9 +15,17 @@
 // its refuse-on-denied rule for the gate, a resume that always says none, a
 // window that never closes, and a COPY of its promptForSystemAudio timing.
 //
-// Cases 32-42 read main.js and build-app.sh as text: they show where main.js
+// Cases 32-43 read main.js and build-app.sh as text: they show where main.js
 // calls these and what it does with the answers. They do not cover the live
 // path (a real prompt, a real call); that is the build/install step's.
+//
+// Cases 44-51 are SAA-271 edges 1 and 2: start-gate.js's deniedNotice and
+// tray-menu.js's permissionView as tables, then main.js as text. 51 is a guard:
+// it passes at 7bf4aaa, and fails at c5b1408, which has no permission gate.
+//
+// EXPECTED_OLD_FAILS is printed, not compared: the exit code is whether any
+// case failed. It was written at 76469e1 for 42 cases; 9714d8d inserted case 34
+// without renumbering it, and it is renumbered here.
 
 const fs = require('fs');
 const os = require('os');
@@ -73,6 +81,8 @@ const G = REV
     }
     : require('./start-gate.js');
 const makePromptChild = REV ? oldPromptChildCopy : require('./prompt-child.js').createPromptChild;
+let trayMenu = null;
+try { trayMenu = REV ? null : require('./tray-menu.js'); } catch {}
 
 const NOW = Date.UTC(2026, 9, 23, 15, 0, 0);
 const ZOOM = { key: 'us.zoom.xos', name: 'zoom.us' };
@@ -258,13 +268,14 @@ function neverExitsSpawn(signals) {
         }],
         ['main.js (text): fallback logs "start: system audio permission unreadable (tap_perm=<state>) — starting without the permission gate" and goes on', () =>
             start.includes("if (gate === 'fallback') {\n        console.error(`start: system audio permission unreadable (tap_perm=${dev.tapPerm}) — starting without the permission gate`);\n    }")],
-        ['main.js (text, control): a denied grant is still refused with the same note and line', () =>
-            /notify\((?:'start-permission-denied', )?'Clipwise: capture not started', permissionIssue\.note\);/.test(start)
+        ['main.js (text): a denied grant is still refused with the same line, and its notification is notifyDenied\'s (SAA-271 edge 1)', () =>
+            start.includes("notifyDenied('start-permission-denied', denied);")
             && start.includes('console.error(`start refused: denied permissions: ${denied.join(\', \')}`);')],
-        ['main.js (text): the resume asks resumeAfterPermissions with the prompt child\'s running(), drops a denial with the approved text, says when the call ended, and otherwise restores the trigger and starts', () => {
+        ['main.js (text): the resume asks resumeAfterPermissions with the prompt child\'s running(), drops a denial through notifyDenied, says when the call ended, and otherwise restores the trigger and starts', () => {
             const r = body('resumePermissionBlockedStart');
             return r.includes('{ promptRunning: systemAudioPrompt.running() }')
-                && r.includes("notify('permissions-denied-dropped', 'Clipwise: capture not started',\n            `${permissionIssue.note}. Open System Settings from the Clipwise menu bar.`);")
+                && r.includes("notifyDenied('permissions-denied-dropped', denied);")
+                && !r.includes('Open System Settings from the Clipwise menu bar')
                 && r.includes("notify('permissions-blocked-call-ended', 'Clipwise: nothing to record',\n            'The call that tried to start recording has ended.');")
                 && /pendingStartTrigger = blocked\.trigger \|\| null;\s*startRecording\(\);\s*\}$/.test(r);
         }],
@@ -293,9 +304,45 @@ function neverExitsSpawn(signals) {
         ['build-app.sh (text): copies start-gate.js and prompt-child.js into the bundle (main.js requires them)', () =>
             BUILD.includes('cp "$APP_SRC/start-gate.js" "$C/Resources/app/start-gate.js"')
             && BUILD.includes('cp "$APP_SRC/prompt-child.js" "$C/Resources/app/prompt-child.js"')],
+        // SAA-271 edge 1: the notification says where, and a click goes there.
+        ['notice: mic denied -> "<note>. Click to open Microphone settings.", pane Microphone', () => {
+            const n = G.deniedNotice(['Microphone'], 'Microphone permission is off — fix it to record');
+            return n.pane === 'Microphone' && n.body === 'Microphone permission is off — fix it to record. Click to open Microphone settings.'; }],
+        ['notice: system audio denied -> pane System Audio', () => {
+            const n = G.deniedNotice(['System Audio'], 'System Audio permission is off — fix it to record');
+            return n.pane === 'System Audio' && n.body === 'System Audio permission is off — fix it to record. Click to open System Audio settings.'; }],
+        ['notice: both denied -> the click opens Microphone, and the body names the menu item for System Audio', () => {
+            const n = G.deniedNotice(['Microphone', 'System Audio'], 'Both audio permissions are off — capture would record nothing');
+            return n.pane === 'Microphone' && n.body === 'Both audio permissions are off — capture would record nothing. Click to open Microphone settings. "Open System Audio settings…" is in the Clipwise menu.'; }],
+        ['notice: nothing denied -> null', () => G.deniedNotice([], 'x') === null],
+        ['main.js (text): notifyDenied sends deniedNotice\'s body with a click that logs and opens SETTINGS_PANE[pane]; both denial sites use it', () => {
+            const n = body('notifyDenied');
+            return n.includes('const notice = startGate.deniedNotice(denied, deniedNote(denied));')
+                && /notify\(kind, 'Clipwise: capture not started', notice\.body, \(\) => \{[\s\S]{0,200}shell\.openExternal\(SETTINGS_PANE\[notice\.pane\]\);/.test(n)
+                && n.includes('permissions: notification clicked — opening ${notice.pane} settings')
+                && (SRC.match(/notifyDenied\('/g) || []).length === 2; }],
+        // SAA-271 edge 2: Dismiss warning keeps the way to fix it.
+        ['menu: permissionView: none -> nothing; a fresh denial -> note, Open Microphone settings…, Dismiss, ⚠; dismissed -> Open Microphone settings… only, no note, no Dismiss, no ⚠; a dismissed timeout warning -> nothing', () => {
+            if (!trayMenu || typeof trayMenu.permissionView !== 'function') return false;
+            const v = (i) => JSON.stringify(trayMenu.permissionView(i));
+            const note = 'Microphone permission is off — fix it to record';
+            return v(null) === JSON.stringify({ note: null, open: [], dismiss: false, attention: false })
+                && v({ denied: ['Microphone'], note }) === JSON.stringify({ note, open: ['Microphone'], dismiss: true, attention: true })
+                && v({ denied: ['Microphone'], note, dismissed: true }) === JSON.stringify({ note: null, open: ['Microphone'], dismiss: false, attention: false })
+                && v({ denied: [], note: 'Capture never started — a permission prompt may be waiting', dismissed: true }) === JSON.stringify({ note: null, open: [], dismiss: false, attention: false }); }],
+        ['main.js (text): renderTray draws the note, the settings items and Dismiss from permissionView; Dismiss marks the warning dismissed and never clears it; trayTitle\'s ⚠ follows permissionView', () => {
+            const t = body('renderTray');
+            return t.includes('const perm = trayMenu.permissionView(permissionIssue);')
+                && t.includes("'permission-note': !!perm.note,") && t.includes("'permission-fixes': perm.open.length > 0 || perm.dismiss,")
+                && t.includes('for (const svc of perm.open) {')
+                && /if \(perm\.dismiss\) \{\s*items\.push\(\{ label: 'Dismiss warning', click: \(\) => \{ if \(permissionIssue\) permissionIssue\.dismissed = true; renderTray\(\); \} \}\);/.test(t)
+                && !t.includes('permissionIssue = null')
+                && body('trayTitle').includes('trayMenu.permissionView(permissionIssue).attention'); }],
+        ['main.js (text, guard, passes at 7bf4aaa): a start that gets past the permission gate clears the finding, settings items included', () =>
+            /if \(gate === 'fallback'\) \{[\s\S]{0,200}\}\s*permissionIssue = null;/.test(start)],
     ];
 
-    const EXPECTED_OLD_FAILS = [1, 2, 3, 7, 8, 13, 14, 15, 16, 17, 18, 19, 21, 22, 26, 28, 29, 31, 32, 33, 34, 36, 38, 39, 40, 41, 42];
+    const EXPECTED_OLD_FAILS = [1, 2, 3, 7, 8, 13, 14, 15, 16, 17, 18, 19, 21, 22, 26, 28, 29, 31, 32, 33, 34, 35, 36, 37, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51];
     console.log(`source: ${REV ? `${REV} main.js and build-app.sh; gate: COPY of c5b1408's refuse-on-denied rule; resume and window: STAND-INS (c5b1408 has neither); prompt child: COPY of c5b1408's promptForSystemAudio timing` : 'start-gate.js, prompt-child.js, main.js and build-app.sh in the checkout'}`);
     console.log(`expected to fail on c5b1408: cases ${EXPECTED_OLD_FAILS.join(', ')}, and nothing else`);
     console.log(`prompt child, exits on SIGINT: ${JSON.stringify(out.p1)}`);

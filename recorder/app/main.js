@@ -9,7 +9,7 @@
 // is a human. The recorder is the trigger; the manifest it wrote at capture
 // start is the record the pipeline keys on.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage, systemPreferences, powerMonitor, autoUpdater } = require('electron');
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage, shell, dialog, clipboard, safeStorage, systemPreferences, powerMonitor, autoUpdater, screen } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { randomUUID, randomBytes, createHash } = require('crypto');
 const zlib = require('zlib');
@@ -35,7 +35,7 @@ const { stopMessageFor } = require('./voice-naming-wait.js');
 // What state a capture is in (SAA-199), for Recent meetings' Save transcript
 // and trash, and the server job poll.
 const {
-    classifyCapture, stemTimeMs, isTrashed, writeCalendarMatchFile, jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
+    classifyCapture, stemTimeMs, isTrashed, writeCalendarMatchFile, calendarTitle, jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
     failureResolved,
 } = require('./last-meeting.js');
 // The recent-meetings window's rows (SAA-217).
@@ -1509,7 +1509,7 @@ function registerVoicePrintsIpc() {
 // Only one identity window is shown at a time: a second request brings the open
 // one forward.
 function newIdentityWindow({ onTop = true } = {}) {
-    return new BrowserWindow({
+    const win = new BrowserWindow({
         // Content box, not frame, created at the full height and only ever
         // shrunk (SAA-186): see pumpIdentityQueue.
         useContentSize: true,
@@ -1524,6 +1524,23 @@ function newIdentityWindow({ onTop = true } = {}) {
         title: 'Who was on this call?',
         webPreferences: windowPreferences('identity-preload.js'),
     });
+    // Never taller than the screen it opens on (SAA-283). Still only a shrink.
+    const cap = identityContentCap(win);
+    if (cap < IDENTITY_WINDOW.maxHeight) win.setContentSize(IDENTITY_WINDOW.width, cap);
+    return win;
+}
+
+// The tallest content box the window's screen allows: its usable height (the
+// work area, without the menu bar and Dock) less the window's title bar, and
+// never above IDENTITY_WINDOW.maxHeight. Past it, the page's middle scrolls.
+function identityContentCap(win) {
+    try {
+        const area = screen.getDisplayMatching(win.getBounds()).workArea;
+        const frame = win.getSize()[1] - win.getContentSize()[1];
+        return Math.max(IDENTITY_WINDOW.minHeight, Math.min(IDENTITY_WINDOW.maxHeight, area.height - frame));
+    } catch {
+        return IDENTITY_WINDOW.maxHeight;
+    }
 }
 
 // What the page is loaded with. Everything else it asks for.
@@ -1803,7 +1820,8 @@ async function showAbout() {
 // counting up from the spawn), and single glyphs for anything wanting
 // attention. Everything wordy is a menu item, which has room for it.
 function trayTitle() {
-    const attention = permissionIssue || (pipeline && pipeline.state === 'failed');
+    // A dismissed permission warning shows no ⚠ (SAA-271 edge 2).
+    const attention = trayMenu.permissionView(permissionIssue).attention || (pipeline && pipeline.state === 'failed');
     const rec = state === 'stopped'
         ? ''
         : (session && session.startedAtMs ? `Rec ${setup.formatElapsed(Date.now() - session.startedAtMs)}` : 'Rec');
@@ -1855,7 +1873,8 @@ function renderTray() {
     const pipelineNote = pipeline && PIPELINE_NOTE[pipeline.state]
         ? PIPELINE_NOTE[pipeline.state](pipeline.stem)
         : null;
-    const permNote = permissionIssue ? permissionIssue.note : null;
+    // Dismissed: no note, no Dismiss, the settings items kept (SAA-271 edge 2).
+    const perm = trayMenu.permissionView(permissionIssue);
 
     tray.setImage(iconFor(state));
     tray.setTitle(trayTitle());
@@ -1917,9 +1936,9 @@ function renderTray() {
         'location-note': !!locationNote,
         update: !!updateReady,
         'pipeline-note': !!pipelineNote,
-        'permission-note': !!permNote,
+        'permission-note': !!perm.note,
         'detect-prompt': !!detectPending,
-        'permission-fixes': !!permissionIssue,
+        'permission-fixes': perm.open.length > 0 || perm.dismiss,
         'retry-pipeline': !!(pipeline && pipeline.state === 'failed'),
         'pending-identity': recentPendingIdentity.length > 0,
         'voice-naming': pendingVoiceNaming.length > 0,
@@ -1929,6 +1948,12 @@ function renderTray() {
     });
     // The one status line (SAA-281), in place of "Status: …" and the three
     // upload lines; the history stays in Recent meetings.
+    // The Mac's local formats, for the status line and the unanswered calls' items.
+    const trayTime = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    const trayDay = {
+        weekday: (ms) => new Date(ms).toLocaleDateString(undefined, { weekday: 'short' }),
+        date: (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    };
     const statusLine = trayMenu.trayStatusLine({
         state,
         startedAtMs: session ? (session.startedAtMs || stemTimeMs(session.stem)) : null,
@@ -1937,10 +1962,7 @@ function renderTray() {
         signedIn: status.signedIn,
         lastUpload: status.server ? (listUploadQueue().slice(-1)[0] || null) : null,
         nowMs: Date.now(),
-    }, (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }), stemTimeMs, {
-        weekday: (ms) => new Date(ms).toLocaleDateString(undefined, { weekday: 'short' }),
-        date: (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
-    });
+    }, trayTime, stemTimeMs, trayDay);
     trayDrawnAtMs = Date.now();
 
     const items = [];
@@ -1958,7 +1980,7 @@ function renderTray() {
         } else if (item === 'pipeline-note') {
             items.push({ label: pipelineNote, enabled: false });
         } else if (item === 'permission-note') {
-            items.push({ label: permNote, enabled: false });
+            items.push({ label: perm.note, enabled: false });
         } else if (item === 'detect-prompt') {
             // The live prompt, carried here as well as in the notification. These
             // are the same three answers; only the last one writes anything durable.
@@ -1970,13 +1992,16 @@ function renderTray() {
                 { label: `Never ask about ${name}`, click: () => answerDetectPrompt(key, 'never') },
             );
         } else if (item === 'permission-fixes') {
-            for (const svc of permissionIssue.denied) {
+            for (const svc of perm.open) {
                 items.push({
                     label: `Open ${svc} settings…`,
                     click: () => shell.openExternal(SETTINGS_PANE[svc]),
                 });
             }
-            items.push({ label: 'Dismiss warning', click: () => { permissionIssue = null; renderTray(); } });
+            // Takes away the warning, not the way to fix it (SAA-271 edge 2).
+            if (perm.dismiss) {
+                items.push({ label: 'Dismiss warning', click: () => { if (permissionIssue) permissionIssue.dismissed = true; renderTray(); } });
+            }
         } else if (item === 'retry-pipeline') {
             // A failed run is a menu item, not just a line in a log. Retry re-enters
             // the pipeline for that stem; it resumes from the first incomplete step.
@@ -1987,9 +2012,15 @@ function renderTray() {
         } else if (item === 'pending-identity') {
             for (const stem of recentPendingIdentity) {
                 const marker = readLaterMarker(OUTDIR, stem);
-                const autoStopped = !!marker && marker.stopped_by === 'auto';
                 items.push({
-                    label: `Who was on the ${stemDateLabel(stem)} call…${autoStopped ? ' (auto-stopped)' : ''}`,
+                    // Start time, and title once known (SAA-284). Oldest first:
+                    // recentPendingIdentityStems is in start order.
+                    label: trayMenu.pendingIdentityLabel({
+                        startedAtMs: stemTimeMs(stem),
+                        title: calendarTitle(OUTDIR, stem),
+                        autoStopped: !!marker && marker.stopped_by === 'auto',
+                        nowMs: Date.now(),
+                    }, trayTime, trayDay),
                     click: () => reopenIdentityPrompt(stem),
                 });
             }
@@ -2135,6 +2166,17 @@ function notify(kind, title, body, onClick) {
     } catch (err) {
         notifyFallback(title, body, String(err));
     }
+}
+
+// "Clipwise: capture not started" for a denied grant (SAA-271 edge 1): says
+// where to fix it, and a click opens that page of System Settings.
+function notifyDenied(kind, denied) {
+    const notice = startGate.deniedNotice(denied, deniedNote(denied));
+    if (!notice) return;
+    notify(kind, 'Clipwise: capture not started', notice.body, () => {
+        console.error(`[clipwise-recorder] permissions: notification clicked — opening ${notice.pane} settings`);
+        shell.openExternal(SETTINGS_PANE[notice.pane]);
+    });
 }
 
 // Natural-language duration for the stopped notification (SAA-187). Not
@@ -4280,7 +4322,7 @@ function registerIdentityIpc() {
     // the prompt never appears at one height and jumps to another.
     ipcMain.on('identity:resize', (_event, payload) => {
         if (!identityWindow || !payload || identityWindow.capture.token !== payload.token) return;
-        const height = contentHeightFor(payload.height);
+        const height = contentHeightFor(payload.height, identityContentCap(identityWindow.win));
         try {
             identityWindow.win.setContentSize(IDENTITY_WINDOW.width, height);
         } catch (err) {
@@ -4933,8 +4975,7 @@ function resumePermissionBlockedStart(source) {
         const denied = deniedServices({ micPerm: lastPermissions.mic, tapPerm: lastPermissions.tap });
         permissionIssue = { denied, blocked: true, note: deniedNote(denied) };
         renderTray();
-        notify('permissions-denied-dropped', 'Clipwise: capture not started',
-            `${permissionIssue.note}. Open System Settings from the Clipwise menu bar.`);
+        notifyDenied('permissions-denied-dropped', denied);
         return;
     }
     if (decision === 'call-ended') {
@@ -5228,7 +5269,7 @@ function startRecording() {
         permissionIssue = { denied, blocked: true, note: deniedNote(denied) };
         renderTray();
         console.error(`start refused: denied permissions: ${denied.join(', ')}`);
-        notify('start-permission-denied', 'Clipwise: capture not started', permissionIssue.note);
+        notifyDenied('start-permission-denied', denied);
         return;
     }
     // Unanswered: nothing is started, so the 9 s start timeout cannot run while

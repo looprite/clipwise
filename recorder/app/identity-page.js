@@ -463,10 +463,16 @@ async function loadRecent() {
 $('prints-nudge-open').addEventListener('click', () => ipcRenderer.send('identity:open-voice-prints', { token }));
 
 // --- size -----------------------------------------------------------------
-// The page's whole height, sent to main.js, which sizes the window to it
-// between IDENTITY_WINDOW's bounds.
+// The page's whole height as if nothing scrolled, sent to main.js, which sizes
+// the window to it between IDENTITY_WINDOW's bounds and the screen's (SAA-283).
+// The body is the window's height, so it is measured from where Save and Skip
+// end, plus whatever #middle is hiding.
 function measuredHeight() {
-  return Math.ceil(document.body.getBoundingClientRect().height);
+  const middle = document.getElementById('middle');
+  const actions = document.getElementById('actions');
+  const pad = parseFloat(getComputedStyle(document.body).paddingBottom) || 0;
+  const hidden = middle ? middle.scrollHeight - middle.clientHeight : 0;
+  return Math.ceil(actions.getBoundingClientRect().bottom + pad + hidden);
 }
 window.measuredHeight = measuredHeight;
 let lastSent = null;

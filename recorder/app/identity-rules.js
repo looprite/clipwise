@@ -49,10 +49,14 @@ const IDENTITY_VERSION = 2;
 // and the footer needed 471 px, 498 with long names.
 const IDENTITY_WINDOW = { width: 460, minHeight: 220, maxHeight: 600 };
 
-function contentHeightFor(measured) {
+// cap: the most the screen allows (main.js identityContentCap, SAA-283). Never
+// above maxHeight: the window is the smaller of 600 and the screen's usable
+// height, and a longer page scrolls its middle (identity.html #middle).
+function contentHeightFor(measured, cap = IDENTITY_WINDOW.maxHeight) {
+    const top = Math.min(IDENTITY_WINDOW.maxHeight, Number.isFinite(cap) ? cap : IDENTITY_WINDOW.maxHeight);
     const h = Math.ceil(Number(measured));
-    if (!Number.isFinite(h)) return IDENTITY_WINDOW.minHeight;
-    return Math.min(IDENTITY_WINDOW.maxHeight, Math.max(IDENTITY_WINDOW.minHeight, h));
+    if (!Number.isFinite(h)) return Math.min(IDENTITY_WINDOW.minHeight, top);
+    return Math.min(top, Math.max(IDENTITY_WINDOW.minHeight, h));
 }
 
 // `self` is the person answering: the prompt asks who the call was *with*, so

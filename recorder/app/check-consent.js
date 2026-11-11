@@ -1086,15 +1086,17 @@ const CASES = [
         return !trayMenu.trayMenuOrder({ active: false }).includes('acknowledgements') && !trayMenu.trayMenuOrder({ active: true }).includes('acknowledgements')
             && !body.includes("'acknowledgements'") && !body.includes("label: 'Acknowledgements…'")
             && body.includes("items.push({ label: 'About Clipwise', click: showAbout });"); }],
-    ['about: aboutDialog: "Clipwise", the version and the short build commit; buttons "Acknowledgements…" and OK, OK the default; a checkout says so', () => {
+    ['about: aboutDialog: "Clipwise" and the version only, with no build commit, dirty or not; buttons "Acknowledgements…" and OK, OK the default; a checkout still says so', () => {
         if (!trayMenu || typeof trayMenu.aboutDialog !== 'function') return false;
         const built = trayMenu.aboutDialog({ version: '0.1.202611101719', commit: '503d9f76fa8e57e3ee9790625732fbeff8416b5b', dirty: false });
         const dirty = trayMenu.aboutDialog({ version: '0.1.202611101719', commit: '503d9f76fa8e57e3ee9790625732fbeff8416b5b', dirty: true });
         const checkout = trayMenu.aboutDialog({ version: '0.1.0', commit: null, dirty: false });
-        return built.message === 'Clipwise' && built.detail === 'Version 0.1.202611101719\nBuilt from commit 503d9f7'
-            && dirty.detail === 'Version 0.1.202611101719\nBuilt from commit 503d9f7 (dirty)'
+        return built.message === 'Clipwise' && built.detail === 'Version 0.1.202611101719'
+            && dirty.detail === 'Version 0.1.202611101719'
             && checkout.detail === 'Version 0.1.0\nRun from a checkout, not a built app'
             && JSON.stringify(built.buttons) === '["Acknowledgements…","OK"]' && built.defaultId === 1 && built.cancelId === 1; }],
+    ['about (control): showAbout still passes build-info\'s commit, so a run from source is still told apart', () =>
+        fnBody('showAbout').includes('commit: BUILD_INFO ? BUILD_INFO.commit : null,')],
     ['about: showAbout shows aboutDialog with the app\'s version and build-info\'s commit, and calls openAcknowledgements only on the "Acknowledgements…" button; the application menu\'s About uses it; no macOS About panel is left', () => {
         const body = fnBody('showAbout');
         return body.includes('await dialog.showMessageBox(trayMenu.aboutDialog({')
@@ -1237,6 +1239,49 @@ const CASES = [
     ['menu: main.js requires tray-menu.js, and build-app.sh copies it into the bundle', () =>
         SRC.includes("const trayMenu = require('./tray-menu.js');")
         && BUILD.includes('cp "$APP_SRC/tray-menu.js" "$C/Resources/app/tray-menu.js"')],
+
+    // 11. The unanswered calls' items (SAA-284).
+    ['pending: pendingIdentityLabel names the start time, the title when there is one, and "(auto-stopped)"; three calls on one day read differently', () => {
+        if (!trayMenu || typeof trayMenu.pendingIdentityLabel !== 'function') return false;
+        const at = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi).getTime();
+        const time = (ms) => { const d = new Date(ms); return `${(d.getHours() % 12) || 12}:${String(d.getMinutes()).padStart(2, '0')} ${d.getHours() < 12 ? 'AM' : 'PM'}`; };
+        const day = { weekday: (ms) => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(ms).getDay()], date: (ms) => `Nov ${new Date(ms).getDate()}` };
+        const now = at(2026, 11, 9, 15, 0);
+        const L = (o) => trayMenu.pendingIdentityLabel({ nowMs: now, ...o }, time, day);
+        const three = [
+            L({ startedAtMs: at(2026, 11, 9, 13, 1), title: 'Quarterly Planning Sync', autoStopped: true }),
+            L({ startedAtMs: at(2026, 11, 9, 13, 49), title: 'Design Review', autoStopped: true }),
+            L({ startedAtMs: at(2026, 11, 9, 14, 17), title: null, autoStopped: true }),
+        ];
+        const cases = [
+            [three[0], 'Who was on the 1:01 PM call — Quarterly Planning Sync… (auto-stopped)'],
+            [three[1], 'Who was on the 1:49 PM call — Design Review… (auto-stopped)'],
+            [three[2], 'Who was on the 2:17 PM call… (auto-stopped)'],
+            [L({ startedAtMs: at(2026, 11, 9, 13, 1), title: 'Quarterly Planning Sync' }), 'Who was on the 1:01 PM call — Quarterly Planning Sync…'],
+            [L({ startedAtMs: at(2026, 11, 9, 13, 1), title: '   ' }), 'Who was on the 1:01 PM call…'],
+            [L({ startedAtMs: at(2026, 11, 8, 13, 49), title: null }), 'Who was on the Sun 1:49 PM call…'],
+            [L({ startedAtMs: at(2026, 11, 9, 13, 1), title: 'Quarterly Planning Sync and Roadmap Review for the Platform Team' }), 'Who was on the 1:01 PM call — Quarterly Planning Sync and Roadmap Rev…'],
+        ];
+        const wrong = cases.filter(([got, want]) => got !== want);
+        if (wrong.length) console.log(`      pendingIdentityLabel mismatches: ${JSON.stringify(wrong)}`);
+        return wrong.length === 0 && new Set(three).size === 3; }],
+    ['pending: renderTray labels each unanswered call with pendingIdentityLabel, from its start time, its calendar title and the Mac\'s formats, and no longer by date alone', () => {
+        const body = fnBody('renderTray');
+        return body.includes('label: trayMenu.pendingIdentityLabel({')
+            && body.includes('startedAtMs: stemTimeMs(stem),') && body.includes('title: calendarTitle(OUTDIR, stem),')
+            && body.includes('}, trayTime, trayDay),')
+            && !body.includes('Who was on the ${stemDateLabel(stem)} call…')
+            && /classifyCapture, stemTimeMs, isTrashed, writeCalendarMatchFile, calendarTitle,/.test(SRC); }],
+    ['pending (guard, passes at base): the unanswered calls come oldest first whatever order their markers were written in', () => {
+        const ia = require('./identity-answer.js');
+        return withDir((dir) => {
+            const now = new Date(2026, 10, 9, 15, 0).getTime();
+            const stem = (h, m) => { const d = new Date(2026, 10, 9, h, m); const p = (n) => String(n).padStart(2, '0');
+                return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}-${p(d.getUTCMinutes())}-00Z`; };
+            const want = [stem(13, 1), stem(13, 49), stem(14, 17)];
+            for (const s of [want[1], want[2], want[0]]) ia.writeLaterMarker(dir, { stem: s });
+            return JSON.stringify(ia.recentPendingIdentityStems(dir, { now })) === JSON.stringify(want);
+        }); }],
 ];
 
 console.log(`rule: ${useNaive ? 'NAIVE (any existing file counts as agreed to)' : 'consent.js'}`);

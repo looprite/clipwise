@@ -56,4 +56,18 @@ function permissionsWindowNext(finishedBefore, mic, tap) {
     return finishedBefore ? 'close' : 'continue';
 }
 
-module.exports = { BLOCKED_START_TTL_MS, permissionGate, resumeAfterPermissions, permissionsWindowNext };
+// The "capture not started" notification for a denied grant (SAA-271 edge 1):
+// it says where to fix it, and a click opens that page of System Settings.
+// Not the setup window: once setup is finished, a denied grant closes it on
+// focus (permissionsWindowNext). denied as main.js deniedServices orders it,
+// Microphone first; note is main.js deniedNote's line. -> { body, pane }, pane
+// a key of main.js SETTINGS_PANE; null for no denial.
+function deniedNotice(denied, note) {
+    const list = Array.isArray(denied) ? denied : [];
+    if (list.length === 0) return null;
+    const [pane, ...rest] = list;
+    const others = rest.map((s) => ` "Open ${s} settings…" is in the Clipwise menu.`).join('');
+    return { body: `${note}. Click to open ${pane} settings.${others}`, pane };
+}
+
+module.exports = { BLOCKED_START_TTL_MS, permissionGate, resumeAfterPermissions, permissionsWindowNext, deniedNotice };
