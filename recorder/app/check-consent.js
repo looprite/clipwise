@@ -383,7 +383,7 @@ const CASES = [
             // Back is handled before the primary button's sends, and the full view shows Back, not "I understand".
             && SETUP_PAGE.indexOf("if (view.screen === 'notice' && showingFull)") < SETUP_PAGE.indexOf("send('setup:acknowledge')")
             && /if \(v\.screen === 'notice' && showingFull\) \{[\s\S]{0,200}primary\.textContent = 'Back';/.test(SETUP_PAGE)
-            && /const SEND = \['setup:ready', 'setup:acknowledge', 'setup:later', 'setup:address', 'setup:change-address',\s*'setup:signin', 'setup:permission-request', 'setup:permission-settings', 'setup:filevault-settings',\s*'setup:done', 'setup:copy-claude-address'\];/.test(pre); }],
+            && /const SEND = \['setup:ready', 'setup:acknowledge', 'setup:later', 'setup:address', 'setup:change-address',\s*'setup:signin', 'setup:permission-request', 'setup:permission-settings', 'setup:filevault-settings',\s*'setup:done', 'setup:copy-claude-address', 'setup:voices'\];/.test(pre); }],
     ['notice ack: build-app.sh bundles the whole notice folder, so the -ack file ships with the full one', () =>
         BUILD.includes('cp -R "$APP_SRC/notice" "$C/Resources/app/notice"')
         && fs.existsSync(path.join(__dirname, 'notice', 'recording-notice-v2-ack.txt'))],
@@ -554,8 +554,8 @@ const CASES = [
         return /notice: manifest\.notice\s*\?\s*\{ version: manifest\.notice\.version, acknowledgedAt: manifest\.notice\.acknowledged_at \}/.test(builder); }],
 
     // 6. first-run setup and the rest of SAA-198 step 4
-    ['setup: the five screens, in order: notice, address, sign-in, permissions, Use Clipwise in Claude', () =>
-        JSON.stringify(setup.SCREENS) === JSON.stringify(['notice', 'address', 'signin', 'permissions', 'claude'])],
+    ['setup: the six screens, in order: notice, address, sign-in, permissions, Recognize voices, Use Clipwise in Claude', () =>
+        JSON.stringify(setup.SCREENS) === JSON.stringify(['notice', 'address', 'signin', 'permissions', 'voices', 'claude'])],
     ['setup: opens at the first screen not done', () => {
         const at = (s) => setup.firstIncompleteScreen({ ...ALL_DONE, ...s });
         return at({ acknowledged: false, server: null, signedIn: false }) === 'notice'
@@ -838,17 +838,102 @@ const CASES = [
     ['window: the sign-in screen says Google asks once for read-only calendar access (SAA-198 step 5)', () =>
         HTML.includes('Google asks once for read-only access to your calendar, so your recordings get their meeting&rsquo;s title and invitees.')],
     // The notice's title is now drawn from its file (readNotice), into notice-title.
-    ['window: setup.html has the five screens and a place for the notice\'s title and text', () =>
-        ['screen-notice', 'screen-address', 'screen-signin', 'screen-permissions', 'screen-claude', 'id="notice-title"', 'id="notice-text"'].every(t => HTML.includes(t))],
+    ['window: setup.html has the six screens and a place for the notice\'s title and text', () =>
+        ['screen-notice', 'screen-address', 'screen-signin', 'screen-permissions', 'screen-voices', 'screen-claude', 'id="notice-title"', 'id="notice-text"'].every(t => HTML.includes(t))],
+
+    // 6b. The voices step (SAA-260 proposal 7, decided 2026-11-06 and 2026-11-11):
+    // the Recognize voices opt-in, its statement from the one file, optional,
+    // between permissions and Use Clipwise in Claude. Nothing pre-ticked; "Not
+    // now" as easy as "Turn on" and moves on; the answer is a setup.json key
+    // that is never read as consent.
+    ['voices step: with the four done the window shows it until it is answered, then claude; anything not done before it still comes first', () =>
+        typeof setup.nextScreen === 'function'
+        && setup.nextScreen({ ...ALL_DONE, voicesAnswered: false }) === 'voices'
+        && setup.nextScreen({ ...ALL_DONE, voicesAnswered: true }) === 'claude'
+        && setup.nextScreen({ ...ALL_DONE, voicesAnswered: false, tap: 'notDetermined' }) === 'permissions'
+        && setup.nextScreen({ ...ALL_DONE, voicesAnswered: true, acknowledged: false }) === 'notice'
+        && setup.SCREENS.indexOf('voices') === 4],
+    ['voices step (guard, passes at base): its answer does not decide whether setup is finished: the four alone do, so an install set up before it is never held open', () => withDir(d =>
+        setup.firstIncompleteScreen({ ...ALL_DONE, voicesAnswered: false }) === null
+        && setup.settleSetup(d, { ...ALL_DONE, voicesAnswered: false }) === true && setup.isSetupCompleted(d))],
+    ['voices step: recordVoicesAnswered adds voices_answered_at to setup.json and keeps completed_at, in either order, and a second answer keeps the first time', () => withDir(d => {
+        if (typeof setup.recordVoicesAnswered !== 'function') return false;
+        setup.recordVoicesAnswered(d, new Date('2026-11-11T10:00:00Z'));
+        setup.recordSetupCompleted(d, new Date('2026-11-11T10:05:00Z'));
+        setup.recordVoicesAnswered(d, new Date('2026-11-11T11:00:00Z'));
+        const a = JSON.parse(fs.readFileSync(setup.setupPath(d), 'utf8'));
+        return withDir(e => {
+            setup.recordSetupCompleted(e, new Date('2026-11-11T10:05:00Z'));
+            setup.recordVoicesAnswered(e, new Date('2026-11-11T10:00:00Z'));
+            const b = JSON.parse(fs.readFileSync(setup.setupPath(e), 'utf8'));
+            const want = { voices_answered_at: '2026-11-11T10:00:00.000Z', completed_at: '2026-11-11T10:05:00.000Z' };
+            return a.voices_answered_at === want.voices_answered_at && a.completed_at === want.completed_at
+                && b.voices_answered_at === want.voices_answered_at && b.completed_at === want.completed_at
+                && setup.isVoicesAnswered(d) && setup.isSetupCompleted(d) && !setup.isVoicesAnswered(path.join(d, 'nowhere'));
+        }); })],
+    ['voices step: the answered key is never read as consent: with it written and no setting.json, voice prints are off; voice-prints.js never reads setup.json', () => withDir(d => {
+        if (typeof setup.recordVoicesAnswered !== 'function') return false;
+        const vpMod = require('./voice-prints.js');
+        setup.recordVoicesAnswered(d);
+        const vp = vpMod.createVoicePrints({ supportDir: d, outdir: d, encrypt: (s) => Buffer.from(s), decrypt: (b) => b.toString() });
+        const vpSrc = fs.readFileSync(path.join(__dirname, 'voice-prints.js'), 'utf8');
+        return setup.isVoicesAnswered(d) && vp.isEnabled() === false && !fs.existsSync(path.join(d, 'voice-prints', 'setting.json'))
+            && !/setup\.json|voices_answered|isVoicesAnswered/.test(vpSrc); })],
+    ['voices step (main.js text): setupStatus counts it answered when setup.json says so or prints are already on; setupView picks the screen with setup.nextScreen and sends the statement and advice, from the functions the Recognize voices window uses, on the voices screen only', () => {
+        const view = fnBody('setupView');
+        return fnBody('setupStatus').includes('voicesAnswered: setup.isVoicesAnswered(SUPPORT_DIR) || voicePrintsOn(),')
+            && view.includes('(w.override || setup.nextScreen(status))')
+            && view.includes("voicesStatement: screen === 'voices' ? voicePrintsStatementForPage() : null,")
+            && view.includes("voicesAdvice: screen === 'voices' ? voicePrintsModule.ADVICE : null,"); }],
+    ['voices step (main.js text): "Not now" records the answer, turns nothing on and redraws, so the window moves on to Use Clipwise in Claude', () => {
+        const at = SRC.indexOf("ipcMain.on('setup:voices'");
+        const body = at >= 0 ? SRC.slice(at, SRC.indexOf('\n    });\n', at)) : '';
+        const later = body.slice(body.indexOf("if (payload.answer === 'later') {"), body.indexOf("if (payload.answer !== 'on') return;"));
+        return at >= 0 && /if \(!fromWindow\(payload\) \|\| setupView\(\)\.screen !== 'voices'\) return;/.test(body)
+            && later.includes('setup.recordVoicesAnswered(SUPPORT_DIR);') && later.includes('sendSetupState();')
+            && !/enable\(|voicePrints\(\)/.test(later); }],
+    ['voices step (main.js text): "Turn on" refuses a statement that is not agreeable or a version not this build\'s, then turns on with the version shown, then records the answer', () => {
+        const at = SRC.indexOf("ipcMain.on('setup:voices'");
+        const body = at >= 0 ? SRC.slice(at, SRC.indexOf('\n    });\n', at)) : '';
+        const on = body.slice(body.indexOf("if (payload.answer !== 'on') return;"));
+        const guard = on.indexOf('if (!voicePrintsModule.statementAgreeable(voicePrintsStatementForPage()) || payload.statementVersion !== voicePrintsModule.STATEMENT_VERSION) {');
+        const enable = on.indexOf('voicePrints().enable(payload.statementVersion);');
+        const record = on.indexOf('setup.recordVoicesAnswered(SUPPORT_DIR);');
+        return at >= 0 && guard >= 0 && enable > guard && record > enable
+            && on.indexOf('safeStorage.isEncryptionAvailable()') > guard && on.indexOf('safeStorage.isEncryptionAvailable()') < enable; }],
+    ['voices step (page): the screen holds none of the statement\'s or advice\'s words and no checkbox; Not now and Turn on are its two buttons; Not now sends the voices answer, never setup:later; Turn on sends the version it was given and is off only without a statement', () => {
+        let words = [];
+        try { const vpMod = require('./voice-prints.js'); words = [...vpMod.readStatement().blocks.flatMap((b) => (b.tag === 'ul' ? b.items : [b.text])), vpMod.ADVICE]; } catch { return false; }
+        const html = readOr('setup.html');
+        const a = html.indexOf('<div class="screen" id="screen-voices">');
+        const screen = a >= 0 ? html.slice(a, html.indexOf('\n  </div>', a)) : '';
+        return a >= 0 && words.every((w) => !HTML.includes(w))
+            && screen.includes('<p id="voices-advice"></p>') && screen.includes('<div id="voices-statement"></div>')
+            && screen.indexOf('id="voices-advice"') < screen.indexOf('id="voices-statement"')
+            && !/<input|checkbox|checked/.test(screen)
+            && SETUP_PAGE.includes("$('later').addEventListener('click', () => { if (view && view.screen === 'voices') send('setup:voices', { answer: 'later' }); else send('setup:later'); });")
+            && SETUP_PAGE.includes("else if (view.screen === 'voices') send('setup:voices', { answer: 'on', statementVersion: view.voicesStatement.version });")
+            && /\} else if \(v\.screen === 'voices'\) \{[\s\S]{0,400}primary\.textContent = 'Turn on';[\s\S]{0,200}primary\.disabled = !!v\.busy \|\| !shown;/.test(SETUP_PAGE)
+            && !/later\.disabled/.test(SETUP_PAGE) && !/innerHTML|insertAdjacentHTML|outerHTML/.test(SETUP_PAGE); }],
+    ['voices step: it is step 5 of 6', () =>
+        setup.SCREENS.indexOf('voices') + 1 === 5 && setup.SCREENS.length === 6
+        && fnBody('setupView').includes('stepText: w.noticeOnly ? \'\' : `Step ${setup.SCREENS.indexOf(screen) + 1} of ${setup.SCREENS.length}`,')],
+    ['voices step: an install that finished setup never sees it: its window is the notice alone, and one opened for permissions closes once they are answered', () => {
+        const startGate = require('./start-gate.js');
+        return /const screen = w\.noticeOnly\s*\? 'notice'/.test(fnBody('setupView'))
+            && /if \(noticeOnly && mode !== 'reread' && consent\.isAcknowledged\(SUPPORT_DIR\)\) return;/.test(fnBody('showSetupWindow'))
+            && startGate.permissionsWindowNext(true, 'granted', 'granted') === 'close'
+            && typeof setup.nextScreen === 'function'; }],
 
     // 7. Use Clipwise in Claude, setup's fifth screen (SAA-198 step 6, Jon's call 9)
     ['claude screen: the address is the team\'s origin plus /mcp, and none without a server', () =>
         setup.claudeAddress('https://clipwise.example.com') === 'https://clipwise.example.com/mcp'
         && setup.claudeAddress('http://localhost:3000') === 'http://localhost:3000/mcp'
         && setup.claudeAddress(null) === null],
-    ['claude screen: it is what the window shows once the four before it are done, as step 5 of 5', () =>
-        setup.firstIncompleteScreen(ALL_DONE) === null && setup.SCREENS.indexOf('claude') === 4
-        && fnBody('setupView').includes("(w.override || setup.firstIncompleteScreen(status) || 'claude')")
+    ['claude screen: it is what the window shows once the four before it are done and the voices step is answered, as step 6 of 6', () =>
+        setup.firstIncompleteScreen(ALL_DONE) === null && setup.SCREENS.indexOf('claude') === 5 && setup.SCREENS.length === 6
+        && setup.nextScreen({ ...ALL_DONE, voicesAnswered: true }) === 'claude'
+        && fnBody('setupView').includes('(w.override || setup.nextScreen(status))')
         && fnBody('setupView').includes('claudeAddress: setup.claudeAddress(status.server)')],
     ['claude screen: an install with all four done is recorded as set up, so its window never opens as setup and never shows it', () => withDir(d =>
         setup.SCREENS.includes('claude') && setup.settleSetup(d, ALL_DONE) === true && setup.isSetupCompleted(d)
