@@ -41,6 +41,8 @@ Clipwise records two tracks of every call: your microphone, and the sound your M
 
 To finish this step later, click **Finish later**. The menu bar then offers **Allow audio access…**.
 
+**Recognize voices (optional).** Next, setup offers **Recognize voices**, the same screen as in section 9. Nothing is turned on unless you click **Turn on**. Click **Not now** to skip it; you can turn it on later from the menu bar.
+
 ## 5. FileVault
 
 Clipwise keeps call audio and transcripts on your Mac. FileVault encrypts your disk, so they're protected if the Mac is lost or stolen.
@@ -110,8 +112,8 @@ Open **Recent meetings…** from the menu bar. It lists the past seven days; old
 
 Clipwise can learn the voices of people you talk to, so that one day it can tell you who was on a call. It's off unless you turn it on. Today it only learns; it doesn't name anyone yet.
 
-1. Open **Recognize voices…** from the menu bar (the "Who was on this call?" window also offers it).
-2. Read what it does. It keeps a voice print for you, and for each person you name once you've named them on two calls, on this Mac only, and never uploads them. Some locations require the other person's consent; that's your responsibility.
+1. Open **Recognize voices…** from the menu bar (setup and the "Who was on this call?" window also offer it).
+2. Read what it does. It keeps a voice print for you and each person you name, on this Mac only, and never uploads them. Some locations require the other person's consent; that's up to you. You can delete any one print, or turn it off to delete them all; your recordings aren't affected.
 3. Click **Turn on**, or **Not now**.
 
 Once it's on, **Voice prints on this Mac** lists **You** and each person, with the number of calls they're learned from. A print is kept once you've named someone on two calls. Keep prints only for people you talk to often: click **Delete** next to anyone else. To delete several at once, tick them and click **Delete N…**. **Turn off and delete prints** removes every print. Your recordings aren't affected.

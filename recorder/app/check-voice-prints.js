@@ -835,13 +835,17 @@ function main() {
         return [n === 1 && !(P_ANN in t.people) && JSON.stringify(t.people[P_BOB]) === JSON.stringify([STEM1, STEM2]) && !again,
             JSON.stringify({ n, t, again })];
     });
-    add('64. the wording (text): empty list, single and several delete detail, and member-setup.md lines 114 and 117', () => {
+    add('64. the wording (text): empty list, single and several delete detail, and member-setup.md\'s Recognize voices lines, which follow statement version 2 and say setup offers it', () => {
         const DOC = fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'member-setup.md'), 'utf8');
         const ok = PAGE.includes("e.textContent = 'None yet. A print is kept once you name someone on two calls.';")
             && HANDLER.includes("const detail = 'Clipwise stops comparing new calls against it. A new print is kept if you name this person on two more calls.';")
             && HANDLER.includes("const detailMany = 'Clipwise stops comparing new calls against them. A new print is kept for anyone you name on two more calls.';")
             && DOC.includes("A print is kept once you've named someone on two calls.")
-            && DOC.includes("It keeps a voice print for you, and for each person you name once you've named them on two calls, on this Mac only, and never uploads them.")
+            && DOC.includes("It keeps a voice print for you and each person you name, on this Mac only, and never uploads them. Some locations require the other person's consent; that's up to you. You can delete any one print, or turn it off to delete them all; your recordings aren't affected.")
+            && DOC.includes('1. Open **Recognize voices…** from the menu bar (setup and the "Who was on this call?" window also offer it).')
+            && DOC.includes('**Recognize voices (optional).** Next, setup offers **Recognize voices**, the same screen as in section 9. Nothing is turned on unless you click **Turn on**. Click **Not now** to skip it; you can turn it on later from the menu bar.')
+            && !DOC.includes("once you've named them on two calls, on this Mac only")
+            && !DOC.includes("that's your responsibility")
             && !DOC.includes('It keeps a voice print for you and for each person you name, on this Mac only')
             && !DOC.includes('A print is kept as soon as you name someone on one call')
             && !PAGE.includes('A print is kept once you name someone on a call.')
