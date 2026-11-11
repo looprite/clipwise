@@ -141,9 +141,15 @@ they are in `~/.config/clipwise/dev.env`, which only `server/scripts/scratch-db.
 and the schema push (`server/drizzle.config.ts`) load, by name. Nothing the app
 runs reads it.
 
-A packaged run has no terminal to print to, so everything it would have written
-to stderr goes to `~/Library/Application Support/clipwise/recorder.log`. That is
-where notification delivery, child spawn failures and pipeline errors are.
+A packaged run has no terminal to print to, so everything it would have printed
+(`console.log` and `console.error`, each line stamped with the time) goes to a
+day log, one file per local date:
+`~/Library/Application Support/clipwise/recordings/recorder-YYYY-MM-DD.log`.
+Day logs more than 30 days old are deleted, at launch and once a day after.
+Each capture's pipeline (transcription, classification, voice separation) writes
+its own output to `recordings/pipeline-<stem>.log`, appended on each run. When
+transcription or classification fails, `recordings/pipeline-<stem>.json` records
+that step as failed, with its error; voice separation never fails a run.
 
 **Capture output.** Each capture writes to
 `~/Library/Application Support/clipwise/recordings/`, sharing one timestamp
