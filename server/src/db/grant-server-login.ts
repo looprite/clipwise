@@ -8,7 +8,7 @@
 //
 // Run as the owner of the tables (the role DATABASE_URL names for db:push,
 // db:provision and auth:migrate). The login itself is made by hand with SQL
-// (README, "Server database login"): this never creates it and never touches a
+// (docs/maintainers.md, "Server database login"): this never creates it and never touches a
 // password, and refuses when the login does not exist or holds more than a
 // login should.
 //
@@ -59,7 +59,7 @@ async function preflight(login: string): Promise<{ owner: string; tables: number
        from pg_roles where rolname = $1`,
     [login],
   );
-  if (roles.length === 0) throw new Refusal(`login ${login} does not exist; create it with SQL first (README, "Server database login")`);
+  if (roles.length === 0) throw new Refusal(`login ${login} does not exist; create it with SQL first (docs/maintainers.md, "Server database login")`);
   const r = roles[0];
 
   // Any one of these is refused: a server login creates no logins or

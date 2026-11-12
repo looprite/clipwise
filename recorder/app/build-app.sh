@@ -13,7 +13,7 @@
 # those need an Apple notary profile and are notarize.sh's, run after this.
 # Auto-update is not this script's either: notarize.sh packs the zip installed
 # copies update to (release-zip.sh), published as a GitHub Release (SAA-253;
-# README, "Publishing a release"). Launch at login is not
+# docs/maintainers.md, "Publishing a release"). Launch at login is not
 # this script's either: the app registers itself the first time it runs from
 # Applications with setup finished, and the tray's "Open at login" turns it off
 # (SAA-198 step 4).

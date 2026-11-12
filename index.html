@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Clipwise — Meeting intelligence that surfaces what matters</title>
-  <meta name="description" content="Clipwise captures your meetings and surfaces the moments your team needs to see. AI-native. Open source. Your data stays yours." />
+  <meta name="description" content="Clipwise captures your meetings and surfaces the moments worth coming back to. AI-native. Open source. Your data stays yours." />
   <style>
     /* Inter, served from this site (fonts/, licence fonts/OFL.txt). One variable
        file per subset covers weights 300-900; unicode-range as Google Fonts gave it. */
@@ -42,7 +42,7 @@
     }
 
     /* ── NAV ── */
-    nav {
+    body > nav {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -191,8 +191,8 @@
       margin-bottom: 48px;
     }
 
-    /* ── WAITLIST FORM ── */
-    .waitlist {
+    /* ── ACTIONS ── */
+    .actions {
       display: flex;
       gap: 10px;
       width: 100%;
@@ -201,24 +201,7 @@
       justify-content: center;
     }
 
-    .waitlist input[type="email"] {
-      flex: 1;
-      min-width: 220px;
-      padding: 14px 18px;
-      font-family: 'Inter', sans-serif;
-      font-size: 15px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--white);
-      outline: none;
-      transition: border-color 0.15s;
-    }
-
-    .waitlist input[type="email"]::placeholder { color: var(--muted); }
-    .waitlist input[type="email"]:focus { border-color: var(--orange); }
-
-    .waitlist button, .waitlist .cta {
+    .actions .cta {
       display: inline-block;
       text-decoration: none;
       padding: 14px 24px;
@@ -233,9 +216,14 @@
       transition: opacity 0.15s;
       white-space: nowrap;
     }
-    .waitlist button:hover, .waitlist .cta:hover { opacity: 0.85; }
+    .actions .cta:hover { opacity: 0.85; }
+    .actions .cta.secondary {
+      background: transparent;
+      color: var(--white);
+      box-shadow: inset 0 0 0 1px var(--border);
+    }
 
-    .waitlist-note {
+    .actions-note {
       margin-top: 14px;
       font-size: 12px;
       color: var(--muted);
@@ -284,6 +272,8 @@
       line-height: 1.7;
       color: var(--muted);
     }
+
+    .feature p a { color: var(--white); }
 
     /* ── OPEN SOURCE BAND ── */
     .oss-band {
@@ -360,7 +350,8 @@
 
     .footer-links {
       display: flex;
-      gap: 24px;
+      flex-wrap: wrap;
+      gap: 12px 24px;
     }
 
     .footer-links a {
@@ -370,6 +361,11 @@
       transition: color 0.15s;
     }
     .footer-links a:hover { color: var(--white); }
+
+    .footer-copy {
+      font-size: 13px;
+      color: var(--muted);
+    }
 
     /* ── SUCCESS STATE ── */
     .success-msg {
@@ -382,7 +378,7 @@
 
     /* ── MOBILE ── */
     @media (max-width: 640px) {
-      nav { padding: 18px 20px; }
+      body > nav { padding: 18px 20px; }
       .hero { padding: 72px 20px 60px; }
       .features { padding: 60px 20px; }
       .oss-band { padding: 40px 20px; gap: 32px; }
@@ -410,11 +406,6 @@
 
 <!-- HERO -->
 <section class="hero">
-  <div class="eyebrow">
-    Early access
-    <span class="rec-dot" aria-hidden="true"></span>
-  </div>
-
   <div class="waveform" aria-hidden="true">
     <div class="waveform-bar"></div>
     <div class="waveform-bar"></div>
@@ -430,13 +421,14 @@
   <h1>Your meetings hold<br/><em>more than you remember</em></h1>
 
   <p class="hero-sub">
-    Clipwise captures every meeting and surfaces the moments your team actually needs to see — decisions, insights, and the clips worth sharing. AI-native. Open source. Your data stays yours.
+    Clipwise captures every meeting and surfaces the moments worth coming back to — decisions, commitments, and open questions. AI-native. Open source. Your data stays yours.
   </p>
 
-  <div class="waitlist" id="waitlist">
-    <a class="cta" href="https://github.com/looprite/clipwise">Get started on GitHub</a>
+  <div class="actions">
+    <a class="cta" href="mailto:hello@clipwiseapp.com">Talk to us</a>
+    <a class="cta secondary" href="https://github.com/looprite/clipwise">GitHub</a>
   </div>
-  <p class="waitlist-note">Open source. Clone it and run it yourself.</p>
+  <p class="actions-note">Needs a Mac with Apple silicon and macOS 14.2 or later.</p>
 </section>
 
 <div class="divider"></div>
@@ -453,7 +445,7 @@
   <div class="feature">
     <div class="feature-label">Claude</div>
     <h3>Ask across every meeting, in Claude</h3>
-    <p>Clipwise connects to Claude over MCP. Ask what someone keeps raising, or what changed since last month, and get an answer drawn from every meeting at once — without opening another app.</p>
+    <p>Clipwise connects to Claude over MCP. Ask what someone keeps raising, or what changed since last month, and get an answer drawn from every call you've recorded — without opening another app.</p>
   </div>
 
   <div class="feature">
@@ -463,21 +455,15 @@
   </div>
 
   <div class="feature">
-    <div class="feature-label">Clips</div>
-    <h3>Share the exact moment, not the whole meeting</h3>
-    <p>Create and share short clips from any meeting. Bring context to the people who weren't in the room without asking them to watch an hour of video.</p>
-  </div>
-
-  <div class="feature">
-    <div class="feature-label">Team memory</div>
-    <h3>Institutional knowledge that doesn't walk out the door</h3>
-    <p>Every important conversation, searchable. Onboard new teammates faster. Stop re-litigating decisions that were already made.</p>
+    <div class="feature-label">Memory</div>
+    <h3>Every call you've recorded, searchable</h3>
+    <p>Find what was decided, who took what on, and which questions are still open, across all your calls. Stop re-litigating decisions that were already made.</p>
   </div>
 
   <div class="feature">
     <div class="feature-label">Privacy</div>
     <h3>Recording and transcription happen on your Mac</h3>
-    <p>Audio is captured and transcribed on your own machine — no bot joins the call and no third-party transcription service sees it. Self-host the server and your meetings stay on infrastructure you control.</p>
+    <p>Audio is captured and transcribed on your own machine — no bot joins the call and no third-party transcription service sees it. Call audio is never uploaded: your team's server keeps the transcript and its moments, with call text encrypted where it's stored. See the <a href="/privacy">privacy policy</a>.</p>
   </div>
 
 </section>
@@ -486,7 +472,7 @@
 <div class="oss-band">
   <div class="oss-band-text">
     <h2>Built to be open</h2>
-    <p>Clipwise is open source and self-hostable. Enterprise teams get full control. We're building in public from day one.</p>
+    <p>Clipwise is open source, and a team can run its own server. We're building in public from day one.</p>
   </div>
   <div class="oss-pills">
     <span class="pill active">Open source</span>
@@ -499,7 +485,7 @@
 
 <!-- FOOTER -->
 <footer>
-  <a href="/" class="footer-logo" aria-label="Clipwise">
+  <a href="/" class="footer-logo" aria-label="Clipwise home">
     <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
       <rect width="40" height="40" rx="9" fill="#F4620A"/>
       <rect x="10" y="19" width="3.5" height="10" rx="1.75" fill="white" opacity="0.6"/>
@@ -508,11 +494,16 @@
       <rect x="26.5" y="15" width="3.5" height="13" rx="1.75" fill="white" opacity="0.7"/>
       <circle cx="34" cy="9" r="4" fill="#F5C842"/>
     </svg>
-    <span class="footer-wordmark">© 2026 Clipwise LLC</span>
+    <span class="footer-wordmark">Clipwise</span>
   </a>
   <nav class="footer-links" aria-label="Footer navigation">
+    <a href="/privacy">Privacy</a>
+    <a href="/terms">Terms</a>
+    <a href="mailto:hello@clipwiseapp.com">Contact</a>
     <a href="https://github.com/looprite/clipwise" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/looprite/clipwise/releases" target="_blank" rel="noopener">Releases</a>
   </nav>
+  <p class="footer-copy">© 2026 Clipwise LLC</p>
 </footer>
 
 

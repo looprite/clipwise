@@ -68,10 +68,12 @@ const readOr = (name) => { try { return fs.readFileSync(path.join(__dirname, nam
 const HTML = [readOr('setup.html'), readOr('setup-page.js')].join('\n');
 const BUILD = fs.readFileSync(path.join(__dirname, 'build-app.sh'), 'utf8');
 // Group 8, the notices (SAA-198 step 7): the repo's THIRD_PARTY_NOTICES, the
-// README, notarize.sh and ffmpeg's build script. Missing reads as empty.
+// README, docs/maintainers.md, notarize.sh and ffmpeg's build script. Missing
+// reads as empty.
 const readRepo = (rel) => { try { return fs.readFileSync(path.join(__dirname, '..', '..', rel), 'utf8'); } catch { return ''; } };
 const NOTICES = readRepo('THIRD_PARTY_NOTICES');
 const README = readRepo('README.md');
+const MAINTAINERS = readRepo('docs/maintainers.md');
 const NOTARIZE = readOr('notarize.sh');
 const FFMPEG_BUILD = readRepo('recorder/ffmpeg/build.sh');
 // Required lazily for the same reason: without setup.js its cases fail one by one.
@@ -1039,10 +1041,10 @@ const CASES = [
         && NOTARIZE.includes('cp "$FFMPEG_SOURCE" "$OUT_DIR/$(basename "$FFMPEG_SOURCE")"')
         && /if \[ "\$\{1:-\}" = "--source" \]; then[\s\S]{0,300}fetch_source/.test(FFMPEG_BUILD)
         && /shasum -a 256 -c -/.test(FFMPEG_BUILD)],
-    ['README: an install section says Apple silicon and macOS 14.2, and ffmpeg on PATH is for a checkout only', () =>
+    ['README: an install section says Apple silicon and macOS 14.2; docs/maintainers.md: ffmpeg on PATH is for a checkout only', () =>
         README.includes('## Installing the app\n\nClipwise needs an Apple silicon Mac with macOS 14.2 or later. It doesn\'t open on an Intel Mac.')
-        && README.includes('`brew install ffmpeg`, for running from a checkout only.')
-        && !README.includes('`brew install ffmpeg`. Not optional')],
+        && MAINTAINERS.includes('`brew install ffmpeg`, for running from a checkout only.')
+        && !MAINTAINERS.includes('`brew install ffmpeg`. Not optional')],
 
     // 9. Auto-update (SAA-253): main.js's wiring around update-gate.js, which
     //    check-update-gate.js covers on its own.

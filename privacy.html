@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Clipwise</title>
+  <style>
+    /* Inter, served from this site (fonts/, licence fonts/OFL.txt). One variable
+       file per subset covers weights 300-900; unicode-range as Google Fonts gave it. */
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 300 900; font-display: swap; src: url(fonts/inter-cyrillic-ext.woff2) format('woff2'); unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F; }
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 300 900; font-display: swap; src: url(fonts/inter-cyrillic.woff2) format('woff2'); unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 300 900; font-display: swap; src: url(fonts/inter-greek-ext.woff2) format('woff2'); unicode-range: U+1F00-1FFF; }
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 300 900; font-display: swap; src: url(fonts/inter-greek.woff2) format('woff2'); unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF; }
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 300 900; font-display: swap; src: url(fonts/inter-vietnamese.woff2) format('woff2'); unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB; }
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 300 900; font-display: swap; src: url(fonts/inter-latin-ext.woff2) format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+    @font-face { font-family: 'Inter'; font-style: normal; font-weight: 300 900; font-display: swap; src: url(fonts/inter-latin.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+  </style>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0D0D0D;
+      --surface:   #151515;
+      --orange:    #F4620A;
+      --orange-dim:#7A3106;
+      --yellow:    #F5C842;
+      --white:     #F5F0EB;
+      --muted:     #6B6B6B;
+      --border:    #222222;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--white);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── NAV ── */
+    body > nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 24px 48px;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: rgba(13,13,13,0.92);
+      backdrop-filter: blur(12px);
+      z-index: 100;
+    }
+
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+    }
+
+    .nav-logo svg { width: 32px; height: 32px; }
+
+    .nav-wordmark {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--white);
+      letter-spacing: -0.02em;
+    }
+
+    .nav-cta {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--bg);
+      background: var(--orange);
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      text-decoration: none;
+      transition: opacity 0.15s;
+    }
+    .nav-cta:hover { opacity: 0.85; }
+
+    /* ── HERO ── */
+    .hero {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      padding: 100px 24px 80px;
+      max-width: 860px;
+      margin: 0 auto;
+    }
+
+    .eyebrow {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--orange);
+      margin-bottom: 28px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .eyebrow::before, .eyebrow::after {
+      content: '';
+      display: block;
+      width: 24px;
+      height: 1px;
+      background: var(--orange-dim);
+    }
+
+    /* Animated waveform — the signature element */
+    .waveform {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      margin-bottom: 48px;
+      height: 64px;
+    }
+
+    .waveform-bar {
+      width: 4px;
+      background: var(--orange);
+      border-radius: 2px;
+      animation: pulse 1.4s ease-in-out infinite;
+      transform-origin: bottom center;
+    }
+
+    .waveform-bar:nth-child(1)  { height: 18px; animation-delay: 0s;    opacity: 0.4; }
+    .waveform-bar:nth-child(2)  { height: 30px; animation-delay: 0.1s;  opacity: 0.6; }
+    .waveform-bar:nth-child(3)  { height: 48px; animation-delay: 0.2s;  opacity: 0.9; }
+    .waveform-bar:nth-child(4)  { height: 56px; animation-delay: 0.05s; opacity: 1;   }
+    .waveform-bar:nth-child(5)  { height: 40px; animation-delay: 0.15s; opacity: 0.8; }
+    .waveform-bar:nth-child(6)  { height: 56px; animation-delay: 0.25s; opacity: 1;   }
+    .waveform-bar:nth-child(7)  { height: 48px; animation-delay: 0.1s;  opacity: 0.9; }
+    .waveform-bar:nth-child(8)  { height: 30px; animation-delay: 0.2s;  opacity: 0.6; }
+    .waveform-bar:nth-child(9)  { height: 18px; animation-delay: 0s;    opacity: 0.4; }
+
+    @keyframes pulse {
+      0%, 100% { transform: scaleY(1); }
+      50%       { transform: scaleY(0.45); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .waveform-bar { animation: none; }
+    }
+
+    .rec-dot {
+      width: 9px;
+      height: 9px;
+      background: var(--yellow);
+      border-radius: 50%;
+      margin-left: 4px;
+      animation: blink 2s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.2; }
+    }
+
+    h1 {
+      font-size: clamp(36px, 6vw, 68px);
+      font-weight: 900;
+      line-height: 1.04;
+      letter-spacing: -0.03em;
+      color: var(--white);
+      margin-bottom: 24px;
+    }
+
+    h1 em {
+      font-style: normal;
+      color: var(--orange);
+    }
+
+    .hero-sub {
+      font-size: clamp(16px, 2.2vw, 20px);
+      font-weight: 400;
+      line-height: 1.6;
+      color: var(--muted);
+      max-width: 580px;
+      margin-bottom: 48px;
+    }
+
+    /* ── ACTIONS ── */
+    .actions {
+      display: flex;
+      gap: 10px;
+      width: 100%;
+      max-width: 440px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .actions .cta {
+      display: inline-block;
+      text-decoration: none;
+      padding: 14px 24px;
+      font-family: 'Inter', sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      background: var(--orange);
+      color: var(--bg);
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      white-space: nowrap;
+    }
+    .actions .cta:hover { opacity: 0.85; }
+    .actions .cta.secondary {
+      background: transparent;
+      color: var(--white);
+      box-shadow: inset 0 0 0 1px var(--border);
+    }
+
+    .actions-note {
+      margin-top: 14px;
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0.01em;
+    }
+
+    /* ── DIVIDER ── */
+    .divider {
+      width: 100%;
+      max-width: 960px;
+      margin: 0 auto;
+      height: 1px;
+      background: var(--border);
+    }
+
+    /* ── FEATURES ── */
+    .features {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 80px 48px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 48px 40px;
+    }
+
+    .feature-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--orange);
+      margin-bottom: 12px;
+    }
+
+    .feature h3 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--white);
+      margin-bottom: 10px;
+      line-height: 1.2;
+    }
+
+    .feature p {
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+
+    .feature p a { color: var(--white); }
+
+    /* ── OPEN SOURCE BAND ── */
+    .oss-band {
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      padding: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 48px;
+      flex-wrap: wrap;
+    }
+
+    .oss-band-text h2 {
+      font-size: clamp(22px, 3.5vw, 32px);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      margin-bottom: 8px;
+    }
+
+    .oss-band-text p {
+      font-size: 15px;
+      color: var(--muted);
+      line-height: 1.6;
+      max-width: 420px;
+    }
+
+    .oss-pills {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      padding: 8px 14px;
+      border-radius: 100px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    .pill.active {
+      border-color: var(--orange-dim);
+      color: var(--orange);
+      background: rgba(244,98,10,0.07);
+    }
+
+    /* ── FOOTER ── */
+    footer {
+      padding: 40px 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .footer-logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      text-decoration: none;
+    }
+
+    .footer-logo svg { width: 24px; height: 24px; }
+
+    .footer-wordmark {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 24px;
+    }
+
+    .footer-links a {
+      font-size: 13px;
+      color: var(--muted);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+    .footer-links a:hover { color: var(--white); }
+
+    .footer-copy {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    /* ── SUCCESS STATE ── */
+    .success-msg {
+      display: none;
+      margin-top: 16px;
+      font-size: 14px;
+      color: var(--orange);
+      font-weight: 500;
+    }
+
+    /* ── MOBILE ── */
+    @media (max-width: 640px) {
+      body > nav { padding: 18px 20px; }
+      .hero { padding: 72px 20px 60px; }
+      .features { padding: 60px 20px; }
+      .oss-band { padding: 40px 20px; gap: 32px; }
+      footer { padding: 32px 20px; flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+  <style>
+    /* ── LEGAL PAGES ── */
+    .legal { max-width: 760px; margin: 0 auto; padding: 72px 24px 96px; }
+    .legal h1 { font-size: clamp(32px, 5vw, 48px); margin-bottom: 12px; }
+    .legal h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; margin: 44px 0 14px; }
+    .legal p, .legal li, .legal td, .legal th { font-size: 15px; line-height: 1.7; color: #B8B2AC; }
+    .legal p { margin-bottom: 14px; }
+    .legal strong { color: var(--white); font-weight: 600; }
+    .legal a { color: var(--orange); }
+    .legal ul { padding-left: 22px; margin-bottom: 14px; }
+    .legal li { margin-bottom: 6px; }
+    .legal li ul { margin: 6px 0 0; }
+    .legal .table-wrap { overflow-x: auto; margin: 8px 0 18px; }
+    .legal table { border-collapse: collapse; width: 100%; min-width: 560px; }
+    .legal th, .legal td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    .legal th { color: var(--white); font-weight: 600; font-size: 13px; }
+    @media (max-width: 640px) { .legal { padding: 48px 20px 72px; } }
+  </style>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="nav-logo" aria-label="Clipwise home">
+    <!-- Icon mark: orange rounded square with waveform bars + yellow dot -->
+    <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="40" height="40" rx="9" fill="#F4620A"/>
+      <rect x="10" y="19" width="3.5" height="10" rx="1.75" fill="white" opacity="0.6"/>
+      <rect x="15.5" y="14" width="3.5" height="15" rx="1.75" fill="white" opacity="0.8"/>
+      <rect x="21" y="10" width="3.5" height="20" rx="1.75" fill="white"/>
+      <rect x="26.5" y="15" width="3.5" height="13" rx="1.75" fill="white" opacity="0.7"/>
+      <circle cx="34" cy="9" r="4" fill="#F5C842"/>
+    </svg>
+    <span class="nav-wordmark">Clipwise</span>
+  </a>
+</nav>
+
+<main class="legal">
+<h1>Privacy Policy</h1>
+
+<p><strong>Effective {{EFFECTIVE_DATE}}</strong></p>
+
+<h2>Who we are and what this covers</h2>
+
+<p>Clipwise LLC ("Clipwise", "we") publishes the Clipwise Mac app, runs the website at clipwiseapp.com, and operates hosted Clipwise instances for teams. This policy covers all three.</p>
+
+<p>It does not cover a Clipwise server that someone else runs. If your team runs its own instance, your team is the operator of that server and decides what happens to the data on it; we have no access to it.</p>
+
+<h2>The short version</h2>
+
+<ul>
+<li><strong>On your Mac:</strong> Clipwise records call audio and turns it into a transcript on your Mac. No bot joins your call, and no transcription service hears it. Voice prints, if you turn them on, never leave your Mac.</li>
+<li><strong>On your team's hosted instance:</strong> the transcript, the moments extracted from it (decisions, commitments, questions), the call's title, time and attendees, and your account details. Call text is encrypted where it's stored. Call audio is never uploaded; it stays on your Mac.</li>
+<li><strong>Shared with a few service providers, only to run Clipwise:</strong> Anthropic reads call text to extract moments, and Voyage AI turns it into search data. Neither may train on it.</li>
+<li><strong>Never:</strong> we don't sell your data, show you ads, or use your calls to train AI models.</li>
+</ul>
+
+<h2>What we collect</h2>
+
+<div class="table-wrap"><table>
+<thead><tr><th>Where it comes from</th><th>What</th><th>Where it's kept</th></tr></thead>
+<tbody>
+<tr><td>The Mac app</td><td>Call audio from your microphone and your computer's sound output, during calls you record</td><td>Your Mac only; audio is never uploaded</td></tr>
+<tr><td>The Mac app</td><td>The transcript, and the moments extracted from it</td><td>Your Mac and your team's instance</td></tr>
+<tr><td>The Mac app</td><td>Who was on the call, as you confirm it, and whether a call is personal or work</td><td>Your team's instance</td></tr>
+<tr><td>The Mac app</td><td>Voice prints, only if you turn on Recognize voices</td><td>Your Mac only</td></tr>
+<tr><td>The Mac app</td><td>Diagnostic logs: app version, errors, and timings, with no call content</td><td>Your Mac only; the app sends no logs or crash reports</td></tr>
+<tr><td>Your account</td><td>Your name, email address, and your team</td><td>Your team's instance</td></tr>
+<tr><td>Google, when you connect it</td><td>Sign-in (your name, email address and basic profile), and read-only calendar access: for the meeting that matches a recording, its title and its invitees' names, email addresses and replies, used to name the recording and its attendees</td><td>Your team's instance</td></tr>
+<tr><td>The Mac app, when checking for updates</td><td>Your app version and IP address</td><td>Not collected by us: the services that deliver updates, GitHub and update.electronjs.org (run by the Electron project), see these as part of the request</td></tr>
+<tr><td>The website</td><td>Ordinary server logs: IP address, browser type, pages viewed</td><td>Cloudflare, which hosts the site; the site uses no analytics</td></tr>
+</tbody>
+</table></div>
+
+<p>When you use Clipwise in Claude, Claude reads your team's moments and transcripts through the connection you set up. That use is covered by your agreement with Anthropic for Claude, not by this policy.</p>
+
+<h2>How we use it, and what we never do</h2>
+
+<p>We use what we collect only to run Clipwise for you and your team:</p>
+
+<ul>
+<li>extract moments from your calls, and make them searchable;</li>
+<li>show you and your teammates the calls you're allowed to see, in Claude and in the app;</li>
+<li>name your recordings from your calendar;</li>
+<li>keep the service secure, and fix problems you report.</li>
+</ul>
+
+<p>We don't sell your data or share it for advertising. We don't use your calls, or anything extracted from them, to train AI models, and the providers that process call text for us are not allowed to train on it either.</p>
+
+<h2>Voice recognition</h2>
+
+<p>Recognize voices is optional and off unless you turn it on. When it's on, Clipwise keeps a voice print for you and for people you name, so it can tell you who was on later calls.</p>
+
+<ul>
+<li>Voice prints are kept on your Mac only, encrypted, and are never uploaded to your team's instance or to us.
+<ul>
+<li>A print is kept for someone only after you've named them on two calls with Recognize voices on. Your own print is kept from your first call.</li>
+</ul></li>
+<li>You can delete any one print, or turn the feature off to delete them all. Your recordings aren't affected.</li>
+<li>To tell voices apart within a call, Clipwise measures each voice on your Mac. With Recognize voices off, those measurements aren't kept.</li>
+</ul>
+
+<p>Some locations require a person's consent before their voice is recognized. Whether you have it is up to you.</p>
+
+<h2>Google user data</h2>
+
+<p>If you sign in with Google or connect your Google calendar, Clipwise asks only for your basic profile and read-only access to your calendar.</p>
+
+<ul>
+<li><strong>What we read:</strong> your name and email address, and for meetings around the time you record: their title, time and invitees. We keep the matching meeting's title and its invitees' names, email addresses and replies; the rest is used only to find the match.</li>
+<li><strong>What we do with it:</strong> sign you in, and name each recording and its attendees from the matching meeting.</li>
+<li><strong>What we don't do:</strong> change your calendar, read events unrelated to your recordings, sell Google data, use it for ads, or use it to train AI models. People at Clipwise don't read it, except with your permission, for security, or where the law requires.</li>
+<li><strong>Who else receives it:</strong> only the service providers below, to run Clipwise. Meeting titles stay on your team's instance. The names you confirm as a call's attendees are sent to Anthropic with the transcript, so moments credit the right person.</li>
+</ul>
+
+<p>Clipwise's use and transfer of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+
+<p>You can remove Clipwise's access at any time in your Google Account's third-party access settings.</p>
+
+<h2>Service providers</h2>
+
+<p>These companies process data for us, each only what it needs to provide its service.</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>Provider</th><th>What it does for Clipwise</th><th>What it receives</th></tr></thead>
+<tbody>
+<tr><td>Fly.io</td><td>Runs your team's hosted instance</td><td>Everything stored on the instance, while it runs</td></tr>
+<tr><td>Neon</td><td>Hosts the instance's database</td><td>Stored data; call text arrives already encrypted</td></tr>
+<tr><td>Anthropic</td><td>Extracts moments from transcripts</td><td>Transcript text and the names of the call's attendees</td></tr>
+<tr><td>Voyage AI</td><td>Turns moments and searches into search data</td><td>Moment and search text; may not train on it</td></tr>
+<tr><td>Google</td><td>Sign-in and read-only calendar access</td><td>Your sign-in; returns your calendar data to us</td></tr>
+<tr><td>Cloudflare</td><td>Hosts the website and its DNS</td><td>Ordinary request data</td></tr>
+<tr><td>GitHub and update.electronjs.org</td><td>App downloads and update checks</td><td>Your IP address and app version</td></tr>
+</tbody>
+</table></div>
+
+<p>We will update this list before adding a provider that receives call content.</p>
+
+<h2>Who can see your calls</h2>
+
+<ul>
+<li><strong>You</strong> see every call you recorded.</li>
+<li><strong>Your teammates</strong> see none of your calls today: every call is private to the person who recorded it, including from your team's admin. If sharing is added, you'll choose what to share, and personal calls will stay yours alone.</li>
+<li><strong>Clipwise</strong> operates the hosted servers. Access to them is limited to the people who run the service, and every read of call content on the server is logged. We look at call content only to fix a problem you report, for security, or where the law requires.</li>
+</ul>
+
+<h2>Security, storage and retention</h2>
+
+<ul>
+<li><strong>In transit:</strong> everything between your Mac, your team's instance and our providers travels encrypted.</li>
+<li><strong>At rest:</strong> call text on a hosted instance (transcripts, moment titles and summaries, recording titles) is encrypted with a key kept apart from the database. Names and the details used to filter searches are not encrypted.</li>
+<li><strong>Where:</strong> hosted instances and their databases run in the United States.</li>
+<li><strong>How long:</strong> your calls stay until you delete them. A call you delete goes to the trash; deleting it from the trash removes it from your team's instance. Database backups keep it for up to 14 days after that.</li>
+<li><strong>On your Mac:</strong> recordings and voice prints stay until you delete them or remove the app's data.</li>
+<li><strong>Leaving a team:</strong> email privacy@clipwiseapp.com and we'll remove your account and the calls you recorded.</li>
+</ul>
+
+<p>No system is perfectly secure. If we learn of a breach that affects your data, we'll tell you without undue delay.</p>
+
+<h2>People on your calls</h2>
+
+<p>The people you talk to are in your recordings too: their words, and their names if you or your calendar name them. Recording laws vary, and some locations require everyone's consent before a call is recorded. Getting any consent required is up to the person recording.</p>
+
+<p>If you were on a call recorded with Clipwise and want it deleted, ask the person who recorded it, or contact us and we'll pass the request to that team.</p>
+
+<h2>Your choices and rights</h2>
+
+<p>You can ask us what we hold about you, and ask us to correct it, export it, or delete it. Depending on where you live, laws such as the GDPR or the CCPA give you these rights; we honor the requests either way.</p>
+
+<h2>Children</h2>
+
+<p>Clipwise is for people 18 and older. We don't knowingly collect information from anyone younger. If you believe we have, email privacy@clipwiseapp.com and we'll delete it.</p>
+
+<h2>Changes to this policy</h2>
+
+<p>When this policy changes, the date at the top changes. If a change affects what we collect or who receives it, we'll tell members in the app before it takes effect.</p>
+
+<h2>Contact</h2>
+
+<p>Questions or requests about your information: privacy@clipwiseapp.com.</p>
+
+<p>Clipwise LLC<br>
+Ponte Vedra Beach, FL 32082<br>
+United States</p>
+</main>
+
+<footer>
+  <a href="/" class="footer-logo" aria-label="Clipwise home">
+    <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="40" height="40" rx="9" fill="#F4620A"/>
+      <rect x="10" y="19" width="3.5" height="10" rx="1.75" fill="white" opacity="0.6"/>
+      <rect x="15.5" y="14" width="3.5" height="15" rx="1.75" fill="white" opacity="0.8"/>
+      <rect x="21" y="10" width="3.5" height="20" rx="1.75" fill="white"/>
+      <rect x="26.5" y="15" width="3.5" height="13" rx="1.75" fill="white" opacity="0.7"/>
+      <circle cx="34" cy="9" r="4" fill="#F5C842"/>
+    </svg>
+    <span class="footer-wordmark">Clipwise</span>
+  </a>
+  <nav class="footer-links" aria-label="Footer navigation">
+    <a href="/privacy">Privacy</a>
+    <a href="/terms">Terms</a>
+    <a href="mailto:hello@clipwiseapp.com">Contact</a>
+    <a href="https://github.com/looprite/clipwise" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/looprite/clipwise/releases" target="_blank" rel="noopener">Releases</a>
+  </nav>
+  <p class="footer-copy">© 2026 Clipwise LLC</p>
+</footer>
+
+</body>
+</html>
