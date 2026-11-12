@@ -376,6 +376,8 @@
       font-weight: 500;
     }
 
+    body > nav, footer { padding-left: max(48px, calc((100% - 864px) / 2)); padding-right: max(48px, calc((100% - 864px) / 2)); }
+
     /* ── MOBILE ── */
     @media (max-width: 640px) {
       body > nav { padding: 18px 20px; }
@@ -437,33 +439,39 @@
 <section class="features" aria-label="What Clipwise does">
 
   <div class="feature">
-    <div class="feature-label">Intelligence</div>
-    <h3>Surface what matters, automatically</h3>
-    <p>AI identifies the moments worth revisiting — decisions made, questions raised, commitments given. Not a wall of transcript.</p>
+    <div class="feature-label">Evidence</div>
+    <h3>Check it against what was said</h3>
+    <p>Every moment carries the time and the transcript line it came from, so you can see the actual words instead of trusting a summary.</p>
+  </div>
+
+  <div class="feature">
+    <div class="feature-label">Who said what</div>
+    <h3>Every voice, named, without a bot</h3>
+    <p>Clipwise tells apart each voice on the call and you name them from the meeting's invite list, so every moment is credited to the person who said it.</p>
+  </div>
+
+  <div class="feature">
+    <div class="feature-label">Moments</div>
+    <h3>Not a summary per meeting</h3>
+    <p>Decisions, commitments and open questions from every call build into one record, so you can see what changed over months.</p>
   </div>
 
   <div class="feature">
     <div class="feature-label">Claude</div>
-    <h3>Ask across every meeting, in Claude</h3>
-    <p>Clipwise connects to Claude over MCP. Ask what someone keeps raising, or what changed since last month, and get an answer drawn from every call you've recorded — without opening another app.</p>
-  </div>
-
-  <div class="feature">
-    <div class="feature-label">Evidence</div>
-    <h3>Every moment points back to the recording</h3>
-    <p>Extracted moments carry timestamps into the source transcript. Check what was actually said instead of trusting a summary you can't verify.</p>
-  </div>
-
-  <div class="feature">
-    <div class="feature-label">Memory</div>
-    <h3>Every call you've recorded, searchable</h3>
-    <p>Find what was decided, who took what on, and which questions are still open, across all your calls. Stop re-litigating decisions that were already made.</p>
+    <h3>Ask where you already work</h3>
+    <p>Ask Claude across every call you've recorded, and it answers with the moments and the calls they came from.</p>
   </div>
 
   <div class="feature">
     <div class="feature-label">Privacy</div>
-    <h3>Recording and transcription happen on your Mac</h3>
-    <p>Audio is captured and transcribed on your own machine — no bot joins the call and no third-party transcription service sees it. Call audio is never uploaded: your team's server keeps the transcript and its moments, with call text encrypted where it's stored. See the <a href="/privacy">privacy policy</a>.</p>
+    <h3>Recorded on your Mac, no bot</h3>
+    <p>Audio is captured and transcribed on your Mac and never leaves it.</p>
+  </div>
+
+  <div class="feature">
+    <div class="feature-label">Yours</div>
+    <h3>Private by default</h3>
+    <p>Every call is visible only to the person who recorded it, not even your team's admin. Transcripts and moments live on your team's own server, which we host or you run yourself.</p>
   </div>
 
 </section>
