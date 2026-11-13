@@ -17,7 +17,7 @@ import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { normalizeEmail } from "../auth/membership.js";
 import { db, schema } from "../db/index.js";
-import { dropReleasedPeople } from "../ingest/attendee-people.js";
+import { deleteRecordings } from "../db/delete-recordings.js";
 import { CLIPWISE_SOURCE, titlePlaceholderFor } from "../ingest/clipwise.js";
 import { ownerAddressesFor } from "../ingest/invitee-names.js";
 import { logAccess } from "../lib/access-line.js";
@@ -94,11 +94,10 @@ captureScopeRouter.post(
 );
 
 // Only from the trash: the row goes only while it is still trashed, so a restore
-// that lands first wins. Every row that references it goes with it, by the
-// foreign keys' ON DELETE CASCADE (check-access 18f finds them all). In the same
-// transaction, each person the recording's attendees, speakers or invitees
-// pointed at that nothing points at any more is deleted
-// (attendee-people.ts dropReleasedPeople; check-access 18f and 18g).
+// that lands first wins. The delete itself, with everything that references the
+// recording and the people it releases, is db/delete-recordings.ts's, the one
+// deletion the host's delete-member-calls uses too (SAA-289; check-access 18f
+// and 18g).
 captureScopeRouter.delete(
   "/captures/:captureId",
   asyncHandler(async (req, res) => {
@@ -106,17 +105,12 @@ captureScopeRouter.delete(
     const { id, trashedAt } = await ownCapture(req);
     if (!trashedAt) throw new HttpError(409, "capture_not_trashed");
     const deleted = await db.transaction(async (tx) => {
-      const pointedAt = await tx.execute(sql`
-        select person_id from ${schema.attendees} where ${schema.attendees.recordingId} = ${id} and ${schema.attendees.personId} is not null
-        union select person_id from ${schema.speakers} where ${schema.speakers.recordingId} = ${id} and ${schema.speakers.personId} is not null
-        union select person_id from ${schema.invitees} where ${schema.invitees.recordingId} = ${id} and ${schema.invitees.personId} is not null`);
-      const gone = await tx
-        .delete(schema.recordings)
-        .where(and(eq(schema.recordings.id, id), isNotNull(schema.recordings.trashedAt)))
-        .returning({ id: schema.recordings.id });
-      if (gone.length === 0) return false;
-      await dropReleasedPeople(tx, ctx.accountId, pointedAt.rows.map((r) => String(r.person_id)));
-      return true;
+      const { recordingIds } = await deleteRecordings(
+        tx,
+        ctx.accountId,
+        and(eq(schema.recordings.id, id), isNotNull(schema.recordings.trashedAt))!,
+      );
+      return recordingIds.length > 0;
     });
     if (!deleted) throw new HttpError(409, "capture_not_trashed");
     res.json({ deleted: true });
