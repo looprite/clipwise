@@ -2,6 +2,31 @@
 
 Clipwise records your calls on your Mac and sends the transcript to your team's Clipwise server, so you can ask Claude about them. It lives in your menu bar. This guide takes you from nothing to your first recorded call.
 
+## Set up with Claude
+
+Open [this guide as plain text](https://raw.githubusercontent.com/looprite/clipwise/main/docs/member-setup.md). Press Command-A, then Command-C. Open a new chat in Claude, press Command-V, and send.
+
+```
+I'm setting up Clipwise on my Mac. The setup guide is pasted with
+this message.
+
+Rules:
+- If the guide isn't in this message, say so and stop.
+- Follow the guide as written, in order, one step at a time.
+  Wait for me to say a step is done before the next one.
+- Use only the guide. Don't add macOS steps, settings names or
+  button names from anywhere else.
+- If what I see doesn't match the guide, or the step is marked
+  [CHECK], ask me for a screenshot before telling me what to click.
+  If the screenshot still doesn't match, say so and tell me to ask
+  my team's admin. Don't guess.
+- My team's address, the download link and my account come from my
+  admin. Don't make them up.
+- Never ask me for a password, code or key.
+```
+
+To screenshot one window: press Shift-Command-4, then Space, then click the window. The screenshot saves to your Desktop. Drag it into the chat.
+
 ## 1. What you need from your admin
 
 Before you start, ask whoever runs Clipwise for your team for:
