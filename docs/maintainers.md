@@ -313,6 +313,22 @@ logins or databases. Everything that changes the schema keeps using the owner.
 `db:push`, `db:sync`, `db:provision`, `db:checks`, `auth:migrate` and the `auth` CLI keep using
 the owner.
 
+## Removing a member
+
+When a member leaves, or asks for their account and calls to be removed, run both steps with the
+`auth` CLI:
+
+1. `npm run auth -- remove-member --email <email>` marks the member removed and revokes their
+   sign-ins. Their calls stay.
+2. `npm run auth -- delete-member-calls --email <email>` permanently deletes every call they
+   recorded, trashed, personal and team-shared ones included, with everything taken from them.
+   Without `--apply` it changes nothing and prints what it would delete, per table. Check the
+   counts, then run it again with `--apply`. It refuses a member who hasn't been removed, and prints
+   `nothing to delete` when there is nothing left. Its output is ids and counts only.
+
+The member's row, their sign-in rows and their calendar connection stay. Deleted rows remain in
+the database's backups for 14 days, as the privacy policy says.
+
 ## Deploying the server
 
 From `server/`, on a clean `main` that has been pushed (`git status --porcelain` prints nothing):

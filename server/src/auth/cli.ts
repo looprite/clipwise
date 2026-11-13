@@ -6,9 +6,23 @@
 //                         [--password-env VAR] [--claim-existing]
 //   tsx src/auth/cli.ts add-member --email <email> [--role member|admin] [--name <name>]
 //   tsx src/auth/cli.ts remove-member --email <email>
+//   tsx src/auth/cli.ts delete-member-calls --email <email> [--apply]
 //   tsx src/auth/cli.ts list-members
 //   tsx src/auth/cli.ts register-recorder
 //   tsx src/auth/cli.ts clear-google-tokens [--apply]
+//
+// remove-member marks the member removed and revokes their sign-ins; their calls
+// stay. delete-member-calls (SAA-289) then permanently deletes every recording
+// a removed member owns, trashed, personal and team-shared ones included, with
+// everything taken from them (db/delete-recordings.ts, the same deletion as the
+// recorder's "Delete permanently"), in one transaction. It refuses a member who
+// has not been removed. Without --apply it runs the same delete and rolls it
+// back, so the counts it prints are what --apply would do. It prints row counts
+// per table before and after, and one log line: the member's uuid, the counts,
+// whether it was applied, and the time. Never an email, a name or call text.
+// A member with nothing left prints "nothing to delete" and exits 0. The
+// member row, their sign-in rows and their calendar connection stay (Gate 2).
+// Database backups keep deleted rows for 14 days.
 //
 // list-members prints each member's email, role and state, and under it every
 // recording-notice version they acknowledged, or "none".
@@ -32,7 +46,8 @@
 
 import { parseArgs } from "node:util";
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
-import { db, schema } from "../db/index.js";
+import { db, pool, schema } from "../db/index.js";
+import { deleteRecordings } from "../db/delete-recordings.js";
 import { slugify } from "../lib/slug.js";
 import {
   Refusal,
@@ -148,6 +163,65 @@ async function listMembers(): Promise<void> {
   say(`notice: the server learns of an acknowledgement only from a capture that carries it, so "none" can mean the member agreed on their Mac but no capture of theirs has reached the server since`);
 }
 
+// Rows under these recordings, per table: ids and counts only, never a column
+// that holds call text.
+async function recordingRowCounts(ids: string[]): Promise<Array<[string, number]>> {
+  const one = async (q: string): Promise<number> => (await pool.query(q, [ids])).rows[0].n as number;
+  const out: Array<[string, number]> = [["recordings", await one(`select count(*)::int as n from recordings where id = any($1::uuid[])`)]];
+  for (const t of ["transcripts", "speakers", "segments", "moments", "clips", "attendees", "invitees", "jobs"]) {
+    out.push([t, await one(`select count(*)::int as n from ${t} where recording_id = any($1::uuid[])`)]);
+  }
+  out.push([
+    "shares",
+    await one(`select count(*)::int as n from shares where recording_id = any($1::uuid[])
+               or clip_id in (select id from clips where recording_id = any($1::uuid[]))`),
+  ]);
+  return out;
+}
+
+class DryRun extends Error {}
+
+async function deleteMemberCalls(values: { email?: string; apply?: boolean }): Promise<void> {
+  const email = requireEmail(values.email);
+  const apply = values.apply === true;
+  const account = await requireAccount();
+  const [member] = await db
+    .select()
+    .from(schema.accountMembers)
+    .where(and(eq(schema.accountMembers.accountId, account.id), eq(schema.accountMembers.email, email)));
+  if (!member) throw new Refusal(`${email} is not a member`);
+  if (!member.removedAt) throw new Refusal(`${email} has not been removed; run remove-member first`);
+  const owned = eq(schema.recordings.ownerMemberId, member.id);
+  const ids = (
+    await db.select({ id: schema.recordings.id }).from(schema.recordings).where(and(eq(schema.recordings.accountId, account.id), owned))
+  ).map((r) => r.id);
+  const logLine = (recordings: number, released: number, applied: boolean) =>
+    process.stdout.write(
+      `delete-member-calls: member=${member.id} recordings=${recordings} people_released=${released} applied=${applied} at=${new Date().toISOString()}\n`,
+    );
+  say(`member ${member.id}, removed ${member.removedAt.toISOString()}`);
+  if (ids.length === 0) {
+    say("nothing to delete");
+    logLine(0, 0, apply);
+    return;
+  }
+  const counts = (c: Array<[string, number]>) => c.map(([t, n]) => `${t}=${n}`).join(" ");
+  say(`before: ${counts(await recordingRowCounts(ids))}`);
+  let result = { recordingIds: [] as string[], peopleReleased: 0 };
+  try {
+    await db.transaction(async (tx) => {
+      result = await deleteRecordings(tx, account.id, owned);
+      if (!apply) throw new DryRun();
+    });
+  } catch (err) {
+    if (!(err instanceof DryRun)) throw err;
+  }
+  say(`${apply ? "deleted" : "would delete"}: recordings=${result.recordingIds.length} people_released=${result.peopleReleased}`);
+  say(`after: ${counts(await recordingRowCounts(ids))}`);
+  logLine(result.recordingIds.length, result.peopleReleased, apply);
+  if (!apply) say("nothing changed; run again with --apply to delete them");
+}
+
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   const { values } = parseArgs({
@@ -182,6 +256,8 @@ async function main(): Promise<void> {
       if (revoked) say("sessions and OAuth tokens revoked");
       return;
     }
+    case "delete-member-calls":
+      return deleteMemberCalls(values);
     case "list-members":
       return listMembers();
     case "clear-google-tokens": {
@@ -201,7 +277,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Refusal(
-        "usage: init-account | bootstrap-admin | add-member | remove-member | list-members | register-recorder | clear-google-tokens (see the header of src/auth/cli.ts)",
+        "usage: init-account | bootstrap-admin | add-member | remove-member | delete-member-calls | list-members | register-recorder | clear-google-tokens (see the header of src/auth/cli.ts)",
       );
   }
 }
