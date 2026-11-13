@@ -43,9 +43,9 @@ You also need an Apple silicon Mac with macOS 14.2 or later. Clipwise doesn't op
 2. Drag Clipwise into Applications.
 3. Open Clipwise from Applications. [CHECK: the exact macOS message on first open of a downloaded app]
 4. If you opened it from somewhere else, Clipwise asks **Move Clipwise to Applications?** Click **Move and relaunch**. It has to run from Applications to start when you log in.
-5. The **Set up Clipwise** window opens. It shows **Step 1 of 5** and walks you through the next steps. You can click **Not now** at any screen and come back later with **Finish setting up Clipwise…** in the menu bar.
+5. The **Set up Clipwise** window opens. It shows **Step 1 of 6** and walks you through the next steps. You can leave setup partway (**Not now** on most screens, **Finish later** on the audio screen) and come back with **Finish setting up Clipwise…** in the menu bar.
 
-Step 1 of 5 is the recording notice, **Before you record**. Read it and click **I understand**. Section 11 covers it.
+Step 1 of 6 is the recording notice, **Before you record**. Read it and click **I understand**. Section 11 covers it.
 
 ## 3. Your team's address and signing in
 
@@ -82,6 +82,16 @@ To turn it on:
 You can also turn it on at any time, during setup or after: open System Settings, choose **Privacy & Security**, scroll to **FileVault** and click **Turn On**. [CHECK: macOS's button and step names]
 
 ## 6. Connect Claude
+
+**Why this step matters.** Clipwise has no window for reading or replaying your calls. You use them by asking Claude, which can search across all of them at once:
+
+- *What did I commit to this week, and to whom?*
+- *What has this customer raised in our last three calls that we haven't settled?*
+- *Catch me up on the Panfold project before my 2 pm call.*
+
+Answers come from what was actually said, and Claude can point to the call and the moment each one came from, so you can check it. Claude sees only your own calls and any your team has shared.
+
+Until this connector is on, your calls are recorded, but nothing can answer questions about them.
 
 The last screen, **Use Clipwise in Claude**, shows your connector address (your team's address followed by `/mcp`) with a **Copy** button. In Claude:
 
