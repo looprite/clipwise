@@ -624,16 +624,32 @@ const CASES = [
     ['build-app.sh copies detect-answer.js into the bundle (main.js requires it)', () =>
         /cp "\$APP_SRC\/detect-answer\.js" "\$C\/Resources\/app\/detect-answer\.js"/.test(BUILD)
         && SRC.includes("require('./detect-answer.js')")],
+    ['build-app.sh copies the prompt panel (SAA-291) into the bundle: prompt-panel.js (main.js requires it), its page, page script and preload', () =>
+        ['prompt-panel.js', 'prompt-panel.html', 'prompt-panel-page.js', 'prompt-panel-preload.js']
+            .every((f) => BUILD.includes(`cp "$APP_SRC/${f}" "$C/Resources/app/${f}"`))
+        && SRC.includes("require('./prompt-panel.js')")
+        && SRC.includes("path.join(__dirname, 'prompt-panel.html')")
+        && SRC.includes("windowPreferences('prompt-panel-preload.js')")],
     ['wake from sleep: powerMonitor\'s resume logs and reschedules the capture-token refresh from the clock', () =>
         /const \{[^}]*\bpowerMonitor\b[^}]*\} = require\('electron'\);/.test(SRC)
         && /powerMonitor\.on\('resume', \(\) => \{\s*if \(!captureTokens\) return;\s*console\.error\(`\[clipwise-recorder\] capture token: resumed from sleep, refresh in \$\{captureRefreshDelay\(\)\} ms`\);\s*scheduleCaptureRefresh\(\);\s*\}\);/.test(SRC)
         && /function captureRefreshDelay\(\) \{\s*return Math\.max\(0, captureTokens\.expiresAt - CAPTURE_REFRESH_EARLY_MS - Date\.now\(\)\);\s*\}\s*function scheduleCaptureRefresh\(\) \{[\s\S]{0,120}setTimeout\(refreshCaptureToken, captureRefreshDelay\(\)\)/.test(SRC)],
-    ['signed out by a refresh: one notification, whose click starts the tray\'s sign-in; the tray\'s Sign out shows none', () =>
-        /function signOutAfterRefresh\(reason\) \{\s*signOutOfCaptureServer\(reason\);\s*notify\('signed-out', 'Clipwise is signed out', 'Recordings are kept and will upload after you sign in\.', signInToCaptureServer\);\s*\}/.test(SRC)
+    // SAA-291: the notice moved from a notification to the prompt panel. Same
+    // meaning: one notice, its button starts the tray's sign-in, and the tray's
+    // Sign out shows none. The second call of signOutAfterRefresh is the panel's
+    // check switch (openPromptPanelForCheck).
+    ['signed out by a refresh: one notice, in the prompt panel (not a notification), whose Sign in… starts the tray\'s sign-in; the tray\'s Sign out shows none', () =>
+        /function signOutAfterRefresh\(reason\) \{\s*signOutOfCaptureServer\(reason\);\s*showSignedOutPanel\(\);\s*\}/.test(SRC)
         && SRC.includes('{ signOut: signOutAfterRefresh, store: setCaptureTokens }')
-        && (SRC.match(/signOutAfterRefresh/g) || []).length === 2
-        && (SRC.match(/'Clipwise is signed out'/g) || []).length === 1
+        && (SRC.match(/signOutAfterRefresh\(/g) || []).length === 2
+        && SRC.includes("if (what === 'signed-out') signOutAfterRefresh('check switch');")
+        && !SRC.includes("notify('signed-out'")
+        && (SRC.match(/showSignedOutPanel\(\)/g) || []).length === 3
+        && /if \(choice === 'sign_in'\) signInToCaptureServer\(\);/.test(SRC)
+        && (require('./prompt-panel.js').panelView('signed-out').title === 'Clipwise is signed out')
+        && JSON.stringify(require('./prompt-panel.js').panelView('signed-out').buttons.map((b) => b.label)) === '["Later","Sign in…"]'
         && SRC.includes("signOutOfCaptureServer('tray');")
+        && !/function signOutOfCaptureServer\(reason\) \{[^}]*showSignedOutPanel/.test(SRC)
         && SRC.includes("items.push({ label: 'Sign in to Clipwise…', click: signInToCaptureServer });")],
     ['sign-in: queued captures waiting because no one was signed in are made due with attempts reset, logged, and the queue is drained', () =>
         /function sendUploadsWaitingOnSignIn\(\) \{\s*for \(const entry of listUploadQueue\(\)\) \{\s*if \(entry\.state !== 'queued' \|\| entry\.lastError !== 'not_signed_in'\) continue;\s*try \{\s*writeUploadEntry\(\{ \.\.\.entry, attempts: 0, nextAttemptAt: new Date\(\)\.toISOString\(\) \}\);\s*console\.error\(`\[clipwise-recorder\] upload \$\{entry\.stem\}: due now \(signed in\)`\);/.test(SRC)

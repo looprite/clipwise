@@ -84,6 +84,9 @@ const { postCaptureTokenForm, refreshCaptureTokens } = require('./capture-refres
 const { createSignInListener } = require('./capture-sign-in.js');
 // Whether a detection prompt's answer starts a capture, and its trigger (SAA-269).
 const { startForAnswer } = require('./detect-answer.js');
+// The prompt panel's text, answers and position (SAA-291). Pure; the window is
+// showPromptPanel below.
+const promptPanelRules = require('./prompt-panel.js');
 
 // --- constants ------------------------------------------------------------
 // All measurements come from 5-second captures on 2026-08-09. A long
@@ -137,6 +140,28 @@ const FLAP_NOTIFY_MIN_MS = 30000;
 // Generous because the prompt arrives exactly when someone is joining a call
 // and has other things to do for the first minute of it.
 const DETECT_PROMPT_TTL_MS = 180000;
+
+// The prompt panel's check-only switch (check-prompt-panel.js), read here and
+// nowhere else. Unset in normal use. See openPromptPanelForCheck.
+const CHECK_PROMPT_PANEL = process.env.CLIPWISE_CHECK_PROMPT_PANEL || null;
+
+// The prompt's expiry as this process uses it: DETECT_PROMPT_TTL_MS, unless the
+// panel's check switch is set AND CLIPWISE_CHECK_PROMPT_TTL_MS gives a whole
+// number of milliseconds from 500 up to DETECT_PROMPT_TTL_MS, so the check can
+// see an expiry without waiting three minutes. Without the switch the override
+// is not read at all. Read once, at launch; when it applies, one line says so.
+const DETECT_PROMPT_EXPIRY_MS = (() => {
+    if (!CHECK_PROMPT_PANEL) return DETECT_PROMPT_TTL_MS;
+    const raw = process.env.CLIPWISE_CHECK_PROMPT_TTL_MS;
+    if (!raw) return DETECT_PROMPT_TTL_MS;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 500 || n > DETECT_PROMPT_TTL_MS) {
+        console.error('[clipwise-recorder] check switch: prompt expiry override ignored — not a whole number of ms from 500 to 180000');
+        return DETECT_PROMPT_TTL_MS;
+    }
+    console.error(`[clipwise-recorder] check switch: prompt expiry ${n} ms`);
+    return n;
+})();
 
 // Minimum gap between prompts for the same application. Without it an app
 // that opens and closes the microphone repeatedly — a browser tab being
@@ -337,6 +362,10 @@ const SETUP_HTML = path.join(__dirname, 'setup.html');
 const MEETINGS_HTML = path.join(__dirname, 'meetings.html');
 const VOICE_PRINTS_HTML = path.join(__dirname, 'voice-prints.html');
 const TEAM_NOTICE_HTML = path.join(__dirname, 'team-notice.html');
+const PROMPT_PANEL_HTML = path.join(__dirname, 'prompt-panel.html');
+// How long the prompt panel's page has to draw before the panel is given up
+// on. It is never shown empty: an empty panel has no answers on it.
+const PROMPT_PANEL_DRAW_GRACE_MS = 5000;
 // How long the prompt waits for the page to report its height before showing
 // itself anyway. Short enough not to be noticed after a capture, long enough
 // for a local file: the measurement is sent from the page's first script run.
@@ -434,11 +463,20 @@ let lastFlapNotifyMs = 0;
 //
 // detectPending is deliberately in memory only. It is the whole of the
 // "not now" answer: if this process dies, or the prompt is never answered, it
-// disappears and nothing was written. { key, name, pid, at, timer }
+// disappears and nothing was written. { key, name, pid, at, timer, panel }
 let detectApps = null;
 let detectProc = null;
 let detectPending = null;
 const detectLastPrompt = new Map();
+
+// The prompt panel on screen, if any (SAA-291): one at a time.
+// { win, kind, token, view, key, shown, reason, drawTimer }. reason is set when
+// it starts closing and is what the closed line says.
+let promptPanel = null;
+// The "signed out" notice is owed: set when a refresh signs this Mac out,
+// cleared by its Sign in… or Later, or by signing in. While a detect prompt is
+// up the notice waits, and comes back once the prompt closes.
+let signedOutPanelWanted = false;
 
 // App -> scope inference (SAA-170). Logic lives in app-scope.js (no
 // Electron in it, same reason identity-answer.js is split out); this is
@@ -1799,6 +1837,33 @@ function openWindowsForCheck() {
     for (const w of windows) OPEN[w]();
 }
 
+// The prompt panel's check-only switch (check-prompt-panel.js, SAA-291), read
+// once at the top (CHECK_PROMPT_PANEL) and acted on here. Unset in normal use.
+// Set, it opens panels through the same functions a real detection and a real
+// refresh sign-out call, and logs one line naming what it opened:
+//   detect             promptForApp, for a made-up app that is not using the
+//                      microphone, so an "Always record" answer starts nothing
+//   signed-out         signOutAfterRefresh
+//   signed-out,detect  both in that order: the detect prompt replaces the
+//                      notice, which comes back once the prompt closes
+// Any other value opens nothing and logs one line saying so, without the value.
+// It opens only; it does nothing else.
+const CHECK_PANEL_APP = { pid: 0, bundle: 'com.example.panelcheck', exe: 'Panel Check Helper',
+    path: '/Applications/Panel Check.app/Contents/MacOS/Panel Check Helper' };
+function openPromptPanelForCheck() {
+    if (!CHECK_PROMPT_PANEL) return;
+    const OPEN = ['detect', 'signed-out', 'signed-out,detect'];
+    if (!OPEN.includes(CHECK_PROMPT_PANEL)) {
+        console.error('[clipwise-recorder] check switch: nothing opened — not "detect", "signed-out" or "signed-out,detect"');
+        return;
+    }
+    console.error(`[clipwise-recorder] check switch: opening ${CHECK_PROMPT_PANEL}`);
+    for (const what of CHECK_PROMPT_PANEL.split(',')) {
+        if (what === 'signed-out') signOutAfterRefresh('check switch');
+        else promptForApp(CHECK_PANEL_APP, detectKey(CHECK_PANEL_APP));
+    }
+}
+
 // Opens the THIRD_PARTY_NOTICES file bundled inside the packaged app
 // (Contents/Resources/THIRD_PARTY_NOTICES, copied there by build-app.sh —
 // see that script's THIRD_PARTY_NOTICES line), not the repo's copy: the
@@ -2003,8 +2068,9 @@ function renderTray() {
         } else if (item === 'permission-note') {
             items.push({ label: perm.note, enabled: false });
         } else if (item === 'detect-prompt') {
-            // The live prompt, carried here as well as in the notification. These
-            // are the same three answers; only the last one writes anything durable.
+            // The live prompt, carried here as well as in the prompt panel. These
+            // are the same three answers, and answering here closes the panel too.
+            // "Not now" writes nothing; the other two write a rule for the app.
             const { key, name } = detectPending;
             items.push(
                 { label: `${name} is using the microphone`, enabled: false },
@@ -2409,36 +2475,31 @@ function isSelfCapture(ev) {
     return false;
 }
 
-// Take the notification off the screen. An alert-style notification stays up
-// until it is acted on, so without this an expired prompt leaves a clickable
-// thing on screen whose backing state is gone — observed: prompted 15:34:22,
-// expired 15:37:22, "record" clicked 15:40:02 and silently discarded.
-//
-// close() is the first line of defence and not the only one, for the same
-// reason notify() has a fallback: nothing here can prove the notification
-// actually went away. answerDetectPrompt therefore also handles an answer
-// that arrives with no live prompt, rather than assuming this worked.
-function withdrawPrompt(p) {
-    if (!p || !p.notification) return;
-    try { p.notification.close(); } catch (err) {
-        console.error(`detect: could not withdraw notification: ${String(err)}`);
-    }
+// Take the prompt's panel off the screen, saying why: an answer (from the
+// panel or the tray) or the expiry. The panel is this process's own window, so
+// unlike the notification it replaced, closing it is something the app can see
+// happen (the closed line, from the window's own 'closed' event).
+function withdrawPrompt(p, reason) {
+    if (!p || !p.panel) return;
+    closePromptPanel(p.panel, reason);
 }
 
-// The prompt. Two surfaces on purpose.
+// The prompt. Two surfaces on purpose: the panel and the tray.
 //
-// Architecture Decision #17 records that notification delivery is not reliably
-// observable: show() returning is not evidence anything appeared, and two
-// notifications during SAA-112 logged neither delivered nor failed. This
-// prompt is the only thing standing between a detected call and no recording,
-// so it cannot be the only surface.
+// The question is asked in a small Clipwise panel (SAA-291), not a
+// notification. Architecture Decision #17 (2026-08-30 amendment): whether a
+// notification was shown can't be seen from inside the app, and with
+// Clipwise's notifications off the question never appeared and the call went
+// unrecorded. The panel is a window of the app's own, which doesn't depend on
+// that setting. There is no notification for this prompt: it is asked in one
+// place only.
 //
-// So the tray carries the same three choices for as long as the prompt is
-// live, and the tray title shows a marker. If the notification never appears,
-// the prompt is still there in the menu bar. If neither is noticed, the prompt
-// expires to "not now" — which writes nothing, so the next call asks again.
-// A missed prompt and a declined one are different states and only one of them
-// is durable.
+// The tray still carries the same three choices for as long as the prompt is
+// live, and the tray title shows a marker, so a panel that couldn't be made
+// leaves the question answerable. If neither is noticed, the prompt expires to
+// "not now", which writes nothing, so the next call asks again. A missed
+// prompt and a declined one are different states and only one of them is
+// durable.
 function promptForApp(ev, key) {
     const name = detectName(ev);
     detectLastPrompt.set(key, Date.now());
@@ -2447,65 +2508,196 @@ function promptForApp(ev, key) {
         timer: setTimeout(() => {
             if (detectPending && detectPending.key === key) {
                 console.error(`detect: prompt for ${key} expired — treated as "not now", nothing written`);
-                withdrawPrompt(detectPending);
+                withdrawPrompt(detectPending, 'expiry');
                 detectPending = null;
                 renderTray();
             }
-        }, DETECT_PROMPT_TTL_MS),
+        }, DETECT_PROMPT_EXPIRY_MS),
     };
     renderTray();
     console.error(`detect: prompting for ${key} (pid ${ev.pid})`);
 
-    // The buttons say what they do. Both write a durable rule for the
-    // application, so neither is labelled as being about this one call —
-    // "Record" over a rule that means "always record" is the same mismatch
-    // as a decline that silently becomes permanent. Recording a single call
-    // without deciding anything is what "Not now" is for — start it manually
-    // from the tray if this one call should still be recorded.
-    const title = `Clipwise: ${displayNameForDetectedKey(key, { name })} is using the microphone`;
-    const body = 'Record calls from this app?';
-    if (!Notification.isSupported()) {
-        notifyFallback(title, `${body} Choose from the Clipwise menu bar icon.`,
-            'Notification.isSupported() is false');
-        return;
-    }
+    // The buttons say what they do (prompt-panel.js). Both durable answers
+    // write a rule for the application, so neither is labelled as being about
+    // this one call: "Record" over a rule that means "always record" is the
+    // same mismatch as a decline that silently becomes permanent. Recording a
+    // single call without deciding anything is what "Not now" is for: start
+    // it manually from the tray if this one call should still be recorded.
+    const view = promptPanelRules.panelView('detect-prompt', { appName: displayNameForDetectedKey(key, { name }) });
+    const panel = showPromptPanel('detect-prompt', view, { key });
+    // Kept so the prompt can be taken down again when it lapses or is answered.
+    if (panel && detectPending && detectPending.key === key) detectPending.panel = panel;
+}
+
+// --- the prompt panel (SAA-291) ---------------------------------------------
+//
+// A small window that floats above other windows, appears on the current
+// desktop space including over a full-screen app, and never takes keyboard
+// focus. Electron 43's type 'panel' makes an NSPanel-style window whose style
+// mask always carries NSWindowStyleMaskNonactivatingPanel, at the floating
+// level, joining all spaces and allowed over full-screen apps; focusable false
+// means it never becomes the key window; showInactive orders it front without
+// activating Clipwise. acceptFirstMouse, because a window that is never key
+// would otherwise spend the first click on itself rather than the button.
+// Following the person between spaces while it is up is accepted (Jon,
+// 2026-11-14). It goes on the display under the cursor, top right.
+//
+// One panel at a time. A detect prompt replaces the signed-out notice, which
+// comes back once the prompt closes (closed handler). Returns the panel, or
+// null when the window could not be made (the tray still has the question).
+function showPromptPanel(kind, view, { key = null } = {}) {
+    if (promptPanel) closePromptPanel(promptPanel, 'replaced');
+    const size = promptPanelRules.PANEL_SIZE;
+    let win;
     try {
-        const n = new Notification({
-            title, body,
-            // macOS shows the first action as the button and the rest on the
-            // expanded alert. "Never" is last deliberately: it is the only
-            // durable decline and must not be the easy thing to hit.
-            actions: [
-                { type: 'button', text: 'Always record' },
-                { type: 'button', text: 'Never ask about this app' },
-            ],
-            closeButtonText: 'Not now',
+        const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+        const at = promptPanelRules.panelPosition(display.workArea, size);
+        win = new BrowserWindow({
+            type: 'panel',
+            x: at.x,
+            y: at.y,
+            width: size.width,
+            height: size.height,
+            useContentSize: true,
+            frame: false,
+            focusable: false,
+            acceptFirstMouse: true,
+            show: false,
+            resizable: false,
+            movable: false,
+            minimizable: false,
+            maximizable: false,
+            fullscreenable: false,
+            skipTaskbar: true,
+            hiddenInMissionControl: true,
+            alwaysOnTop: true,
+            title: 'Clipwise',
+            webPreferences: windowPreferences('prompt-panel-preload.js'),
         });
-        n.once('failed', (_e, err) => notifyFallback(title,
-            `${body} Choose from the Clipwise menu bar icon.`, String(err)));
-        n.once('show', () => console.error(logLines.notifyDeliveredLine('detect-prompt')));
-        n.on('action', (_e, index) => {
-            if (index === 0) answerDetectPrompt(key, 'record');
-            else if (index === 1) answerDetectPrompt(key, 'never');
-        });
-        // Closing, ignoring or letting it time out are all the same answer,
-        // and that answer writes nothing. There is no 'close' handler here on
-        // purpose: there is nothing to do.
-        n.show();
-        // Kept so the prompt can be taken down again when it lapses.
-        if (detectPending && detectPending.key === key) detectPending.notification = n;
+        win.setAlwaysOnTop(true, 'floating');
+        // The process is already an accessory app (app.dock.hide() at launch),
+        // so the dock transform this would otherwise do is skipped.
+        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
     } catch (err) {
-        notifyFallback(title, `${body} Choose from the Clipwise menu bar icon.`, String(err));
+        console.error(`panel: ${kind} could not be made: ${err && err.name ? err.name : 'error'}`);
+        try { if (win && !win.isDestroyed()) win.destroy(); } catch {}
+        return null;
+    }
+    const p = { win, kind, token: randomBytes(16).toString('base64url'), view, key, shown: false, reason: null, drawTimer: null };
+    promptPanel = p;
+    // Never shown empty: shown when the page says it has drawn the view
+    // (prompt-panel:drawn). A page that never draws is given up on.
+    p.drawTimer = setTimeout(() => {
+        if (p.shown || p.reason) return;
+        console.error(`panel: ${kind} page did not draw — not shown`);
+        closePromptPanel(p, 'closed');
+    }, PROMPT_PANEL_DRAW_GRACE_MS);
+    win.on('closed', () => {
+        clearTimeout(p.drawTimer);
+        if (promptPanel === p) promptPanel = null;
+        console.error(logLines.panelClosedLine(kind, p.reason || 'closed'));
+        // The signed-out notice waited for this prompt.
+        if (kind === 'detect-prompt' && signedOutPanelWanted && !promptPanel && !isQuitting) showSignedOutPanel();
+    });
+    win.loadFile(PROMPT_PANEL_HTML, { query: { token: p.token } }).catch((err) => {
+        // A panel closed on purpose while its page loads (replaced, answered
+        // from the tray, expired) aborts the load; that is not a failure.
+        if (p.reason) return;
+        console.error(`panel: ${kind} page failed to load: ${err && err.name ? err.name : 'error'}`);
+        closePromptPanel(p, 'closed');
+    });
+    return p;
+}
+
+// Shown inactive, then the window's own report of itself logged: visible and
+// focused are what it says, not proof it is on the space being looked at.
+function revealPromptPanel(p) {
+    if (p.shown || p.reason || p.win.isDestroyed()) return;
+    p.shown = true;
+    clearTimeout(p.drawTimer);
+    p.win.showInactive();
+    console.error(logLines.panelShownLine(p.kind, p.win.isVisible(), p.win.isFocused()));
+}
+
+// Closes it once; the reason is what the closed line says, and a missing one
+// is 'closed', so the guard is always set. A second call while it is already
+// closing changes nothing.
+function closePromptPanel(p, reason) {
+    if (!p || p.reason) return;
+    p.reason = reason || 'closed';
+    clearTimeout(p.drawTimer);
+    try { if (!p.win.isDestroyed()) p.win.close(); } catch (err) {
+        console.error(`panel: ${p.kind} could not be closed: ${err && err.name ? err.name : 'error'}`);
     }
 }
 
+// What a button on the panel means. The detect prompt's three go to
+// answerDetectPrompt, the same function the tray's items call, which closes
+// the panel; the close here only matters if that found no live prompt.
+function answerPromptPanel(p, choice) {
+    if (p.kind === 'detect-prompt') {
+        answerDetectPrompt(p.key, choice);
+        closePromptPanel(p, `answer ${choice}`);
+        return;
+    }
+    // signed-out: either answer settles it for this session.
+    signedOutPanelWanted = false;
+    closePromptPanel(p, `answer ${choice}`);
+    if (choice === 'sign_in') signInToCaptureServer();
+}
+
+// The signed-out notice, owed until it is answered or this Mac signs in. Waits
+// behind a detect prompt; one already up is left as it is.
+function showSignedOutPanel() {
+    signedOutPanelWanted = true;
+    if (promptPanel) return;
+    showPromptPanel('signed-out', promptPanelRules.panelView('signed-out'));
+}
+
+// Signed in by any route: the notice is no longer owed, and one on screen goes.
+function settleSignedOutPanel() {
+    signedOutPanelWanted = false;
+    if (promptPanel && promptPanel.kind === 'signed-out') closePromptPanel(promptPanel, 'signed-in');
+}
+
+// Messages from the panel's page count only from the panel open now, with its
+// token, and an answer only if it is one of that panel's answers.
+function registerPromptPanelIpc() {
+    const current = (event, payload) => {
+        const p = promptPanel;
+        if (!p || p.reason || p.win.isDestroyed() || event.sender !== p.win.webContents) return null;
+        if (!payload || typeof payload.token !== 'string' || payload.token !== p.token) return null;
+        return p;
+    };
+    ipcMain.on('prompt-panel:ready', (event, payload) => {
+        const p = current(event, payload);
+        if (!p) return;
+        try { p.win.webContents.send('prompt-panel:data', p.view); } catch {}
+    });
+    ipcMain.on('prompt-panel:drawn', (event, payload) => {
+        const p = current(event, payload);
+        if (p) revealPromptPanel(p);
+    });
+    ipcMain.on('prompt-panel:answer', (event, payload) => {
+        const p = current(event, payload);
+        const choice = payload && payload.choice;
+        if (!p || !promptPanelRules.isAnswer(p.kind, choice)) {
+            console.error('panel: an answer was ignored — not from the open panel, or not one of its answers');
+            return;
+        }
+        answerPromptPanel(p, choice);
+    });
+}
+
 // The only path that writes durable state, and it is only ever reached from a
-// notification button or a tray click.
+// panel button or a tray click.
 //
-// An answer can arrive after its prompt has lapsed, because withdrawPrompt
-// cannot prove the notification left the screen. Discarding it silently is
-// what lost a capture: a person clicked a visible button and nothing
-// happened, with no way to tell that from a recording that had started.
+// An answer can arrive after its prompt has lapsed. With the notification this
+// replaced, that was a person clicking a button left on screen after the
+// expiry (SAA-113, 08-30); the panel closes itself on expiry, so now it is
+// only a click racing the expiry timer, but the handling stays. Discarding it
+// silently is what lost a capture: a person clicked a visible button and
+// nothing happened, with no way to tell that from a recording that had started.
 //
 // So a late answer is honoured rather than dropped. Both durable answers are
 // about the application rather than about one call, so neither is made wrong
@@ -2522,7 +2714,7 @@ function answerDetectPrompt(key, choice) {
     if (live) {
         name = detectPending.name;
         clearTimeout(detectPending.timer);
-        withdrawPrompt(detectPending);
+        withdrawPrompt(detectPending, `answer ${choice}`);
         detectPending = null;
     } else {
         const known = detectApps && detectApps[key];
@@ -3300,6 +3492,8 @@ async function exchangeCaptureCode(server, code, redirectUri, verifier) {
         console.error(`[clipwise-recorder] sign-in: signed in to ${server}`);
         sendUploadsWaitingOnSignIn();
         setupSignInFinished(true);
+        // A signed-out notice still up, or still owed, is settled (SAA-291).
+        settleSignedOutPanel();
         // Setup asks for the notice before sign-in, so this is its first chance.
         void reportNoticeToServer('signed in');
         void refreshTeamRole('signed in');
@@ -3355,10 +3549,13 @@ function signOutOfCaptureServer(reason) {
 }
 
 // Signed out by a refresh (the grant refused, or the new tokens not stored):
-// one notification, whose click starts the same sign-in as the tray's item.
+// the prompt panel's signed-out notice (SAA-291), whose Sign in… starts the
+// same sign-in as the tray's item. Not a notification: with notifications off
+// it was never seen (11-14). It has no expiry; Later closes it for this
+// session, and the tray's signed-out state is the way back.
 function signOutAfterRefresh(reason) {
     signOutOfCaptureServer(reason);
-    notify('signed-out', 'Clipwise is signed out', 'Recordings are kept and will upload after you sign in.', signInToCaptureServer);
+    showSignedOutPanel();
 }
 
 let captureRefreshTimer = null;
@@ -5995,8 +6192,11 @@ app.whenReady().then(async () => {
     registerVoicePrintsIpc();
     registerTeamNoticeIpc();
     registerSetupIpc();
+    registerPromptPanelIpc();
     // Unset in normal use: see openWindowsForCheck.
     openWindowsForCheck();
+    // Unset in normal use: see openPromptPanelForCheck.
+    openPromptPanelForCheck();
     // Before any call can start a capture, so that a new person has read the
     // notice by the time their first one is turned away (SAA-216). Opens setup
     // if it was never finished, the notice alone if setup was finished and the

@@ -186,7 +186,43 @@ const CASES = [
         fs.writeFileSync(planted, fs.readFileSync(checkedLog, 'utf8') + `x calendar-preview ${STEM}: ${ADDRESS}\n`);
         return grepCount('@', planted) > 0;
     }],
+    // Cases 11-14 (SAA-291): the prompt panel's lines, from the checkout's
+    // log-lines.js in every mode. The detect panel's title names an app, so a
+    // fixture app name (the title needle) is passed where a kind or a reason
+    // goes, and must not come out.
+    ['SAA-291: a day log of every panel line (both kinds, shown and every close reason, plus the title passed as kind and as reason) holds none of the name, the guest and the title', () => {
+        const L = require('./log-lines.js');
+        const lines = [];
+        for (const k of L.PANEL_KINDS) {
+            lines.push(L.panelShownLine(k, true, false));
+            for (const r of L.PANEL_CLOSE_REASONS) lines.push(L.panelClosedLine(k, r));
+        }
+        lines.push(L.panelShownLine(TITLE, true, false), L.panelClosedLine('detect-prompt', TITLE), L.panelClosedLine(GUEST, SELF));
+        panelLog = writeDayLog(path.join(root, 'panel'), lines);
+        return lines.length === 2 * (1 + L.PANEL_CLOSE_REASONS.length) + 3 && NEEDLES.every((n) => grepCount(n, panelLog) === 0);
+    }],
+    ['SAA-291: no panel line says "delivered", and a kind or reason outside the fixed set is logged as "other"', () => {
+        const L = require('./log-lines.js');
+        return grepCount('delivered', panelLog) === 0
+            && L.panelShownLine(TITLE, true, false) === 'panel: other shown (visible=true, focused=false)'
+            && L.panelClosedLine('detect-prompt', TITLE) === 'panel: detect-prompt closed — other'
+            && L.panelShownLine('detect-prompt', true, false) === 'panel: detect-prompt shown (visible=true, focused=false)'
+            && L.panelClosedLine('signed-out', 'answer later') === 'panel: signed-out closed — answer later'
+            && L.panelClosedLine('detect-prompt', 'expiry') === 'panel: detect-prompt closed — expiry';
+    }],
+    ['control: the same greps find "delivered" and the title planted in a copy of the panel day log', () => {
+        const planted = path.join(root, 'panel-planted.log');
+        fs.writeFileSync(planted, fs.readFileSync(panelLog, 'utf8') + `x notify: delivered — ${TITLE}\n`);
+        return grepCount('delivered', planted) === 1 && grepCount(TITLE, planted) === 1;
+    }],
+    ['SAA-291: log-lines.js\'s close reasons and kinds are prompt-panel.js\'s, the same sets', () => {
+        const L = require('./log-lines.js');
+        const P = require('./prompt-panel.js');
+        const same = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+        return same(L.PANEL_CLOSE_REASONS, P.closeReasons()) && same(L.PANEL_KINDS, Object.keys(P.KINDS));
+    }],
 ];
+let panelLog = null;
 
 console.log(`source: ${REV ? `${REV} main.js and build-app.sh; line formats: COPY of c5b1408, not run from git` : 'log-lines.js, main.js and build-app.sh in the checkout'}`);
 console.log('expected to fail on c5b1408: cases 4, 6, 7 and 8, and nothing else');

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Scripts from the bundle's own files only, nothing remote (as SAA-243's
+     window hardening has it for every window). Styles stay inline. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<!-- The prompt panel (SAA-291): the first-call question ("Record calls from
+     this app?") and the "signed out" notice, in a small floating window that
+     never takes keyboard focus. main.js sends what to show (prompt-panel.js
+     panelView); prompt-panel-page.js draws it and sends back the button
+     pressed. Buttons only: nothing to read or type. Loaded from file:// with no
+     Node; prompt-panel-preload.js is all it reaches of the main process. -->
+<title>Clipwise</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --muted: #6e6e73; --bg: #f2f2f4; --edge: rgba(0,0,0,.14);
+          --btn: #ffffff; --btn-edge: rgba(0,0,0,.18); --accent: #0a66d8; --accent-fg: #ffffff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #f5f5f7; --muted: #a1a1a6; --bg: #2c2c2e; --edge: rgba(255,255,255,.16);
+            --btn: #4a4a4d; --btn-edge: rgba(255,255,255,.12); --accent: #2f7cf6; --accent-fg: #ffffff; }
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    box-sizing: border-box; padding: 12px 14px; overflow: hidden;
+    display: flex; flex-direction: column; justify-content: space-between;
+    font: 13px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    color: var(--fg); background: var(--bg); border: 1px solid var(--edge); border-radius: 10px;
+    user-select: none; cursor: default;
+  }
+  #title { font-weight: 600; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #body { margin: 2px 0 0; color: var(--muted); }
+  #buttons { display: flex; gap: 8px; align-items: center; }
+  #buttons .spacer { flex: 1; }
+  button {
+    font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--btn-edge);
+    background: var(--btn); color: var(--fg); cursor: default; white-space: nowrap;
+  }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; font-weight: 500; }
+  /* The only durable decline: present, but not the easy thing to hit. */
+  button.quiet { background: transparent; border-color: transparent; color: var(--muted); padding-left: 2px; padding-right: 2px; }
+  button:disabled { opacity: .6; }
+</style>
+</head>
+<body>
+  <div>
+    <p id="title"></p>
+    <p id="body"></p>
+  </div>
+  <div id="buttons"></div>
+<script src="prompt-panel-page.js"></script>
+</body>
+</html>

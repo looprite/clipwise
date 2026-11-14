@@ -230,6 +230,15 @@ cp "$APP_SRC/capture-sign-in.js" "$C/Resources/app/capture-sign-in.js"
 # (SAA-269). main.js requires it by relative path; a bundle without it fails to
 # launch.
 cp "$APP_SRC/detect-answer.js" "$C/Resources/app/detect-answer.js"
+# The prompt panel (SAA-291): the first-call question and the signed-out
+# notice. main.js requires prompt-panel.js and loads prompt-panel.html by path
+# relative to itself; the window is that page, its script and its preload. A
+# bundle without the .js fails to launch, and without the page the question
+# is only in the tray.
+cp "$APP_SRC/prompt-panel.js" "$C/Resources/app/prompt-panel.js"
+cp "$APP_SRC/prompt-panel.html" "$C/Resources/app/prompt-panel.html"
+cp "$APP_SRC/prompt-panel-page.js" "$C/Resources/app/prompt-panel-page.js"
+cp "$APP_SRC/prompt-panel-preload.js" "$C/Resources/app/prompt-panel-preload.js"
 # Delete from the trash (SAA-243 item 7). main.js requires it by relative path;
 # a bundle without it fails to launch.
 cp "$APP_SRC/capture-files.js" "$C/Resources/app/capture-files.js"
