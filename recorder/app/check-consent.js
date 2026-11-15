@@ -14,7 +14,8 @@
 //      ("I understand — start recording", starts a hand-started capture, and an
 //      app-started one only while that app still holds the mic).
 //   3. The notice line: the approved text, one line, plain ASCII, and the
-//      notification that fires when recording starts carries it as its body.
+//      recording notice panel shown when recording starts carries it as its
+//      body (SAA-299; a notification before that).
 //   4. Static checks on the source: the gate sits in startRecording before any
 //      capture child can be spawned, capture children are spawned nowhere else,
 //      the window text is the approved text, and build-app.sh copies both new
@@ -76,6 +77,9 @@ const README = readRepo('README.md');
 const MAINTAINERS = readRepo('docs/maintainers.md');
 const NOTARIZE = readOr('notarize.sh');
 const FFMPEG_BUILD = readRepo('recorder/ffmpeg/build.sh');
+// The same for prompt-panel.js, which carries the recording notice (SAA-299).
+let promptPanel = null;
+try { promptPanel = require('./prompt-panel.js'); } catch {}
 // Required lazily for the same reason: without setup.js its cases fail one by one.
 let setup = null;
 try { setup = require('./setup.js'); } catch {}
@@ -491,11 +495,19 @@ const CASES = [
         return signed >= 0 && report > signed && report - signed < 400; }],
     ['window: the primary button is labelled by main.js, not hard-coded to one mode', () =>
         HTML.includes('v.noticeLabel') && fnBody('setupView').includes('noticeLabel: consent.buttonLabel(w.mode)')],
-    ['start notification: fires on the move from starting to recording', () => startNotice.length > 0],
-    ['start notification: the body is consent.NOTICE_LINE, the same line the tray copies', () =>
-        /notify\([^;]*,\s*consent\.NOTICE_LINE\)/.test(startNotice)],
-    ['start notification: the title tells the host to let everyone know', () =>
-        /notify\('recording-started-notice', 'Recording \\u2014 let everyone know',/.test(startNotice)],
+    // SAA-299: the notice is a panel (prompt-panel.js 'recording-notice'), not a
+    // notification. Shown on the same move as before, starting -> recording.
+    ['start notice: notifyStateChange passes every state change to recordingNoticeStep first', () =>
+        /\nfunction notifyStateChange\(prev, next\) \{\n(\s*\/\/[^\n]*\n)*\s*recordingNoticeStep\(prev, next\);/.test(SRC)],
+    ['start notice: shown on the move from starting to recording, and on no other move to recording', () =>
+        !!promptPanel && promptPanel.noticeStep('starting', 'recording') === 'show'
+        && promptPanel.noticeStep('stalled', 'recording') === null && startNotice.length > 0],
+    ['start notice: the body is consent.NOTICE_LINE, the same line the tray copies', () =>
+        !!promptPanel && promptPanel.panelView('recording-notice').body === consent.NOTICE_LINE],
+    ['start notice: the title tells the host to let everyone know', () =>
+        !!promptPanel && promptPanel.panelView('recording-notice').title === 'Recording — let everyone know'],
+    ['start notice: no notification for it (one place only)', () =>
+        !SRC.includes("'recording-started-notice'")],
     ['start notification: the old "recording started" text is gone', () =>
         !SRC.includes("'Clipwise: recording started'") && !startNotice.includes('Capturing your mic')],
     ['start notification: it is not behind the stalled/resumed flap throttle', () =>

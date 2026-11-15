@@ -1,8 +1,10 @@
-// The small Clipwise panel that asks the first-call question and carries the
-// "signed out" notice (SAA-291). No Electron here, so check-prompt-panel.js can
-// read it directly: what each panel says, which answers each panel accepts, and
-// where on a display it sits. main.js makes the window (showPromptPanel) and
-// does what an answer means.
+// The small Clipwise panel that asks the first-call question, carries the
+// "signed out" notice (SAA-291) and the "Recording — let everyone know" notice
+// when a capture starts (SAA-299). No Electron here, so check-prompt-panel.js
+// can read it directly: what each panel says, which answers each panel accepts,
+// how big it is, where on a display it sits, and when the recording notice
+// opens and closes. main.js makes the window (showPromptPanel) and does what an
+// answer means.
 //
 // Why a panel and not a notification: Architecture Decision 17 (2026-08-30
 // amendment). Whether a notification was shown can't be seen from inside the
@@ -11,6 +13,8 @@
 // app's own does not depend on that setting.
 
 'use strict';
+
+const consent = require('./consent.js');
 
 // Each kind's answers, in the order the page lays them out, and the one that
 // is styled as the main button. Fixed words: they are what the log may say.
@@ -28,6 +32,15 @@ const KINDS = {
         answers: ['later', 'sign_in'],
         primary: 'sign_in',
     },
+    // The line to say aloud when a capture starts (SAA-216), moved here from a
+    // notification (SAA-299, 11-15). One button. It closes on OK or when the
+    // recording stops (noticeStep), never on a timer: a panel that closes on
+    // its own brings back the problem it exists for, that nobody can tell
+    // whether it was seen.
+    'recording-notice': {
+        answers: ['ok'],
+        primary: 'ok',
+    },
 };
 
 const LABELS = {
@@ -36,10 +49,20 @@ const LABELS = {
     never: 'Never ask about this app',
     sign_in: 'Sign in…',
     later: 'Later',
+    ok: 'OK',
 };
 
 // The panel's content box, in points. Two short lines and one row of buttons.
 const PANEL_SIZE = { width: 380, height: 112 };
+// The recording notice's body is the whole notice line, which wraps to more
+// than one line at this width; check-prompt-panel.js measures that it fits.
+// 130: one body line more than the other panels (17.55 at 13px/1.35 on 112),
+// rounded up, so the space above the buttons stays theirs (SAA-299, measured).
+const NOTICE_PANEL_SIZE = { width: 380, height: 130 };
+
+function panelSize(kind) {
+    return kind === 'recording-notice' ? NOTICE_PANEL_SIZE : PANEL_SIZE;
+}
 
 // Distance from the display's top-right corner, roughly where a notification
 // banner sits.
@@ -69,6 +92,16 @@ function panelView(kind, { appName } = {}) {
             buttons,
         };
     }
+    if (kind === 'recording-notice') {
+        // The body is the same line "Copy recording notice" puts on the
+        // clipboard.
+        return {
+            kind,
+            title: 'Recording \u2014 let everyone know',
+            body: consent.NOTICE_LINE,
+            buttons,
+        };
+    }
     return {
         kind,
         title: 'Clipwise is signed out',
@@ -89,12 +122,25 @@ function panelPosition(workArea, size = PANEL_SIZE, inset = PANEL_INSET) {
 }
 
 // Why a panel closed, as the log may say it. An answer, the prompt's expiry,
-// the detect panel taking the signed-out panel's place, a sign-in finishing
-// elsewhere, or the window going for any other reason (closed).
+// another panel taking its place, a sign-in finishing elsewhere, the recording
+// stopping (the recording notice), or the window going for any other reason
+// (closed).
 function closeReasons() {
     const out = [];
     for (const kind of Object.keys(KINDS)) for (const a of KINDS[kind].answers) out.push(`answer ${a}`);
-    return [...new Set(out), 'expiry', 'replaced', 'signed-in', 'closed'];
+    return [...new Set(out), 'expiry', 'replaced', 'signed-in', 'stopped', 'closed'];
 }
 
-module.exports = { KINDS, LABELS, PANEL_SIZE, PANEL_INSET, isKind, isAnswer, panelView, panelPosition, closeReasons };
+// What a capture's state change means for the recording notice (SAA-299):
+// 'show' when both tracks start writing (starting -> recording, the move that
+// used to raise the "Recording — let everyone know" notification, so the same
+// starts show it), 'close' on any stop, and null otherwise. A stalled capture
+// that resumes (stalled -> recording) shows nothing: one notice per capture.
+function noticeStep(prev, next) {
+    if (prev === 'starting' && next === 'recording') return 'show';
+    if (next === 'stopped') return 'close';
+    return null;
+}
+
+module.exports = { KINDS, LABELS, PANEL_SIZE, NOTICE_PANEL_SIZE, PANEL_INSET, isKind, isAnswer, panelView, panelSize,
+    panelPosition, closeReasons, noticeStep };

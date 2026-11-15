@@ -1846,22 +1846,71 @@ function openWindowsForCheck() {
 //   signed-out         signOutAfterRefresh
 //   signed-out,detect  both in that order: the detect prompt replaces the
 //                      notice, which comes back once the prompt closes
+//   notice             recordingNoticeStep('starting', 'recording'), the call
+//                      notifyStateChange makes when both tracks start writing
+//                      (SAA-299). No capture runs and the state is not changed.
+//   notice,stop        the same, then recordingNoticeStep('recording',
+//                      'stopped') 3 s after the notice is shown, with one line
+//                      saying so
+//   detect,notice      the notice replaces the detect prompt, which comes back
+//                      once the notice closes if it is still live
+//   detect,notice,expire
+//                      the same, then the prompt is ended through
+//                      expireDetectPrompt (the function its timer calls) once
+//                      the notice is shown, with one line saying so; nothing
+//                      comes back once the notice closes
+//   signed-out,notice  the notice replaces the signed-out notice, which comes
+//                      back once the notice closes
+//   notice,signed-out  signOutAfterRefresh 3 s after the notice is shown, with
+//                      one line saying so: the signed-out notice waits behind
+//                      the recording notice and shows once it closes
 // Any other value opens nothing and logs one line saying so, without the value.
-// It opens only; it does nothing else.
+// It opens only, except for the stop, expire and late sign-out steps above.
 const CHECK_PANEL_APP = { pid: 0, bundle: 'com.example.panelcheck', exe: 'Panel Check Helper',
     path: '/Applications/Panel Check.app/Contents/MacOS/Panel Check Helper' };
+const CHECK_STEP_AFTER_MS = 3000;
 function openPromptPanelForCheck() {
     if (!CHECK_PROMPT_PANEL) return;
-    const OPEN = ['detect', 'signed-out', 'signed-out,detect'];
+    const OPEN = ['detect', 'signed-out', 'signed-out,detect', 'notice', 'notice,stop', 'detect,notice',
+        'detect,notice,expire', 'signed-out,notice', 'notice,signed-out'];
     if (!OPEN.includes(CHECK_PROMPT_PANEL)) {
-        console.error('[clipwise-recorder] check switch: nothing opened — not "detect", "signed-out" or "signed-out,detect"');
+        console.error('[clipwise-recorder] check switch: nothing opened — not one of the values check-prompt-panel.js uses');
         return;
     }
     console.error(`[clipwise-recorder] check switch: opening ${CHECK_PROMPT_PANEL}`);
-    for (const what of CHECK_PROMPT_PANEL.split(',')) {
-        if (what === 'signed-out') signOutAfterRefresh('check switch');
-        else promptForApp(CHECK_PANEL_APP, detectKey(CHECK_PANEL_APP));
+    const steps = CHECK_PROMPT_PANEL.split(',');
+    for (const [i, what] of steps.entries()) {
+        // A sign-out after the notice waits until the notice is on screen.
+        if (what === 'signed-out' && steps.slice(0, i).includes('notice')) afterNoticeShownForCheck('signed out', () => checkSwitchStep(what));
+        else checkSwitchStep(what);
     }
+}
+
+function checkSwitchStep(what) {
+    if (what === 'signed-out') signOutAfterRefresh('check switch');
+    else if (what === 'notice') recordingNoticeStep('starting', 'recording');
+    else if (what === 'stop') afterNoticeShownForCheck('recording stopped', () => recordingNoticeStep('recording', 'stopped'));
+    else if (what === 'expire') afterNoticeShownForCheck('detect prompt ended', () => expireDetectPrompt(detectKey(CHECK_PANEL_APP)));
+    else promptForApp(CHECK_PANEL_APP, detectKey(CHECK_PANEL_APP));
+}
+
+// The stop, expire and late sign-out steps: CHECK_STEP_AFTER_MS after the notice is on screen
+// (so the check can read it first), one line naming the step, then the step.
+// Waits up to 15 s for the notice; one that never shows is left alone, and the
+// check fails on the missing lines.
+function afterNoticeShownForCheck(what, fn) {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+        const p = promptPanel;
+        const up = !!(p && p.kind === 'recording-notice' && p.shown);
+        if (!up && Date.now() - t0 < 15000) return;
+        clearInterval(iv);
+        if (!up) return;
+        setTimeout(() => {
+            console.error(`[clipwise-recorder] check switch: ${what}`);
+            fn();
+        }, CHECK_STEP_AFTER_MS);
+    }, 100);
 }
 
 // Opens the THIRD_PARTY_NOTICES file bundled inside the packaged app
@@ -2284,6 +2333,9 @@ function formatDurationWords(ms) {
 // while the session it describes is still assigned (teardown clears it only
 // after stopRecording has already flipped the state).
 function notifyStateChange(prev, next) {
+    // The recording notice opens when both tracks start writing and closes on
+    // any stop (SAA-299). First, so every state change passes through it.
+    recordingNoticeStep(prev, next);
     // 'starting' is deliberately silent (SAA-151). It fired roughly a second
     // before 'recording started' and said less: the useful fact is that both
     // tracks are writing, and until they are there is nothing to report that
@@ -2314,7 +2366,12 @@ function notifyStateChange(prev, next) {
         // app triggered the capture and that both tracks are going — is no longer
         // in this notification; the triggering app is recorded in the capture's
         // autostop-<stem>.log (capture_start).
-        notify('recording-started-notice', 'Recording \u2014 let everyone know', consent.NOTICE_LINE);
+        //
+        // SAA-299: that line is now the recording notice panel, opened above
+        // (recordingNoticeStep), and there is no notification for it: with
+        // Clipwise's notifications off it was never seen, and the app can't
+        // tell (Architecture Decision 17). The branch stays so this move never
+        // reaches the stalled/resumed pair below.
         return;
     }
     // The flapping pair.
@@ -2505,14 +2562,7 @@ function promptForApp(ev, key) {
     detectLastPrompt.set(key, Date.now());
     detectPending = {
         key, name, pid: ev.pid, at: Date.now(),
-        timer: setTimeout(() => {
-            if (detectPending && detectPending.key === key) {
-                console.error(`detect: prompt for ${key} expired — treated as "not now", nothing written`);
-                withdrawPrompt(detectPending, 'expiry');
-                detectPending = null;
-                renderTray();
-            }
-        }, DETECT_PROMPT_EXPIRY_MS),
+        timer: setTimeout(() => expireDetectPrompt(key), DETECT_PROMPT_EXPIRY_MS),
     };
     renderTray();
     console.error(`detect: prompting for ${key} (pid ${ev.pid})`);
@@ -2523,10 +2573,29 @@ function promptForApp(ev, key) {
     // same mismatch as a decline that silently becomes permanent. Recording a
     // single call without deciding anything is what "Not now" is for: start
     // it manually from the tray if this one call should still be recorded.
-    const view = promptPanelRules.panelView('detect-prompt', { appName: displayNameForDetectedKey(key, { name }) });
-    const panel = showPromptPanel('detect-prompt', view, { key });
+    showDetectPromptPanel();
+}
+
+// The prompt's expiry: "not now", nothing written. From the prompt's timer, and
+// from the panel check's "expire" step (openPromptPanelForCheck).
+function expireDetectPrompt(key) {
+    if (!(detectPending && detectPending.key === key)) return;
+    clearTimeout(detectPending.timer);
+    console.error(`detect: prompt for ${key} expired — treated as "not now", nothing written`);
+    withdrawPrompt(detectPending, 'expiry');
+    detectPending = null;
+    renderTray();
+}
+
+// The live prompt's panel: from promptForApp, and again when the recording
+// notice that took its place closes while the prompt is still live (SAA-299).
+function showDetectPromptPanel() {
+    const d = detectPending;
+    if (!d) return;
+    const view = promptPanelRules.panelView('detect-prompt', { appName: displayNameForDetectedKey(d.key, { name: d.name }) });
+    const panel = showPromptPanel('detect-prompt', view, { key: d.key });
     // Kept so the prompt can be taken down again when it lapses or is answered.
-    if (panel && detectPending && detectPending.key === key) detectPending.panel = panel;
+    if (panel && detectPending === d) d.panel = panel;
 }
 
 // --- the prompt panel (SAA-291) ---------------------------------------------
@@ -2543,11 +2612,14 @@ function promptForApp(ev, key) {
 // 2026-11-14). It goes on the display under the cursor, top right.
 //
 // One panel at a time. A detect prompt replaces the signed-out notice, which
-// comes back once the prompt closes (closed handler). Returns the panel, or
-// null when the window could not be made (the tray still has the question).
+// comes back once the prompt closes (closed handler). The recording notice
+// (SAA-299) replaces either; once it closes, the detect prompt comes back if
+// it is still live, and otherwise the signed-out notice if it is still owed.
+// Returns the panel, or null when the window could not be made (the tray still
+// has the question).
 function showPromptPanel(kind, view, { key = null } = {}) {
     if (promptPanel) closePromptPanel(promptPanel, 'replaced');
-    const size = promptPanelRules.PANEL_SIZE;
+    const size = promptPanelRules.panelSize(kind);
     let win;
     try {
         const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
@@ -2596,8 +2668,12 @@ function showPromptPanel(kind, view, { key = null } = {}) {
         clearTimeout(p.drawTimer);
         if (promptPanel === p) promptPanel = null;
         console.error(logLines.panelClosedLine(kind, p.reason || 'closed'));
-        // The signed-out notice waited for this prompt.
-        if (kind === 'detect-prompt' && signedOutPanelWanted && !promptPanel && !isQuitting) showSignedOutPanel();
+        if (promptPanel || isQuitting) return;
+        // The detect prompt the recording notice replaced, if it hasn't lapsed
+        // or been answered from the tray meanwhile (SAA-299).
+        if (kind === 'recording-notice' && detectPending) showDetectPromptPanel();
+        // The signed-out notice waited for this panel.
+        else if ((kind === 'detect-prompt' || kind === 'recording-notice') && signedOutPanelWanted) showSignedOutPanel();
     });
     win.loadFile(PROMPT_PANEL_HTML, { query: { token: p.token } }).catch((err) => {
         // A panel closed on purpose while its page loads (replaced, answered
@@ -2640,6 +2716,11 @@ function answerPromptPanel(p, choice) {
         closePromptPanel(p, `answer ${choice}`);
         return;
     }
+    // The recording notice's OK only closes it.
+    if (p.kind === 'recording-notice') {
+        closePromptPanel(p, `answer ${choice}`);
+        return;
+    }
     // signed-out: either answer settles it for this session.
     signedOutPanelWanted = false;
     closePromptPanel(p, `answer ${choice}`);
@@ -2652,6 +2733,19 @@ function showSignedOutPanel() {
     signedOutPanelWanted = true;
     if (promptPanel) return;
     showPromptPanel('signed-out', promptPanelRules.panelView('signed-out'));
+}
+
+// The recording notice (SAA-299), from notifyStateChange on every state change:
+// opened when both tracks start writing, closed when the capture stops
+// (prompt-panel.js noticeStep). It replaces whatever panel is up. OK closes it
+// too (answerPromptPanel); nothing else does, and there is no timer.
+function recordingNoticeStep(prev, next) {
+    const step = promptPanelRules.noticeStep(prev, next);
+    if (step === 'show') {
+        showPromptPanel('recording-notice', promptPanelRules.panelView('recording-notice'));
+    } else if (step === 'close' && promptPanel && promptPanel.kind === 'recording-notice') {
+        closePromptPanel(promptPanel, 'stopped');
+    }
 }
 
 // Signed in by any route: the notice is no longer owed, and one on screen goes.

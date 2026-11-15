@@ -199,7 +199,7 @@ const CASES = [
         }
         lines.push(L.panelShownLine(TITLE, true, false), L.panelClosedLine('detect-prompt', TITLE), L.panelClosedLine(GUEST, SELF));
         panelLog = writeDayLog(path.join(root, 'panel'), lines);
-        return lines.length === 2 * (1 + L.PANEL_CLOSE_REASONS.length) + 3 && NEEDLES.every((n) => grepCount(n, panelLog) === 0);
+        return lines.length === L.PANEL_KINDS.length * (1 + L.PANEL_CLOSE_REASONS.length) + 3 && NEEDLES.every((n) => grepCount(n, panelLog) === 0);
     }],
     ['SAA-291: no panel line says "delivered", and a kind or reason outside the fixed set is logged as "other"', () => {
         const L = require('./log-lines.js');
@@ -208,7 +208,11 @@ const CASES = [
             && L.panelClosedLine('detect-prompt', TITLE) === 'panel: detect-prompt closed — other'
             && L.panelShownLine('detect-prompt', true, false) === 'panel: detect-prompt shown (visible=true, focused=false)'
             && L.panelClosedLine('signed-out', 'answer later') === 'panel: signed-out closed — answer later'
-            && L.panelClosedLine('detect-prompt', 'expiry') === 'panel: detect-prompt closed — expiry';
+            && L.panelClosedLine('detect-prompt', 'expiry') === 'panel: detect-prompt closed — expiry'
+            // SAA-299: the recording notice.
+            && L.panelShownLine('recording-notice', true, false) === 'panel: recording-notice shown (visible=true, focused=false)'
+            && L.panelClosedLine('recording-notice', 'answer ok') === 'panel: recording-notice closed — answer ok'
+            && L.panelClosedLine('recording-notice', 'stopped') === 'panel: recording-notice closed — stopped';
     }],
     ['control: the same greps find "delivered" and the title planted in a copy of the panel day log', () => {
         const planted = path.join(root, 'panel-planted.log');

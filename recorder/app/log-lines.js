@@ -13,15 +13,15 @@ function notifyDeliveredLine(kind) {
     return `notify: delivered — ${kind}`;
 }
 
-// The prompt panel (SAA-291), by its kind and nothing else: the detect panel's
+// The prompt panel (SAA-291, SAA-299), by its kind and nothing else: the detect panel's
 // title names an app, so neither the title nor the body is logged. "Shown" is
 // what the window itself reports after showInactive (isVisible, isFocused),
 // the one thing the app can see; it is not evidence the panel is on the
 // space the person is looking at. A kind or reason outside the fixed set is
 // logged as "other", so content can't reach the line by that route either.
-const PANEL_KINDS = ['detect-prompt', 'signed-out'];
+const PANEL_KINDS = ['detect-prompt', 'signed-out', 'recording-notice'];
 const PANEL_CLOSE_REASONS = ['answer never', 'answer not_now', 'answer record', 'answer later', 'answer sign_in',
-    'expiry', 'replaced', 'signed-in', 'closed'];
+    'answer ok', 'expiry', 'replaced', 'signed-in', 'stopped', 'closed'];
 
 function panelShownLine(kind, visible, focused) {
     const k = PANEL_KINDS.includes(kind) ? kind : 'other';

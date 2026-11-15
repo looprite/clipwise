@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The prompt panel as the app shows it (SAA-291): the real main.js opens the
+// The prompt panel as the app shows it (SAA-291, SAA-299): the real main.js opens the
 // real prompt-panel.html through its check-only switch, and this drives the
 // page over the DevTools protocol (button clicks in its DOM), then reads the
 // app's log lines, the learned-app file main.js writes, and the window as macOS
@@ -17,11 +17,23 @@
 // the run and must not exist after it.
 //
 // main.js's switches, read in one place each:
-//   CLIPWISE_CHECK_PROMPT_PANEL   "detect", "signed-out" or "signed-out,detect"
+//   CLIPWISE_CHECK_PROMPT_PANEL   "detect", "signed-out", "signed-out,detect",
+//                                 and for the recording notice (SAA-299)
+//                                 "notice", "notice,stop", "detect,notice",
+//                                 "detect,notice,expire", "signed-out,notice",
+//                                 "notice,signed-out"
 //                                 (openPromptPanelForCheck). detect prompts for
 //                                 a made-up app that is not using the mic, so
 //                                 "Always record" writes the rule and starts no
-//                                 capture.
+//                                 capture. notice opens the recording notice
+//                                 through recordingNoticeStep, the call
+//                                 notifyStateChange makes when both tracks start
+//                                 writing; no capture runs. stop, expire and a
+//                                 signed-out after notice run 3 s after the
+//                                 notice is shown, each with one line: the
+//                                 stop's half of recordingNoticeStep,
+//                                 expireDetectPrompt (the function the prompt's
+//                                 own timer calls) and signOutAfterRefresh.
 //   CLIPWISE_CHECK_PROMPT_TTL_MS  the prompt's expiry, read only when the switch
 //                                 above is set.
 //
@@ -47,6 +59,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const P = require('./prompt-panel.js');
+const consent = require('./consent.js');
 
 const HERE = __dirname;
 const RECORDER_DIR = path.resolve(HERE, '..');
@@ -107,30 +120,54 @@ function windowsOf(pid) {
     if (r.status !== 0) return null;
     try { return JSON.parse(r.stdout).filter((w) => w.pid === pid); } catch { return null; }
 }
-const panelSized = (w) => w.b && Math.abs(w.b.Width - P.PANEL_SIZE.width) <= 2 && Math.abs(w.b.Height - P.PANEL_SIZE.height) <= 2;
+// prompt-panel.js's functions, called so that one missing from an older copy
+// (the control run against 5b636ca) fails its own cases rather than the run.
+const tryCall = (name, ...args) => { try { return P[name](...args); } catch { return undefined; } };
+const sizeOf = (kind) => tryCall('panelSize', kind) || P.PANEL_SIZE;
+const panelSized = (w, kind) => { const s = sizeOf(kind); return !!w.b && Math.abs(w.b.Width - s.width) <= 2 && Math.abs(w.b.Height - s.height) <= 2; };
+const anyPanelSized = (w) => Object.keys(P.KINDS).some((k) => panelSized(w, k));
 
 // --- the DevTools protocol, minimal ----------------------------------------------
+// Every step against the page has a time limit, so a panel that has gone (closed
+// or replaced while the check still holds its page) fails the fixture with the
+// step's name instead of hanging the run. The fixture's catch reports it as
+// "FAIL  <fixture>: the fixture runs to its end — threw: <step> timed out".
+const STEP_MS = 10000;
+const HTTP_MS = 5000;
+function withLimit(promise, step, ms = STEP_MS) {
+    let timer;
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${step} timed out after ${ms / 1000} s`)), ms); }),
+    ]).finally(() => clearTimeout(timer));
+}
+// A step's name: the /*step:…*/ marker at the start of an expression (VIEW,
+// click, FITS), or else its first 60 characters.
+const stepName = (expression) => { const m = /^\/\*step:([^*]*)\*\//.exec(expression); return m ? m[1] : expression.replace(/\s+/g, ' ').slice(0, 60); };
 async function connectPanel(port, ms) {
     const target = await waitFor(async () => {
-        const res = await fetch(`http://127.0.0.1:${port}/json/list`);
+        const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(HTTP_MS) });
         return (await res.json()).find((t) => t.type === 'page' && /\/prompt-panel\.html(\?|$)/.test(t.url)) || false;
     }, ms, 250);
     if (!target) return null;
     const ws = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+    await withLimit(new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; }), 'connectPanel: open the page\'s DevTools socket');
     let id = 0;
     const pending = new Map();
     ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
-        if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+        if (msg.id && pending.has(msg.id)) { pending.get(msg.id).resolve(msg); pending.delete(msg.id); }
     };
-    const call = (method, params = {}) => new Promise((resolve) => {
+    // A socket that closes (the page went) fails whatever is still waiting on it.
+    ws.onclose = () => { for (const p of pending.values()) p.reject(new Error(`${p.step}: the page's DevTools socket closed`)); pending.clear(); };
+    const call = (method, params, step) => new Promise((resolve, reject) => {
         const n = ++id;
-        pending.set(n, resolve);
-        ws.send(JSON.stringify({ id: n, method, params }));
+        pending.set(n, { resolve, reject, step });
+        try { ws.send(JSON.stringify({ id: n, method, params })); } catch (err) { pending.delete(n); reject(new Error(`${step}: ${err.message}`)); }
     });
     const evaluate = async (expression) => {
-        const r = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+        const step = `page.evaluate (${stepName(expression)})`;
+        const r = await withLimit(call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, step), step);
         if (r.result && r.result.exceptionDetails) throw new Error(r.result.exceptionDetails.text || 'page threw');
         return r.result && r.result.result ? r.result.result.value : undefined;
     };
@@ -138,13 +175,36 @@ async function connectPanel(port, ms) {
 }
 async function panelOpen(port) {
     try {
-        const res = await fetch(`http://127.0.0.1:${port}/json/list`);
+        const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(HTTP_MS) });
         return (await res.json()).some((t) => t.type === 'page' && /\/prompt-panel\.html/.test(t.url));
     } catch { return false; }
 }
-const VIEW = `({ title: document.querySelector('#title').textContent, body: document.querySelector('#body').textContent,
+const VIEW = `/*step:read the view*/({ title: document.querySelector('#title').textContent, body: document.querySelector('#body').textContent,
   buttons: [...document.querySelectorAll('#buttons button')].map((b) => ({ label: b.textContent, choice: b.dataset.choice, cls: b.className })) })`;
-const click = (choice) => `(() => { const b = document.querySelector('#buttons button[data-choice="${choice}"]'); if (!b) return false; b.click(); return true; })()`;
+const click = (choice) => `/*step:click ${choice}*/(() => { const b = document.querySelector('#buttons button[data-choice="${choice}"]'); if (!b) return false; b.click(); return true; })()`;
+// Whether what the page drew fits the window, both ways. Height: nothing below
+// the body's box (it clips, overflow hidden) and the buttons above the window's
+// bottom. Width: every button's right edge inside the window, the button row
+// not wider than its box, the body not wider than its box. And the title not
+// cut off. extra, when given, is appended to the body first and taken off
+// after (the control: a body too long for the window must be found not to fit).
+const FITS = (extra = '') => `/*step:measure fit${extra ? ' (control text)' : ''}*/(() => {
+  const b = document.body, t = document.querySelector('#title'), body = document.querySelector('#body');
+  const row = document.querySelector('#buttons');
+  const was = body.textContent;
+  if (${JSON.stringify(extra)}) body.textContent = was + ' ' + ${JSON.stringify(extra)};
+  const r = row.getBoundingClientRect();
+  const rights = [...row.querySelectorAll('button')].map((x) => x.getBoundingClientRect().right);
+  const out = { scroll: b.scrollHeight, client: b.clientHeight, bottom: Math.round(r.bottom), inner: innerHeight,
+    innerWidth, buttonRights: rights, rowScrollWidth: row.scrollWidth, rowClientWidth: row.clientWidth,
+    bodyScrollWidth: b.scrollWidth, bodyClientWidth: b.clientWidth, titleCut: t.scrollWidth > t.clientWidth };
+  out.tall = out.scroll <= out.client && out.bottom <= out.inner;
+  out.wide = rights.length > 0 && rights.every((x) => x <= innerWidth) && out.rowScrollWidth <= out.rowClientWidth
+    && out.bodyScrollWidth <= out.bodyClientWidth;
+  out.fits = out.tall && out.wide && !out.titleCut;
+  body.textContent = was;
+  return out;
+})()`;
 
 // --- fixtures ------------------------------------------------------------------------
 const LAUNCHED = /update: not checked/;
@@ -152,8 +212,12 @@ const LAUNCHED = /update: not checked/;
 // refusal, the permissions wait, the fallback) and what a capture that reached
 // recording logs. None may appear when "Always record" is answered for an app
 // that is not using the mic.
-const NO_CAPTURE = /consent: start blocked|start refused|start blocked until|start: system audio|notify: recording-started-notice/;
+const NO_CAPTURE = /consent: start blocked|start refused|start blocked until|start: system audio|notify: recording-started-notice|panel: recording-notice/;
 const DETECT_BUTTONS = '["Never ask about this app","Not now","Always record"]';
+// The notification the recording notice replaced, delivered or not (SAA-299).
+const OLD_NOTICE = /notify: (delivered — )?recording-started-notice\b/;
+const NOTICE_SHOWN = /^panel: recording-notice shown /;
+const DETECT_SHOWN = /^panel: detect-prompt shown /;
 const FIXTURES = [
     // Without the switch, nothing opens and the expiry override is not read.
     { name: 'noSwitch', switchValue: null, ttl: '1000' },
@@ -167,6 +231,14 @@ const FIXTURES = [
     { name: 'signedOutLater', switchValue: 'signed-out', answer: 'later' },
     { name: 'signedOutSignIn', switchValue: 'signed-out', answer: 'sign_in' },
     { name: 'replace', switchValue: 'signed-out,detect' },
+    // The recording notice (SAA-299).
+    { name: 'noticeOk', switchValue: 'notice', answer: 'ok', hardening: true },
+    { name: 'noticeStop', switchValue: 'notice,stop' },
+    { name: 'detectNotice', switchValue: 'detect,notice' },
+    { name: 'detectNoticeExpired', switchValue: 'detect,notice,expire' },
+    { name: 'signedOutNotice', switchValue: 'signed-out,notice' },
+    // Signed out by a refresh while the notice is up: it waits behind it.
+    { name: 'noticeSignedOut', switchValue: 'notice,signed-out' },
 ];
 
 async function runFixture(fx, ctx) {
@@ -206,7 +278,7 @@ async function runFixture(fx, ctx) {
             check(t('no panel is opened'), !open && panelLines().length === 0, JSON.stringify(panelLines()));
             const sw = lines(/check switch:/).map((l) => l.trim());
             const expect = fx.name === 'noSwitch' ? []
-                : ['[clipwise-recorder] check switch: nothing opened — not "detect", "signed-out" or "signed-out,detect"'];
+                : ['[clipwise-recorder] check switch: nothing opened — not one of the values check-prompt-panel.js uses'];
             check(t(`the switch logs ${expect.length ? 'exactly one line, saying why' : 'nothing, and the expiry override (set to 1000) is not read'}`),
                 JSON.stringify(sw) === JSON.stringify(expect), JSON.stringify(sw));
             return;
@@ -221,12 +293,21 @@ async function runFixture(fx, ctx) {
             check(t('no override set: no expiry line'), lines(/check switch: prompt expiry/).length === 0);
         }
 
-        const firstKind = fx.switchValue === 'signed-out' ? 'signed-out' : 'detect-prompt';
+        const isNotice = fx.switchValue.split(',').includes('notice');
+        const firstKind = isNotice ? 'recording-notice' : fx.switchValue === 'signed-out' ? 'signed-out' : 'detect-prompt';
         const shownRe = new RegExp(`^panel: ${firstKind} shown \\(visible=true, focused=false\\)`);
         const shown = await waitFor(() => panelLines().some((l) => shownRe.test(l)), 15000);
         check(t(`the ${firstKind} panel is shown, and reports visible=true, focused=false`), !!shown, JSON.stringify(panelLines()));
         if (fx.name === 'replace') {
             check(t('the signed-out notice was replaced by the detect prompt before it showed'),
+                panelLines()[0] === 'panel: signed-out closed — replaced', JSON.stringify(panelLines()));
+        }
+        if (fx.name === 'detectNotice' || fx.name === 'detectNoticeExpired') {
+            check(t('the detect prompt was replaced by the recording notice'),
+                panelLines()[0] === 'panel: detect-prompt closed — replaced', JSON.stringify(panelLines()));
+        }
+        if (fx.name === 'signedOutNotice') {
+            check(t('the signed-out notice was replaced by the recording notice'),
                 panelLines()[0] === 'panel: signed-out closed — replaced', JSON.stringify(panelLines()));
         }
         const page = await connectPanel(port, 10000);
@@ -236,8 +317,8 @@ async function runFixture(fx, ctx) {
 
         // From outside the app: one panel-sized window of this process, at the
         // floating level, at the top right of a display, inset 16.
-        const wins = await waitFor(() => { const w = windowsOf(child.pid); return w && w.some(panelSized) ? w : false; }, 5000);
-        const pw = wins ? wins.find(panelSized) : null;
+        const wins = await waitFor(() => { const w = windowsOf(child.pid); return w && w.some((x) => panelSized(x, firstKind)) ? w : false; }, 5000);
+        const pw = wins ? wins.find((x) => panelSized(x, firstKind)) : null;
         check(t(`macOS lists the panel as this process's window at the floating level (layer ${pw ? pw.layer : 'none'})`),
             !!pw && pw.layer === FLOATING_LAYER, JSON.stringify(wins));
         check(t(`it sits ${P.PANEL_INSET} pt below the top of a display's work area and its right edge is ${P.PANEL_INSET} pt from that display's right edge (${pw ? JSON.stringify(pw.b) : 'none'})`),
@@ -251,12 +332,32 @@ async function runFixture(fx, ctx) {
                 JSON.stringify(view.buttons.map((b) => b.label)) === DETECT_BUTTONS
                 && view.buttons.find((b) => b.choice === 'record').cls === 'primary' && view.buttons.find((b) => b.choice === 'never').cls === 'quiet',
                 JSON.stringify(view.buttons));
+        } else if (firstKind === 'recording-notice') {
+            check(t('it says "Recording — let everyone know", the body is consent.NOTICE_LINE, and OK is its one button, the main one'),
+                view.title === 'Recording — let everyone know' && view.body === consent.NOTICE_LINE
+                && JSON.stringify(view.buttons.map((b) => b.label)) === '["OK"]' && view.buttons[0].cls === 'primary', JSON.stringify(view));
         } else {
             check(t('it says signed out, with Later and Sign in…'), view.title === 'Clipwise is signed out'
                 && view.body === 'Recordings are kept and will upload after you sign in.'
                 && JSON.stringify(view.buttons.map((b) => b.label)) === '["Later","Sign in…"]', JSON.stringify(view));
         }
-        check(t('no notification was raised for it'), lines(/notify: (delivered — )?(detect-prompt|signed-out)\b/).length === 0);
+        const fit = await page.evaluate(FITS());
+        check(t(`width: every button's right edge <= innerWidth, the button row and the body no wider than their boxes (rights ${fit ? JSON.stringify(fit.buttonRights) : '?'} vs ${fit ? fit.innerWidth : '?'}; row ${fit ? `${fit.rowScrollWidth}/${fit.rowClientWidth}` : '?'}; body ${fit ? `${fit.bodyScrollWidth}/${fit.bodyClientWidth}` : '?'})`),
+            !!fit && fit.wide === true, JSON.stringify(fit));
+        check(t(`height: what it draws fits the window, and the title is not cut off (${JSON.stringify(fit && { scroll: fit.scroll, client: fit.client, bottom: fit.bottom, inner: fit.inner, titleCut: fit.titleCut })})`),
+            !!fit && fit.tall === true && fit.titleCut === false);
+        if (firstKind === 'recording-notice') {
+            const over = await page.evaluate(FITS(`${consent.NOTICE_LINE} ${consent.NOTICE_LINE}`));
+            check(t(`control: the same height measure finds a body three notice lines long does not fit (${JSON.stringify(over && { scroll: over.scroll, client: over.client, bottom: over.bottom, inner: over.inner })})`), !!over && over.tall === false);
+            const after = await page.evaluate(VIEW);
+            check(t('the control left the page as it was'), after.body === consent.NOTICE_LINE, JSON.stringify(after));
+        }
+        check(t('no notification was raised for it'), lines(/notify: (delivered — )?(detect-prompt|signed-out|recording-notice)\b/).length === 0 && lines(OLD_NOTICE).length === 0);
+        if (isNotice) {
+            const planted = `${log}\nnotify: recording-started-notice\n`;
+            check(t(`control: the same test finds "notify: recording-started-notice" planted in a copy of this log (count ${planted.split('\n').filter((l) => OLD_NOTICE.test(l)).length})`),
+                planted.split('\n').filter((l) => OLD_NOTICE.test(l)).length === 1);
+        }
 
         if (fx.hardening) {
             const kinds = await page.evaluate('[typeof require, typeof process, typeof module]');
@@ -281,7 +382,73 @@ async function runFixture(fx, ctx) {
                 && !panelLines().some((l) => / closed /.test(l)), JSON.stringify(panelLines()));
         }
 
-        if (fx.name === 'detectExpiry') {
+        const EXPIRED = new RegExp(`detect: prompt for ${KEY.replace(/\./g, '\\.')} expired — treated as "not now", nothing written`);
+        if (isNotice) {
+            const listed = (kind) => { const w = windowsOf(child.pid); return !!w && w.some((x) => panelSized(x, kind)); };
+            const closedOk = 'panel: recording-notice closed — answer ok';
+            if (fx.name === 'noticeStop') {
+                const stopped = await waitFor(() => panelLines().includes('panel: recording-notice closed — stopped'), 15000);
+                const stopAt = log.indexOf('check switch: recording stopped');
+                const closedAt = log.indexOf('panel: recording-notice closed — stopped');
+                check(t('the stop closes it with no click: one "check switch: recording stopped" line, then "closed — stopped"'),
+                    !!stopped && lines(/check switch: recording stopped/).length === 1 && stopAt >= 0 && closedAt > stopAt, JSON.stringify(panelLines()));
+                page.close();
+            } else {
+                if (fx.name === 'noticeSignedOut') {
+                    const signedOut = await waitFor(() => lines(/check switch: signed out/).length === 1 && lines(/capture token: signed out \(check switch\)/).length === 1, 15000);
+                    check(t('while the notice is up, the check signs out through signOutAfterRefresh: one "check switch: signed out" line, then the sign-out line'),
+                        !!signedOut, JSON.stringify(lines(/check switch|capture token/)));
+                    await pause(1500);
+                    check(t('after the sign-out, before OK: macOS still lists the recording notice, and its page is open'),
+                        listed('recording-notice') && (await panelOpen(port)), JSON.stringify(windowsOf(child.pid)));
+                    check(t('after the sign-out, before OK: the notice was not closed or replaced, and no signed-out panel was shown'),
+                        !panelLines().some((l) => /^panel: recording-notice closed/.test(l) || /^panel: signed-out shown/.test(l)), JSON.stringify(panelLines()));
+                }
+                if (fx.name === 'detectNoticeExpired') {
+                    const ended = await waitFor(() => lines(/check switch: detect prompt ended/).length === 1 && lines(EXPIRED).length === 1, 15000);
+                    check(t('while the notice is up, the check ends the prompt: one "check switch: detect prompt ended" line, then the expiry line'),
+                        !!ended && log.indexOf('check switch: detect prompt ended') < log.search(EXPIRED), JSON.stringify(lines(/check switch|detect:/)));
+                    await pause(800);
+                    check(t('after the expiry, before OK: macOS still lists the recording notice, and its page is open'),
+                        listed('recording-notice') && (await panelOpen(port)), JSON.stringify(windowsOf(child.pid)));
+                    check(t('after the expiry, before OK: no "closed" line for the recording notice (no "closed — expiry"): the expiry did not close it'),
+                        !panelLines().some((l) => /^panel: recording-notice closed/.test(l)), JSON.stringify(panelLines()));
+                }
+                check(t('clicking OK'), await page.evaluate(click('ok')));
+                page.close();
+                const closed = await waitFor(() => panelLines().includes(closedOk), 6000);
+                check(t(`OK closes it: "${closedOk}"`), !!closed, JSON.stringify(panelLines()));
+                const afterOk = () => panelLines().slice(panelLines().indexOf(closedOk) + 1);
+                if (fx.name === 'detectNotice' || fx.name === 'signedOutNotice' || fx.name === 'noticeSignedOut') {
+                    const kind = fx.name === 'detectNotice' ? 'detect-prompt' : 'signed-out';
+                    const back = await waitFor(() => afterOk().some((l) => l.startsWith(`panel: ${kind} shown `)), 8000);
+                    check(t(`the ${kind} panel comes back once the notice closes${kind === 'detect-prompt' ? ' (its prompt is still live)' : ''}`),
+                        !!back && panelLines().indexOf(closedOk) >= 0, JSON.stringify(panelLines()));
+                    const w2 = await waitFor(() => { const w = windowsOf(child.pid); return w && w.some((x) => panelSized(x, kind)) ? w : false; }, 5000);
+                    const pw2 = w2 ? w2.find((x) => panelSized(x, kind)) : null;
+                    check(t(`macOS lists the ${kind} panel again, at the floating level`), !!pw2 && pw2.layer === FLOATING_LAYER, JSON.stringify(w2));
+                    const again = await connectPanel(port, 8000);
+                    const v2 = again ? await again.evaluate(VIEW) : null;
+                    const answer = kind === 'detect-prompt' ? 'not_now' : 'later';
+                    const title = kind === 'detect-prompt' ? `${APP_LABEL} is using the microphone` : 'Clipwise is signed out';
+                    check(t(`it is the ${kind} panel again, and ${answer} closes it`), !!v2 && v2.title === title && (await again.evaluate(click(answer))), JSON.stringify(v2));
+                    if (again) again.close();
+                    const done = await waitFor(() => panelLines().includes(`panel: ${kind} closed — answer ${answer}`), 5000);
+                    check(t(`closed — answer ${answer}`), !!done, JSON.stringify(panelLines()));
+                    if (kind === 'detect-prompt') {
+                        check(t('the prompt was still live when it came back: no expiry line'), lines(EXPIRED).length === 0);
+                    }
+                } else {
+                    // noticeOk and detectNoticeExpired: nothing comes back.
+                    await pause(3000);
+                    const w3 = windowsOf(child.pid);
+                    check(t(`nothing comes back 3 s after OK: no panel shown after it, no panel page open, and macOS lists no detect-prompt (or any panel) window (${JSON.stringify(w3)})`),
+                        !afterOk().some((l) => / shown /.test(l)) && !(await panelOpen(port)) && !!w3 && !w3.some(anyPanelSized), JSON.stringify(panelLines()));
+                }
+            }
+            check(t(`the recording notice was shown once (${panelLines().filter((l) => NOTICE_SHOWN.test(l)).length}), and "notify: recording-started-notice" is not in the log (${lines(OLD_NOTICE).length})`),
+                panelLines().filter((l) => NOTICE_SHOWN.test(l)).length === 1 && lines(OLD_NOTICE).length === 0);
+        } else if (fx.name === 'detectExpiry') {
             const t0 = Date.now();
             const closed = await waitFor(() => panelLines().includes('panel: detect-prompt closed — expiry'), 8000);
             check(t(`it closes itself on expiry (after ~${Math.round((Date.now() - t0) / 100) / 10}s more)`), !!closed, JSON.stringify(panelLines()));
@@ -342,9 +509,9 @@ async function runFixture(fx, ctx) {
                 check(t('no sign-in request is made (no capture-server.json in this support folder)'), lines(/sign-in:/).length === 0);
             }
         }
-        const gone = await waitFor(async () => !(await panelOpen(port)) && (() => { const w = windowsOf(child.pid); return w && !w.some(panelSized); })(), 5000);
+        const gone = await waitFor(async () => !(await panelOpen(port)) && (() => { const w = windowsOf(child.pid); return w && !w.some(anyPanelSized); })(), 5000);
         check(t('the panel window is gone (DevTools list and macOS window list)'), !!gone);
-        check(t('no log line says "delivered" for a panel'), lines(/delivered/).filter((l) => /panel|detect-prompt|signed-out/.test(l)).length === 0);
+        check(t('no log line says "delivered" for a panel'), lines(/delivered/).filter((l) => /panel|detect-prompt|signed-out|recording-notice/.test(l)).length === 0);
     } catch (err) {
         check(t('the fixture runs to its end'), false, `threw: ${err && err.message ? err.message.split('\n')[0] : String(err)}`);
     } finally {
@@ -368,11 +535,17 @@ function textChecks() {
     check(`the override is read only after "if (!CHECK_PROMPT_PANEL) return DETECT_PROMPT_TTL_MS;"`,
         /const DETECT_PROMPT_EXPIRY_MS = \(\(\) => \{\s*if \(!CHECK_PROMPT_PANEL\) return DETECT_PROMPT_TTL_MS;\s*const raw = process\.env\.CLIPWISE_CHECK_PROMPT_TTL_MS;/.test(src));
     check('the expiry itself is unchanged: DETECT_PROMPT_TTL_MS = 180000', /const DETECT_PROMPT_TTL_MS = 180000;/.test(src));
-    const at = src.indexOf('function promptForApp(');
-    const body = at >= 0 ? src.slice(at, src.indexOf('\n}\n', at)) : '';
+    const fn = (name) => { const a = src.indexOf(`\nfunction ${name}(`); return a >= 0 ? src.slice(a, src.indexOf('\n}\n', a + 1)) : ''; };
+    // promptForApp opens the panel through showDetectPromptPanel (SAA-299, which
+    // also calls it to bring the question back) and its timer ends it through
+    // expireDetectPrompt: the three together are the question's path.
+    const body = fn('promptForApp');
+    const show = fn('showDetectPromptPanel');
+    const expire = fn('expireDetectPrompt');
     const NOTIFY = /new Notification\(|\bnotify\(|notifyFallback\(|notifyDeliveredLine\(/;
-    check('promptForApp raises no notification: the question is asked in one place only (the panel, and the tray)',
-        body.length > 0 && !NOTIFY.test(body) && /showPromptPanel\('detect-prompt'/.test(body) && /DETECT_PROMPT_EXPIRY_MS/.test(body));
+    check('promptForApp, showDetectPromptPanel and expireDetectPrompt raise no notification: the question is asked in one place only (the panel, and the tray)',
+        body.length > 0 && show.length > 0 && expire.length > 0 && ![body, show, expire].some((b) => NOTIFY.test(b))
+        && /showDetectPromptPanel\(\);/.test(body) && /showPromptPanel\('detect-prompt'/.test(show) && /DETECT_PROMPT_EXPIRY_MS/.test(body));
     check('control: the same test finds a notification planted in a copy of promptForApp', NOTIFY.test(body.replace('renderTray();', 'renderTray(); new Notification({});')));
     check('the panel is made as type "panel", not focusable, first click accepted, shown inactive, on all spaces including over full-screen',
         /type: 'panel',/.test(src) && /focusable: false,/.test(src) && /acceptFirstMouse: true,/.test(src)
@@ -382,6 +555,49 @@ function textChecks() {
     check('prompt-panel.js: each kind accepts its own answers and no others',
         ['never', 'not_now', 'record'].every((c) => P.isAnswer('detect-prompt', c)) && ['later', 'sign_in'].every((c) => P.isAnswer('signed-out', c))
         && !P.isAnswer('detect-prompt', 'sign_in') && !P.isAnswer('signed-out', 'record') && !P.isAnswer('other', 'record') && !P.isAnswer('detect-prompt', undefined));
+    // The recording notice (SAA-299).
+    const ns = src.indexOf('\nfunction notifyStateChange(prev, next) {');
+    const nsBody = ns >= 0 ? src.slice(ns, src.indexOf('\n}\n', ns + 1)) : '';
+    const firstStatement = nsBody.split('\n').slice(2).find((l) => l.trim() && !/^\s*\/\//.test(l));
+    check(`notifyStateChange's first statement is recordingNoticeStep(prev, next), so every state change passes through it (${firstStatement ? firstStatement.trim() : 'none'})`,
+        !!firstStatement && firstStatement.trim() === 'recordingNoticeStep(prev, next);');
+    const OLD_NOTIFY = /'recording-started-notice'/;
+    check('main.js raises no "recording-started-notice" notification: the notice is shown in one place only',
+        code.length > 0 && !code.some((l) => OLD_NOTIFY.test(l)));
+    check('control: the same test finds the call planted in a copy of main.js',
+        [...code, "        notify('recording-started-notice', 'Recording \\u2014 let everyone know', consent.NOTICE_LINE);"].some((l) => OLD_NOTIFY.test(l)));
+    check('the starting -> recording branch still returns before the stalled/resumed pair',
+        /if \(next === 'recording' && prev === 'starting'\) \{[\s\S]*?return;\s*\}\s*\/\/ The flapping pair\./.test(nsBody));
+    // A detect prompt can't open during a capture, so it never meets the
+    // recording notice from that side: handleDetectEvent returns while a
+    // capture is running before it can reach promptForApp.
+    const guarded = (text) => {
+        const a = text.indexOf('\nfunction handleDetectEvent(');
+        const hd = a >= 0 ? text.slice(a, text.indexOf('\n}\n', a + 1)) : '';
+        const guard = hd.indexOf("if (state !== 'stopped' || session) {");
+        const call = hd.indexOf('promptForApp(ev, key);');
+        return guard >= 0 && call > guard && /if \(state !== 'stopped' \|\| session\) \{\s*console\.error\([^\n]*\);\s*return;\s*\}/.test(hd);
+    };
+    check('handleDetectEvent returns while a capture is running (state !== \'stopped\' || session) before it can reach promptForApp', guarded(src));
+    check('control: the same test fails on a copy of main.js with that guard removed',
+        !guarded(src.replace(/if \(state !== 'stopped' \|\| session\) \{\s*console\.error\(`detect: \$\{key\} started input while already[^\n]*\n\s*return;\s*\}/, '')));
+    check("the prompt's timer and the check's expire step both end it through expireDetectPrompt",
+        /timer: setTimeout\(\(\) => expireDetectPrompt\(key\), DETECT_PROMPT_EXPIRY_MS\)/.test(src)
+        && /afterNoticeShownForCheck\('detect prompt ended', \(\) => expireDetectPrompt\(detectKey\(CHECK_PANEL_APP\)\)\)/.test(src));
+    const steps = [['starting', 'recording', 'show'], ['stopped', 'starting', null], ['recording', 'stalled', null], ['stalled', 'recording', null],
+        ['recording', 'stopped', 'close'], ['stalled', 'stopped', 'close'], ['starting', 'stopped', 'close']];
+    check(`prompt-panel.js noticeStep: shown on starting -> recording only, closed on any stop, nothing else (${steps.map(([a, b]) => `${a}->${b}=${tryCall('noticeStep', a, b)}`).join(' ')})`,
+        steps.every(([a, b, want]) => tryCall('noticeStep', a, b) === want));
+    const nv = tryCall('panelView', 'recording-notice');
+    check('prompt-panel.js: the recording notice says "Recording — let everyone know", its body is consent.NOTICE_LINE, and OK is its one button',
+        !!nv && nv.title === 'Recording — let everyone know' && nv.body === consent.NOTICE_LINE
+        && JSON.stringify(nv.buttons) === JSON.stringify([{ choice: 'ok', label: 'OK', primary: true }]), JSON.stringify(nv));
+    check('prompt-panel.js: the recording notice accepts OK only, and OK is no other panel\'s answer',
+        P.isAnswer('recording-notice', 'ok') && !P.isAnswer('recording-notice', 'record') && !P.isAnswer('recording-notice', 'later')
+        && !P.isAnswer('detect-prompt', 'ok') && !P.isAnswer('signed-out', 'ok'));
+    check('prompt-panel.js: the recording notice is the same width as the other panels and taller',
+        typeof P.panelSize === 'function' && sizeOf('recording-notice').width === P.PANEL_SIZE.width && sizeOf('recording-notice').height > P.PANEL_SIZE.height
+        && sizeOf('detect-prompt') === P.PANEL_SIZE && sizeOf('signed-out') === P.PANEL_SIZE);
     check('prompt-panel.js: top right of the work area, inset 16',
         JSON.stringify(P.panelPosition({ x: 0, y: 25, width: 1512, height: 920 })) === JSON.stringify({ x: 1512 - P.PANEL_SIZE.width - 16, y: 41 })
         && JSON.stringify(P.panelPosition({ x: -1920, y: 0, width: 1920, height: 1050 })) === JSON.stringify({ x: -P.PANEL_SIZE.width - 16, y: 16 }));

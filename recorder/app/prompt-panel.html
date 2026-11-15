@@ -6,7 +6,8 @@
      window hardening has it for every window). Styles stay inline. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <!-- The prompt panel (SAA-291): the first-call question ("Record calls from
-     this app?") and the "signed out" notice, in a small floating window that
+     this app?"), the "signed out" notice and the recording notice when a
+     capture starts (SAA-299), in a small floating window that
      never takes keyboard focus. main.js sends what to show (prompt-panel.js
      panelView); prompt-panel-page.js draws it and sends back the button
      pressed. Buttons only: nothing to read or type. Loaded from file:// with no
@@ -29,10 +30,13 @@
   }
   #title { font-weight: 600; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #body { margin: 2px 0 0; color: var(--muted); }
-  #buttons { display: flex; gap: 8px; align-items: center; }
+  /* Gap and button padding sized so the detect prompt's three answers fit the
+     380-wide panel (they ran 370 in a 350 row at gap 8, padding 12; SAA-299);
+     check-prompt-panel.js measures it for every kind. */
+  #buttons { display: flex; gap: 4px; align-items: center; }
   #buttons .spacer { flex: 1; }
   button {
-    font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--btn-edge);
+    font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--btn-edge);
     background: var(--btn); color: var(--fg); cursor: default; white-space: nowrap;
   }
   button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; font-weight: 500; }
