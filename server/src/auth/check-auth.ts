@@ -47,7 +47,18 @@ if (process.env.CLIPWISE_CHECK_SCRATCH_DB !== "1") {
 const tag = randomBytes(4).toString("hex");
 const emailFor = (who: string) => `${who}-${tag}@clipwise.test`;
 const PASSWORD = `pw-${randomBytes(9).toString("base64url")}`;
-const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+// The two calendar scopes Clipwise asks for (SAA-254, 11-18): events and the
+// calendar list, read-only. Spelled out here, not imported, so these cases can
+// run against code that asks for something else. CALENDAR_SCOPE is the pair as
+// Google reports a grant (space-separated). The old, broader scope is kept only
+// to show that a grant carrying it alone is refused.
+const EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly";
+const LIST_SCOPE = "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+const CALENDAR_SCOPE = `${EVENTS_SCOPE} ${LIST_SCOPE}`;
+const OLD_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+// Whether a space-separated scope list holds exactly these scopes, in any order.
+const sameScopes = (got: string | null | undefined, want: string): boolean =>
+  (got ?? "").split(" ").filter(Boolean).sort().join(" ") === want.split(" ").sort().join(" ");
 const cfg = authConfigFromEnv();
 const origin = cfg.baseURL;
 
@@ -285,9 +296,9 @@ async function main(): Promise<void> {
       // 1. A member who is not an admin can start a connection.
       const s1 = await startConnect(good.cookie);
       record(
-        s1.status === 302 && s1.atGoogle && s1.scope === CALENDAR_SCOPE && !!s1.state,
-        "calendar connect: a signed-in member who is not an admin starts a connection at Google, for calendar.readonly",
-        `status ${s1.status}`,
+        s1.status === 302 && s1.atGoogle && sameScopes(s1.scope, CALENDAR_SCOPE) && !!s1.state,
+        "calendar connect: a signed-in member who is not an admin starts a connection at Google, for calendar.events.readonly and calendar.calendarlist.readonly",
+        `status ${s1.status}, scope ${s1.scope}`,
       );
 
       // 2. The member's state, arriving with another member's session.
@@ -325,9 +336,11 @@ async function main(): Promise<void> {
         `status ${own.status} ${String(own.error)}, rows for the member ${ownRows}`,
       );
 
-      // 5–7. The scope a grant carries (SAA-198 step 5): stored only when
-      // calendar.readonly is among the scopes Google reported; a grant that
-      // reported none stores nothing. storeCalendarGrant is what sign-in's hook
+      // 5–7. The scope a grant carries (SAA-198 step 5, SAA-254): stored only
+      // when both calendar scopes are among the scopes Google reported; a grant
+      // that reported one of them, the old calendar.readonly alone, or none,
+      // stores nothing. Google lets a member tick one scope and not the other
+      // when two are asked for (granular consent). storeCalendarGrant is what sign-in's hook
       // and Reconnect calendar's callback both store through. Imported here, so
       // code without it fails these cases rather than the run.
       const grantModule = await import("./google-calendar-grant.js").catch(() => null);
@@ -358,14 +371,32 @@ async function main(): Promise<void> {
       const g5 = await tryGrant(`openid email ${CALENDAR_SCOPE}`);
       record(
         g5.outcome === "stored" && g5.rows === 1,
-        "calendar scope: a grant whose reported scope includes calendar.readonly is stored",
+        "calendar scope: a grant whose reported scope includes both calendar scopes is stored",
         `outcome ${g5.outcome}, rows ${g5.rows}`,
       );
       const g6 = await tryGrant("openid email profile");
       record(
         g6.outcome === "no_calendar_scope" && g6.rows === 0,
-        "calendar scope: a reported scope without calendar.readonly stores nothing (no_calendar_scope)",
+        "calendar scope: a reported scope with no calendar scope stores nothing (no_calendar_scope)",
         `outcome ${g6.outcome}, rows ${g6.rows}`,
+      );
+      const g6a = await tryGrant(`openid email ${LIST_SCOPE}`);
+      record(
+        g6a.outcome === "no_calendar_scope" && g6a.rows === 0,
+        "calendar scope: the calendar list ticked and events not (granular consent) stores nothing (no_calendar_scope)",
+        `outcome ${g6a.outcome}, rows ${g6a.rows}`,
+      );
+      const g6b = await tryGrant(`openid email ${EVENTS_SCOPE}`);
+      record(
+        g6b.outcome === "no_calendar_scope" && g6b.rows === 0,
+        "calendar scope: events ticked and the calendar list not (granular consent) stores nothing (no_calendar_scope)",
+        `outcome ${g6b.outcome}, rows ${g6b.rows}`,
+      );
+      const g6c = await tryGrant(`openid email ${OLD_CALENDAR_SCOPE}`);
+      record(
+        g6c.outcome === "no_calendar_scope" && g6c.rows === 0,
+        "calendar scope: the old calendar.readonly alone is not what is asked for, and stores nothing (no_calendar_scope)",
+        `outcome ${g6c.outcome}, rows ${g6c.rows}`,
       );
       const g7 = await tryGrant(null);
       record(
@@ -671,9 +702,13 @@ async function main(): Promise<void> {
       record(u?.host === "accounts.google.com", "with Google configured, sign-in starts at Google", `status ${start.status}`);
       record(u?.searchParams.get("hd") === "clipwise.test", "it asks Google for the allowed domain (hd)", `hd ${u?.searchParams.get("hd")}`);
       // One Google screen for sign-in and the calendar (SAA-198 step 5): identity
-      // plus calendar.readonly, with offline access, and no forced consent.
+      // plus the two calendar scopes, with offline access, and no forced consent.
       const scopes = (u?.searchParams.get("scope") ?? "").split(" ").sort().join(" ");
-      record(scopes === `email ${CALENDAR_SCOPE} openid profile`, "it asks for identity and calendar.readonly on one screen (openid, email, profile, calendar.readonly)", `scope ${scopes}`);
+      record(
+        sameScopes(scopes, `email openid profile ${CALENDAR_SCOPE}`),
+        "it asks for identity and the calendar on one screen (openid, email, profile, calendar.events.readonly, calendar.calendarlist.readonly)",
+        `scope ${scopes}`,
+      );
       record(
         u?.searchParams.get("access_type") === "offline" && !u?.searchParams.has("prompt"),
         "it asks for offline access (a refresh token on a first grant) and forces no consent prompt",
@@ -768,16 +803,23 @@ async function main(): Promise<void> {
       process.env.CALENDAR_TOKEN_ENCRYPTION_KEY = randomBytes(32).toString("base64");
       const gRealFetch = globalThis.fetch;
       let gPrimary = "";
-      // calendarList refused as Google refuses a token without a calendar scope
-      // (403), and how often calendarList was asked.
+      // calendarList or events.list refused as Google refuses a token without
+      // the scope for it (403), and how often each was asked.
       let gListRefused = false;
       let gListCalls = 0;
+      let gEventsRefused = false;
+      let gEventsCalls = 0;
       globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         if (url.startsWith("https://www.googleapis.com/calendar/v3/users/me/calendarList")) {
           gListCalls++;
           if (gListRefused) return Response.json({ error: { code: 403, message: "insufficient scopes" } }, { status: 403 });
           return Response.json({ items: [{ id: gPrimary, primary: true, accessRole: "owner" }] });
+        }
+        if (url.startsWith("https://www.googleapis.com/calendar/v3/calendars/")) {
+          gEventsCalls++;
+          if (gEventsRefused) return Response.json({ error: { code: 403, message: "insufficient scopes" } }, { status: 403 });
+          return Response.json({ items: [] });
         }
         return gRealFetch(input, init);
       }) as typeof fetch;
@@ -805,7 +847,7 @@ async function main(): Promise<void> {
             )
           ).rows;
         const { decrypt } = await import("../lib/crypto.js");
-        const fullScope = `openid,email,profile,${CALENDAR_SCOPE}`;
+        const fullScope = `openid,email,profile,${EVENTS_SCOPE},${LIST_SCOPE}`;
 
         // A first grant: the member googleMemberEmail, created by Google above.
         const sub1 = `sub-first-${tag}`;
@@ -849,9 +891,12 @@ async function main(): Promise<void> {
 
         // A returning sign-in that Google re-asked (consent, a refresh token)
         // but whose scope Better Auth's update path does not carry: on the
-        // sign-in path, a calendarList that succeeds proves the grant, and the
-        // connection is stored with calendar.readonly as its scope.
+        // sign-in path, a calendarList and an events.list that both succeed
+        // prove the grant, and the connection is stored with the two calendar
+        // scopes as its scope. calendarList alone proves nothing: the calendar
+        // list scope answers it without any event access (SAA-254).
         const listedBefore = gListCalls;
+        const eventsBefore = gEventsCalls;
         await gctx.internalAdapter.updateAccount(firstAccount.id, {
           providerId: "google",
           idToken: idTokenFor(sub1),
@@ -866,9 +911,33 @@ async function main(): Promise<void> {
         )).rows[0]?.scope;
         record(
           !!t3 && t3.a === null && t3.r === null && c3.length === 1 && decrypt(c3[0].refresh) === "check-google-refresh-3"
-            && scope3 === CALENDAR_SCOPE && gListCalls - listedBefore === 1,
-          "returning sign-in, refresh token, no scope reported, calendarList succeeds: the connection is stored with calendar.readonly, auth_account empty",
-          `refresh in row ${c3.length ? (decrypt(c3[0].refresh) === "check-google-refresh-3" ? "the new one" : "the old one") : "none"}, scope ${scope3}, calendarList asked ${gListCalls - listedBefore}`,
+            && sameScopes(scope3, CALENDAR_SCOPE) && gListCalls - listedBefore === 1 && gEventsCalls - eventsBefore === 1,
+          "returning sign-in, refresh token, no scope reported, calendarList and events.list succeed: the connection is stored with the two calendar scopes, auth_account empty",
+          `refresh in row ${c3.length ? (decrypt(c3[0].refresh) === "check-google-refresh-3" ? "the new one" : "the old one") : "none"}, scope ${scope3}, calendarList asked ${gListCalls - listedBefore}, events.list asked ${gEventsCalls - eventsBefore}`,
+        );
+
+        // The same, but events.list is refused (403): the member ticked the
+        // calendar list and not events. Nothing stored, after both were asked.
+        await pool.query(`delete from calendar_connections where member_id = (select id from account_members where email = $1)`, [googleMemberEmail]);
+        const listedBeforeE = gListCalls;
+        const eventsBeforeE = gEventsCalls;
+        gEventsRefused = true;
+        try {
+          await gctx.internalAdapter.updateAccount(firstAccount.id, {
+            providerId: "google",
+            idToken: idTokenFor(sub1),
+            accessToken: "check-google-access-3e",
+            refreshToken: "check-google-refresh-3e",
+          });
+        } finally {
+          gEventsRefused = false;
+        }
+        const t3e = await accountTokens(sub1);
+        const c3e = await connectionOf(googleMemberEmail);
+        record(
+          !!t3e && t3e.a === null && t3e.r === null && c3e.length === 0 && gListCalls - listedBeforeE === 1 && gEventsCalls - eventsBeforeE === 1,
+          "returning sign-in, refresh token, no scope reported, calendarList answers but events.list refused (403): nothing stored, auth_account empty",
+          `rows ${c3e.length}, calendarList asked ${gListCalls - listedBeforeE}, events.list asked ${gEventsCalls - eventsBeforeE}`,
         );
 
         // The same, but Google refuses calendarList (403, no calendar scope on
@@ -1032,11 +1101,11 @@ async function main(): Promise<void> {
             remembered.status === 302 &&
               consentAt?.host === "accounts.google.com" &&
               consentAt.searchParams.get("prompt") === "consent" &&
-              consentAt.searchParams.get("scope") === CALENDAR_SCOPE &&
+              sameScopes(consentAt.searchParams.get("scope"), CALENDAR_SCOPE) &&
               consentAt.searchParams.get("login_hint") === rememberedEmail &&
               remembered.cookie.includes("session_token="),
-            "Google sign-in with no refresh token, for a member with no calendar connection: signed in, then on to Google's consent screen (prompt=consent, calendar.readonly, login_hint the member's address)",
-            `status ${remembered.status}, location ${consentAt ? `${consentAt.host} prompt=${consentAt.searchParams.get("prompt")}` : remembered.location}`,
+            "Google sign-in with no refresh token, for a member with no calendar connection: signed in, then on to Google's consent screen (prompt=consent, the two calendar scopes, login_hint the member's address)",
+            `status ${remembered.status}, location ${consentAt ? `${consentAt.host} prompt=${consentAt.searchParams.get("prompt")} scope=${consentAt.searchParams.get("scope")}` : remembered.location}`,
           );
 
           const consentState = consentAt?.searchParams.get("state") ?? "";

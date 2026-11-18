@@ -395,6 +395,9 @@ async function main(): Promise<void> {
           accessToken: encrypt(tokenOf(who)),
           refreshToken: encrypt(`check-jobs-${who}-refresh`),
           tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+          // A connection stored before SAA-254's scope change, kept on purpose:
+          // matching never reads the stored scope, so a member who connected
+          // with calendar.readonly still gets matches until they reconnect.
           scope: "https://www.googleapis.com/auth/calendar.readonly",
           searchedCalendarIds: [`${who}-cal-${fx.tag}@clipwise.test`],
         });

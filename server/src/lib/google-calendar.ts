@@ -139,10 +139,11 @@ export type CalendarListEntry = {
 };
 
 // Deliberately not the userinfo endpoint. That requires an identity scope
-// (email/profile/openid) this app doesn't request — calendar.readonly is
-// already a sensitive scope, and once this goes through Google's
-// verification for External use, every additional scope is something to
-// justify. calendarList is covered by calendar.readonly and returns the
+// (email/profile/openid) this app doesn't request — the calendar scopes are
+// already sensitive, and once this goes through Google's verification for
+// External use, every additional scope is something to justify. calendarList
+// is covered by calendar.calendarlist.readonly (google-calendar-grant.ts
+// CALENDAR_SCOPES; SAA-254) and returns the
 // same value: the entry with primary=true has an id equal to the
 // account's own email address.
 export async function listCalendars(accessToken: string): Promise<CalendarListEntry[]> {

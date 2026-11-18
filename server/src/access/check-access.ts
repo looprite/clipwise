@@ -1777,7 +1777,7 @@ async function main(): Promise<void> {
           accessToken: encrypt(`check-access-${tag}-access`),
           refreshToken: encrypt(`check-access-${tag}-refresh`),
           tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
-          scope: "https://www.googleapis.com/auth/calendar.readonly",
+          scope: "https://www.googleapis.com/auth/calendar.events.readonly https://www.googleapis.com/auth/calendar.calendarlist.readonly",
           searchedCalendarIds: [who.email],
         })
         .returning({ id: schema.calendarConnections.id });

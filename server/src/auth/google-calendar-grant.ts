@@ -1,6 +1,6 @@
 // One Google screen for sign-in and calendar (SAA-198 step 5, Jon's call 5;
 // SAA-227's 10-13 correction to K decision 5). Google sign-in asks for
-// calendar.readonly with offline access, and this file is where its tokens go:
+// CALENDAR_SCOPES (below) with offline access, and this file is where its tokens go:
 // encrypted into calendar_connections, never into Better Auth's auth_account.
 //
 // Better Auth writes a Google sign-in's tokens through its adapter on three
@@ -35,10 +35,18 @@ import { eq } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
 import { encrypt } from "../lib/crypto.js";
 import { logError } from "../lib/safe-error.js";
-import { GoogleApiError, listCalendars, selectSearchableCalendars } from "../lib/google-calendar.js";
+import { GoogleApiError, listCalendars, listEvents, selectSearchableCalendars } from "../lib/google-calendar.js";
 import { findMemberByAuthUserId, normalizeEmail } from "./membership.js";
 
-export const CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+// The calendar access Clipwise asks Google for (SAA-254, decided 11-18): the
+// narrowest scopes that cover the two calls it makes (lib/google-calendar.ts),
+// events.list and calendarList.list, both read-only. Not calendar.readonly,
+// which also covers calendar settings, ACLs and free/busy that nothing here
+// reads. Both are required: with two scopes Google lets a member tick one and
+// not the other (granular consent), and a grant missing either is refused.
+export const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly";
+export const CALENDAR_LIST_SCOPE = "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+export const CALENDAR_SCOPES = [CALENDAR_EVENTS_SCOPE, CALENDAR_LIST_SCOPE] as const;
 
 type Parked = {
   accessToken: string;
@@ -252,7 +260,7 @@ export function calendarOAuthConfig(): { clientId: string; redirectUri: string }
 }
 
 // Records a consent in flight and returns Google's consent screen for it:
-// calendar.readonly with offline access, consent asked every time, and the
+// CALENDAR_SCOPES with offline access, consent asked every time, and the
 // member's own address as the account Google offers (decision 28 refuses a
 // grant for any other). A sign-in's consent gets a signed state; Reconnect's a
 // random one.
@@ -271,7 +279,7 @@ export function startCalendarConsent(
   url.searchParams.set("client_id", oauth.clientId);
   url.searchParams.set("redirect_uri", oauth.redirectUri);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", CALENDAR_READONLY_SCOPE);
+  url.searchParams.set("scope", CALENDAR_SCOPES.join(" "));
   url.searchParams.set("access_type", "offline");
   url.searchParams.set("prompt", "consent");
   url.searchParams.set("login_hint", member.email);
@@ -327,37 +335,41 @@ export async function consentAfterSignIn(
   }
 }
 
-// Whether the scopes Google reported for a grant include calendar.readonly.
+// Whether the scopes Google reported for a grant include both CALENDAR_SCOPES.
 // Space-separated in Google's token reply, comma-separated where Better Auth
 // has joined them. No scope reported is no: it is never assumed. Google's
 // tokeninfo could say, but is documented for id tokens only (open list).
-function hasCalendarScope(scope: string | null): boolean {
-  return !!scope && scope.split(/[\s,]+/).includes(CALENDAR_READONLY_SCOPE);
+function hasCalendarScopes(scope: string | null): boolean {
+  if (!scope) return false;
+  const granted = scope.split(/[\s,]+/);
+  return CALENDAR_SCOPES.every((s) => granted.includes(s));
 }
 
 // Stores a grant as the member's calendar connection, after two checks: the
-// scope Google reported includes calendar.readonly (a member may approve sign-in
-// without the calendar, and a returning member's sign-in reports no scope), and
-// decision 28's, that the grant's primary calendar is the member's own sign-in
-// address. Otherwise nothing is stored. Shared by sign-in (above) and Reconnect
-// calendar (routes/oauth.ts). Counts and ids only in the log (SAA-227 decision
-// 11): the calendar list holds addresses and names.
+// scope Google reported includes both CALENDAR_SCOPES (a member may approve
+// sign-in without the calendar, or tick one calendar scope and not the other,
+// and a returning member's sign-in reports no scope), and decision 28's, that
+// the grant's primary calendar is the member's own sign-in address. Otherwise
+// nothing is stored. Shared by sign-in (above) and Reconnect calendar
+// (routes/oauth.ts). Counts and ids only in the log (SAA-227 decision 11): the
+// calendar list holds addresses and names.
 //
 // A grant that reports no scope at all (unreportedScope):
 //   "refuse" (the default, and Reconnect calendar's): nothing is stored.
 //   "prove_by_calendar_list" (sign-in's only): Better Auth's update path, a
 //     returning member whom Google asked again, carries no scope, so the grant
-//     is proven by a calendarList that succeeds, and stored with
-//     calendar.readonly as its scope. That proof holds because of what sign-in
-//     asks for: identity plus calendar.readonly and nothing else (auth.ts), with
-//     includeGrantedScopes off, so no scope granted earlier rides along; Google
-//     gives no checkbox when the only scope beyond sign-in is one (step 0b,
-//     Google's granular-permissions page), so the member approves the whole
-//     request or none of it; and nothing here ever asks for
-//     calendar.calendarlist.readonly, the one other scope that would let
-//     calendarList answer without calendar access. A refused calendarList (401
-//     or 403) is no_calendar_scope.
-// A scope that is reported but lacks calendar.readonly is refused either way.
+//     is proven by the two calls a match makes: a calendarList and an
+//     events.list on the primary calendar (a one-minute window), both
+//     succeeding. Then it is stored with CALENDAR_SCOPES as its scope. Each
+//     call proves its own scope: calendarList answers with the calendar list
+//     scope alone, and events.list with the events scope alone, so a member who
+//     ticked one and not the other (Google shows a checkbox per scope when two
+//     are asked for, its granular-permissions page) fails one of them. That
+//     proof holds because of what sign-in asks for: identity plus
+//     CALENDAR_SCOPES and nothing else (auth.ts), with includeGrantedScopes
+//     off, so no scope granted earlier rides along. A refused calendarList or
+//     events.list (401 or 403) is no_calendar_scope.
+// A scope that is reported but lacks either calendar scope is refused either way.
 export async function storeCalendarGrant(
   grant: {
     accountId: string;
@@ -371,8 +383,8 @@ export async function storeCalendarGrant(
   opts: { unreportedScope: "refuse" | "prove_by_calendar_list" } = { unreportedScope: "refuse" },
 ): Promise<{ outcome: "stored" | "not_own_address" | "no_primary_calendar" | "no_calendar_scope"; calendarEmail: string | null }> {
   const proveByList = !grant.scope && opts.unreportedScope === "prove_by_calendar_list";
-  if (!proveByList && !hasCalendarScope(grant.scope)) {
-    console.log(`calendar grant: member=${grant.memberId}: no calendar.readonly in the scope Google reported; nothing stored`);
+  if (!proveByList && !hasCalendarScopes(grant.scope)) {
+    console.log(`calendar grant: member=${grant.memberId}: the scope Google reported lacks a calendar scope; nothing stored`);
     return { outcome: "no_calendar_scope", calendarEmail: null };
   }
   // calendarList, not the userinfo endpoint — see listCalendars' own comment.
@@ -387,7 +399,19 @@ export async function storeCalendarGrant(
     throw err;
   }
   if (proveByList) {
-    console.log(`calendar grant: member=${grant.memberId}: no scope reported; calendarList answered, so the grant is calendar.readonly`);
+    // The events scope, proven by the call a match makes. The window is a
+    // minute from now; what it holds is not read.
+    const now = new Date();
+    try {
+      await listEvents(grant.accessToken, "primary", now, new Date(now.getTime() + 60_000));
+    } catch (err) {
+      if (err instanceof GoogleApiError && (err.status === 401 || err.status === 403)) {
+        console.log(`calendar grant: member=${grant.memberId}: no scope reported and events.list refused (${err.status}); nothing stored`);
+        return { outcome: "no_calendar_scope", calendarEmail: null };
+      }
+      throw err;
+    }
+    console.log(`calendar grant: member=${grant.memberId}: no scope reported; calendarList and events.list answered, so the grant holds both calendar scopes`);
   }
   console.log(`calendar grant: calendarList for member=${grant.memberId}: ${calendars.length} calendar(s)`);
   const primary = calendars.find((c) => c.primary);
@@ -414,7 +438,7 @@ export async function storeCalendarGrant(
     accessToken: encrypt(grant.accessToken),
     refreshToken: encrypt(grant.refreshToken),
     tokenExpiresAt: grant.expiresAt,
-    scope: proveByList ? CALENDAR_READONLY_SCOPE : grant.scope,
+    scope: proveByList ? CALENDAR_SCOPES.join(" ") : grant.scope,
     searchedCalendarIds: selection.included,
   };
   await db

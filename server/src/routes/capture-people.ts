@@ -25,9 +25,10 @@
 //
 // Nothing here creates a person. A person is created where it is linked to a
 // recording (SAA-260 step 2, at ingest), because one created before that is
-// unattached, and an unattached person is visible to every member
-// (access/visibility.ts). normalizeName and decideCreate below are the rule step
-// 2 uses there (ingest/attendee-people.ts, ingest/invitee-names.ts); they are
+// unattached, and an unattached person is visible to no member
+// (access/visibility.ts personVisibleTo, since SAA-243 item 4). normalizeName
+// and decideCreate below are the rule step 2 uses there
+// (ingest/attendee-people.ts, ingest/invitee-names.ts); they are
 // pure, with their DB-less check in check-capture-people.ts.
 
 import type { RequestHandler } from "express";

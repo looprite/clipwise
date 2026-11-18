@@ -31,7 +31,7 @@ import {
 } from "./membership.js";
 import { recordRefreshRecovery, recoverLostRefreshReply } from "./refresh-recovery.js";
 import { CAPTURE_RESOURCE_SCOPES, CAPTURE_SCOPE, MCP_SCOPES } from "./scopes.js";
-import { CALENDAR_READONLY_SCOPE, consentAfterSignIn, parkGoogleTokens, storeParkedGrant } from "./google-calendar-grant.js";
+import { CALENDAR_SCOPES, consentAfterSignIn, parkGoogleTokens, storeParkedGrant } from "./google-calendar-grant.js";
 
 export type AuthConfig = {
   secret: string;
@@ -163,7 +163,9 @@ export function createAuth(
 
     // Google sign-in is one screen for identity and the calendar (SAA-198 step 5,
     // Jon's call 5, reversing K decision 5): the provider's default scopes
-    // (openid, email, profile) plus calendar.readonly, with offline access so a
+    // (openid, email, profile) plus the two read-only calendar scopes,
+    // calendar.events.readonly and calendar.calendarlist.readonly (SAA-254,
+    // google-calendar-grant.ts CALENDAR_SCOPES), with offline access so a
     // first grant brings a refresh token. No prompt is forced, so a returning
     // member is not asked again (engineering call 12), unless they have no
     // calendar connection (the after-hook below, Jon's call 12). The tokens never reach
@@ -180,7 +182,7 @@ export function createAuth(
           google: {
             clientId: cfg.google.clientId,
             clientSecret: cfg.google.clientSecret,
-            scope: [CALENDAR_READONLY_SCOPE],
+            scope: [...CALENDAR_SCOPES],
             accessType: "offline",
             includeGrantedScopes: false,
             ...(cfg.allowedDomain ? { hd: cfg.allowedDomain } : {}),

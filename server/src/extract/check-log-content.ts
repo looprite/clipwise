@@ -235,7 +235,7 @@ async function main(): Promise<void> {
           return new Response(JSON.stringify({ error: "server_error", error_description: `${PHRASE} backend error for ${low}-cal@clipwise.test` }), { status: 500 });
         }
         served.push("exchange 200");
-        return Response.json({ access_token: "e-callback-token", refresh_token: "e-callback-refresh", expires_in: 3600, scope: "https://www.googleapis.com/auth/calendar.readonly" });
+        return Response.json({ access_token: "e-callback-token", refresh_token: "e-callback-refresh", expires_in: 3600, scope: "https://www.googleapis.com/auth/calendar.events.readonly https://www.googleapis.com/auth/calendar.calendarlist.readonly" });
       }
       if (url.startsWith("https://www.googleapis.com/calendar/v3/users/me/calendarList")) {
         served.push("calendarList 200");
@@ -286,7 +286,7 @@ async function main(): Promise<void> {
         accessToken: encrypt(token),
         refreshToken: encrypt(`${token}-refresh`),
         tokenExpiresAt: new Date(Date.now() + (expired ? -60_000 : 60 * 60 * 1000)),
-        scope: "https://www.googleapis.com/auth/calendar.readonly",
+        scope: "https://www.googleapis.com/auth/calendar.events.readonly https://www.googleapis.com/auth/calendar.calendarlist.readonly",
         searchedCalendarIds: [`${low}-cal-${fx.tag}@clipwise.test`],
       });
     const eRecording = async (ownerMemberId: string, stem: string, title: string): Promise<string> => {
