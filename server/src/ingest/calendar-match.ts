@@ -13,10 +13,19 @@ export type CalendarMatchInvitee = {
   response_status: string | null;
 };
 
+export type OccurrenceKeyRule = "one_off" | "original_start" | "start_fallback";
+
 export type CalendarMatch = {
   event_id: string;
   title: string | null;
   recurring_event_id: string | null;
+  // SAA-331: what Google sent for the event's identity, and the occurrence key
+  // built from it (pipeline/match-calendar.ts occurrenceKeyOf). Null key and
+  // rule when the event came without an iCalUID.
+  ical_uid: string | null;
+  original_start_time: string | null;
+  occurrence_key: string | null;
+  occurrence_key_rule: OccurrenceKeyRule | null;
   invitees: CalendarMatchInvitee[];
   offset_ms: number;
 };
@@ -26,6 +35,7 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type CalendarMatchApplication = {
   invitees: { inserted: number; updated: number };
   recurringEventId: string | null;
+  occurrenceKeyRule: OccurrenceKeyRule | null;
   titleApplied: boolean;
   // Set whenever titleApplied is false, so the two very different reasons
   // for "left alone" are distinguishable in the log rather than reading as
@@ -104,6 +114,18 @@ export async function applyCalendarMatch(
       .where(eq(schema.recordings.id, recordingId));
   }
 
+  // SAA-331: the occurrence follows the event this match picked, unlike
+  // recurring_event_id above: always written, so a re-match that picks another
+  // event replaces it, and one whose event has no iCalUID clears the key.
+  await executor
+    .update(schema.recordings)
+    .set({
+      occurrenceKey: match.occurrence_key,
+      occurrenceKeyRule: match.occurrence_key ? match.occurrence_key_rule : null,
+      calendarEventId: match.event_id,
+    })
+    .where(eq(schema.recordings.id, recordingId));
+
   // Title-overwrite rule: every recording's title is set at ingest to the
   // literal placeholder built by titlePlaceholderFor (ingest/clipwise.ts —
   // the single, shared builder, called from both places rather than two
@@ -157,16 +179,29 @@ export async function applyCalendarMatch(
   return {
     invitees: { inserted, updated },
     recurringEventId: match.recurring_event_id ?? null,
+    occurrenceKeyRule: match.occurrence_key ? match.occurrence_key_rule : null,
     titleApplied,
     titleSkipReason,
   };
 }
 
+// SAA-331: a match that asked the owner's calendar and found no event in range
+// clears the occurrence, so a recording re-matched to nothing is never left
+// linked to the meeting an earlier match picked.
+export async function clearCalendarOccurrence(executor: typeof db | Tx, recordingId: string): Promise<void> {
+  await executor
+    .update(schema.recordings)
+    .set({ occurrenceKey: null, occurrenceKeyRule: null, calendarEventId: null })
+    .where(eq(schema.recordings.id, recordingId));
+}
+
+// The rule only, never the key: the key carries the event's iCalUID.
 export function describeCalendarMatchApplication(app: CalendarMatchApplication): string {
   const title = app.titleApplied ? "applied" : `skipped (reason=${app.titleSkipReason})`;
   return (
     `invitees inserted=${app.invitees.inserted} updated=${app.invitees.updated}, ` +
     `recurring_event_id=${app.recurringEventId ? "set" : "none"}, ` +
+    `occurrence_key=${app.occurrenceKeyRule ?? "none"}, ` +
     `title_${title}`
   );
 }

@@ -199,6 +199,22 @@ export const recordings = pgTable(
     // decision 4). Stored rather than the recurrence rule itself — this
     // gives a consumer the thread directly with no rule parsing.
     recurringEventId: varchar("recurring_event_id", { length: 256 }),
+    // The calendar event occurrence this recording was matched to (SAA-331), so
+    // that several members' recordings of one meeting can be linked: equal on
+    // each member's copy of the same occurrence, by design shared across rows
+    // (a plain index, not a unique one). Written by every calendar match and
+    // cleared when a match finds no event (ingest/calendar-match.ts):
+    //   one_off         the event's iCalUID
+    //   original_start  iCalUID|originalStartTime as a UTC instant (a moved
+    //                   occurrence keeps its original key)
+    //   start_fallback  iCalUID|start as a UTC instant: an occurrence of a series
+    //                   that came without originalStartTime
+    // Not call text: plain, so a search can filter and group on it.
+    occurrenceKey: text("occurrence_key"),
+    occurrenceKeyRule: varchar("occurrence_key_rule", { length: 16 }),
+    // The matched event's own id on the owner's calendar. Diagnostics only:
+    // never grouped on, since Google documents it as unique per calendar only.
+    calendarEventId: text("calendar_event_id"),
     mediaUrl: text("media_url"),
     durationSec: doublePrecision("duration_sec"),
     startedAt: timestamp("started_at", { withTimezone: true }),
@@ -253,6 +269,8 @@ export const recordings = pgTable(
     accountIdx: index("recordings_account_idx").on(t.accountId),
     ownerIdx: index("recordings_owner_idx").on(t.ownerMemberId),
     sourceIdx: index("recordings_source_idx").on(t.source, t.sourceId),
+    // Not unique: several members' recordings of one meeting share the key.
+    occurrenceKeyIdx: index("recordings_occurrence_key_idx").on(t.occurrenceKey),
     // One recording per capture per account: POST /captures inserts with ON
     // CONFLICT on this, so a repeat or a concurrent double POST is one row.
     // Nulls are distinct in a unique index, so rows with no source_id (manual
@@ -260,6 +278,14 @@ export const recordings = pgTable(
     accountSourceIdx: uniqueIndex("recordings_account_source_idx").on(t.accountId, t.source, t.sourceId),
     slugIdx: uniqueIndex("recordings_slug_idx").on(t.slug),
     scopeValid: check("recordings_scope_valid", sql`${t.scope} IN ('work', 'personal')`),
+    // A key always names the rule that made it, and a rule never stands alone.
+    // The explicit IS NOT NULL on the rule matters: without it, a key with a
+    // null rule makes IN (...) null, the whole expression null, and a CHECK
+    // passes on null.
+    occurrenceKeyRuleValid: check(
+      "recordings_occurrence_key_rule_valid",
+      sql`(${t.occurrenceKey} IS NULL AND ${t.occurrenceKeyRule} IS NULL) OR (${t.occurrenceKey} IS NOT NULL AND ${t.occurrenceKeyRule} IS NOT NULL AND ${t.occurrenceKeyRule} IN ('one_off', 'original_start', 'start_fallback'))`,
+    ),
     visibilityValid: check(
       "recordings_visibility_valid",
       sql`${t.visibility} IN ('private', 'shared')`,

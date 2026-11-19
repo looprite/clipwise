@@ -208,6 +208,10 @@ export type CalendarEventAttendee = {
 
 export type CalendarEvent = {
   id: string;
+  // RFC 5545 UID: the one id Google documents as identifying an event "across
+  // calendaring systems"; every occurrence of a series shares it (SAA-331). Sent
+  // on every events.list item already (no `fields` filter is asked for).
+  iCalUID?: string;
   summary?: string;
   start?: { dateTime?: string; date?: string };
   // Only present when this instance was individually moved. Never used for

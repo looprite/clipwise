@@ -1111,6 +1111,10 @@ async function main(): Promise<void> {
           event_id: `check-access-${tag}-${label}`,
           title: null,
           recurring_event_id: null,
+          ical_uid: null,
+          original_start_time: null,
+          occurrence_key: null,
+          occurrence_key_rule: null,
           invitees: [{ email: `invitee-${label}-${tag}@clipwise.test`, name: `Invitee ${label}`, response_status: "accepted" }],
           offset_ms: 0,
         });

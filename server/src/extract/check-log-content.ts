@@ -258,6 +258,9 @@ async function main(): Promise<void> {
           items: [
             {
               id: "e-event-1",
+              // SAA-331: the occurrence key is built from this, so the key
+              // carries the phrase; it must reach the row and no log line.
+              iCalUID: `${low}-uid@clipwise.test`,
               summary: `${PHRASE} planning`,
               start: { dateTime: new Date(eStart.getTime() + 30_000).toISOString() },
               attendees: [
@@ -338,6 +341,8 @@ async function main(): Promise<void> {
     const jobOf = (rec: string) => jobRows.find((j) => j.recording_id === rec);
     const e1Invitees = await db.select({ email: schema.invitees.email, name: schema.invitees.name }).from(schema.invitees).where(eq(schema.invitees.recordingId, e1));
     const e1Title = (await db.select({ title: schema.recordings.title }).from(schema.recordings).where(eq(schema.recordings.id, e1)))[0]?.title;
+    const e1Key = (await db.select({ key: schema.recordings.occurrenceKey }).from(schema.recordings).where(eq(schema.recordings.id, e1)))[0]?.key;
+    check("E positive control: E1's occurrence key was stored and carries the planted iCalUID (SAA-331)", holds(e1Key), String(e1Key));
     check(
       "E positive control: the three match jobs ran: E1 done with the planted invitee stored and its title left alone (placeholder mismatch), E2 failed on the 401, E3 failed on the refresh",
       jobOf(e1)?.state === "done" && e1Invitees.length === 1 && holds(e1Invitees[0].email) && holds(e1Invitees[0].name) && holds(e1Title) &&

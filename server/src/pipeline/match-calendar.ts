@@ -18,7 +18,15 @@ import {
   listEvents,
   refreshAccessToken,
 } from "../lib/google-calendar.js";
-import { applyCalendarMatch, type CalendarMatch, type CalendarMatchApplication } from "../ingest/calendar-match.js";
+import {
+  applyCalendarMatch,
+  clearCalendarOccurrence,
+  type CalendarMatch,
+  type CalendarMatchApplication,
+  type OccurrenceKeyRule,
+} from "../ingest/calendar-match.js";
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export const MATCH_THRESHOLD_MS = 10 * 60 * 1000; // settled 2026-09-17, margin both sides
 
@@ -44,6 +52,35 @@ export function matchEvent(
     }
   }
   return best;
+}
+
+// The occurrence key (SAA-331): the same value on every attendee's copy of one
+// occurrence, so members' recordings of one meeting can be linked. Built from
+// what Google documents rather than from event.id, which is "unique per
+// calendar" only:
+//   - iCalUID identifies an event "across calendaring systems", and every
+//     occurrence of a series shares it;
+//   - originalStartTime "uniquely identifies the instance within the recurring
+//     event series even if the instance was moved".
+// A one-off event's key is its iCalUID. An occurrence of a series is
+// iCalUID|originalStartTime as a UTC instant (toISOString, so copies that state
+// the time in different zones agree); one that came without originalStartTime
+// falls back to iCalUID|start, and says so in its rule. Pure; null when there is
+// no iCalUID or no usable time.
+export function occurrenceKeyOf(event: CalendarEvent): { key: string; rule: OccurrenceKeyRule } | null {
+  const uid = event.iCalUID;
+  if (!uid) return null;
+  if (!event.recurringEventId) return { key: uid, rule: "one_off" };
+  const utc = (iso: string | undefined): string | null => {
+    if (!iso) return null;
+    const t = new Date(iso);
+    return Number.isNaN(t.getTime()) ? null : t.toISOString();
+  };
+  const original = utc(event.originalStartTime?.dateTime);
+  if (original) return { key: `${uid}|${original}`, rule: "original_start" };
+  const start = utc(event.start?.dateTime);
+  if (start) return { key: `${uid}|${start}`, rule: "start_fallback" };
+  return null;
 }
 
 export type CalendarErrorDetail = { status: number | null };
@@ -232,11 +269,30 @@ export async function matchRecording(
   const { events, calendarErrors } = await fetchEventsForWindow(connection, accessToken, windowStart, windowEnd, opts.signal);
   opts.signal?.throwIfAborted();
 
+  const guard = opts.leaseGuard;
+  // The writes, in one transaction, fenced on the job's lease when there is one.
+  const fenced = <T>(apply: (tx: Tx) => Promise<T>): Promise<T> =>
+    db.transaction(async (tx) => {
+      if (guard) {
+        const held = await tx
+          .select({ id: schema.jobs.id })
+          .from(schema.jobs)
+          .where(and(eq(schema.jobs.id, guard.jobId), eq(schema.jobs.leaseToken, guard.leaseToken), eq(schema.jobs.state, "running")))
+          .for("update");
+        if (held.length === 0) throw new LeaseLostError();
+      }
+      return apply(tx);
+    });
+
   const result = matchEvent(captureStartedAt, events);
   if (!result) {
     if (calendarErrors.length === searchedCalendarIds.length) {
       throw new CalendarFetchError(calendarErrors.length, searchedCalendarIds.length);
     }
+    // The calendar was asked and has no event here: an occurrence an earlier
+    // match stored no longer holds (SAA-331). Only this branch clears it; the
+    // ones above did not reach the calendar, so they leave what is stored.
+    await fenced((tx) => clearCalendarOccurrence(tx, recordingId));
     return { matched: false, reason: "no_event_in_range" };
   }
 
@@ -258,26 +314,22 @@ export async function matchRecording(
     });
   }
 
+  const occurrence = occurrenceKeyOf(event);
   const match: CalendarMatch = {
     event_id: event.id,
     title: event.summary ?? null,
     recurring_event_id: event.recurringEventId ?? null,
+    ical_uid: event.iCalUID ?? null,
+    original_start_time: event.originalStartTime?.dateTime ?? null,
+    occurrence_key: occurrence?.key ?? null,
+    occurrence_key_rule: occurrence?.rule ?? null,
     invitees,
     offset_ms: offsetMs,
   };
 
-  const guard = opts.leaseGuard;
-  const application = await db.transaction(async (tx) => {
-    if (guard) {
-      const held = await tx
-        .select({ id: schema.jobs.id })
-        .from(schema.jobs)
-        .where(and(eq(schema.jobs.id, guard.jobId), eq(schema.jobs.leaseToken, guard.leaseToken), eq(schema.jobs.state, "running")))
-        .for("update");
-      if (held.length === 0) throw new LeaseLostError();
-    }
-    return applyCalendarMatch(tx, recording.accountId, recordingId, recording.stem ?? "", match);
-  });
+  const application = await fenced((tx) =>
+    applyCalendarMatch(tx, recording.accountId, recordingId, recording.stem ?? "", match),
+  );
 
   return { matched: true, inviteeCount: invitees.length, application };
 }
