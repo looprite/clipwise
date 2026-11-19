@@ -5,15 +5,20 @@
 // shares_target_exactly_one absent from a database it reported "No changes
 // detected". Main has them only because an older migration ran there once, so
 // a database built by `db:push` alone lacked every check the schema declares.
-// drizzle-kit 0.31 push creates them itself, so on a current kit this normally
-// finds nothing to add ("N present, 0 added"). It stays as a guard: it reads
-// the checks off the schema (nothing is listed by hand) and adds any that are
-// missing, so a kit that stopped creating them again would show up here
-// instead of as a database that quietly accepts bad values.
+// drizzle-kit 0.31 push creates a CHECK under a new name itself, so on a
+// current kit this normally finds nothing to add ("N present, 0 added"). It
+// does not notice a changed definition under an existing name: its plan has no
+// statement for it and the old definition stays (seen 2026-11-19, SAA-331).
+// This script stays as a guard: it reads the checks off the schema (nothing is
+// listed by hand) and adds any that are missing, so a kit that stopped
+// creating them again would show up here instead of as a database that
+// quietly accepts bad values.
 //
-// Idempotent: a check that already exists by name is left alone. Adding one
-// validates existing rows, so a row that violates it makes this fail loudly
-// rather than weaken the constraint.
+// Idempotent: a check that already exists by name is left alone, whatever its
+// live definition, so neither push nor this script corrects a changed one;
+// read it back with pg_get_constraintdef. Adding one validates existing rows,
+// so a row that violates it makes this fail loudly rather than weaken the
+// constraint.
 //
 // Usage:
 //   tsx src/db/checks.ts          add missing checks

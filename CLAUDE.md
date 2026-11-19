@@ -24,6 +24,22 @@ it in Linear.
 - A durable memory write is proposed in full and approved before it lands.
 - Credentials never go in chat or in the repo.
 
+## Database schema (server/src/db/schema.ts)
+- Jon runs `npm run db:push` himself, in Terminal, from a worktree at main's
+  HEAD. Before he does, Claude Code lists the exact statements the plan
+  should show; anything else in the plan means No.
+- CHECK constraints: drizzle-kit push (0.31) adds a CHECK under a new name
+  but ignores a changed definition under an existing name, and `db:checks`
+  skips any name that exists. After any push, read the live definition back
+  with `pg_get_constraintdef`, never from push output.
+- A CHECK passes when its expression is null. A nullable column tested with
+  `IN (...)` also needs `IS NOT NULL`, or a null value gets through.
+- To change an existing CHECK, follow the repo's precedent (the
+  jobs_kind_allowed comment in schema.ts): give it a new name, then confirm
+  with `pg_get_constraintdef` that the live database has exactly the
+  definitions schema.ts declares. Whether push drops the old name is not
+  verified here; look for it in that read-back.
+
 ## Recorder app (recorder/app/)
 The packaged app at `recorder/app/dist/Clipwise.app` runs a copy of `main.js`,
 `identity.html` and `identity-answer.js`, not the files in the checkout. The
