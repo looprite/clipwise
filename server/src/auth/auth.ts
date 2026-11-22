@@ -4,12 +4,28 @@
 // on: development, checks, self-hosting).
 //
 // What this file deliberately does not turn on, each tied to a published
-// Better Auth advisory (checked 2026-10-08, all fixed in the pinned 1.7.7):
+// Better Auth advisory (checked 2026-10-08, 2026-11-18 and 2026-11-22, all
+// fixed in the pinned 1.7.16):
 //   - no Magic Link, OAuth Proxy, SSO or SCIM plugins (GHSA-965c, -r4xp);
 //   - implicit account linking is off, so a login can only be attached to an
-//     existing user by that user, signed in (GHSA-g38m);
+//     existing user by that user, signed in (GHSA-g38m, -9hm7);
 //   - rate-limit counters are in memory, not in Postgres (GHSA-44jh);
-//   - sessions stay in the database, not secondary storage (GHSA-2vg6).
+//   - sessions stay in the database, not secondary storage or the cookie
+//     cache (GHSA-2vg6, -fvxx);
+//   - a Google sign-in counts as verified only when email_verified is exactly
+//     true (decideSignIn in membership.ts), so a string "false" is refused
+//     (GHSA-9hm7);
+//   - no email change or email verification links (GHSA-hwq2);
+//   - no phoneNumber, emailOTP, organization, admin or expo plugins
+//     (GHSA-q747, -2f9c, -c85h, -fmh4, -g95c, -4wq4), and no electron,
+//     stripe or passkey packages (GHSA-9p5w, -x8j7, -gv75);
+//   - Postgres, not MySQL with serial ids (GHSA-48c2).
+// The 2026-11-18 and 2026-11-22 checks (SAA-322) found 17 advisories since
+// 2026-10-08: thirteen in Better Auth's own repository (published 2026-11-03,
+// or for GHSA-fmh4 extended that day to >= 1.6.14; fixed in 1.7.16, not in
+// GitHub's global database at the time, so npm audit did not see them) and
+// four in the global database (GHSA-q84f, -965c, -r4xp, -44jh, already fixed
+// in 1.7.7). None applied to this configuration.
 // Dynamic client registration IS on, because claude.ai registers itself
 // without a session; /oauth2/register is therefore anonymous and is
 // rate-limited below.

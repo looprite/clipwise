@@ -45,6 +45,9 @@
 #                                 CALENDAR_TOKEN_ENCRYPTION_KEY
 #   scratch-db.sh cli <args>      src/auth/cli.ts <args> on the scratch branch,
 #                                 after the guard
+#   scratch-db.sh auth-plan       src/auth/migrate.ts --plan on the scratch branch,
+#                                 after the guard: Better Auth's own migration plan
+#                                 (tables, columns, indexes to add); applies nothing
 #   scratch-db.sh jobs <args>     src/jobs/cli.ts <args> (list, retry,
 #                                 match-backlog) on the scratch branch, after
 #                                 the guard
@@ -669,6 +672,15 @@ cmd_cli() {
   exit "${PIPESTATUS[0]}"
 }
 
+cmd_auth_plan() {
+  [ $# -eq 0 ] || refuse "usage: scratch-db.sh auth-plan"
+  scratch_ready
+  say "auth-plan: src/auth/migrate.ts --plan"
+  clean_exec "$F" DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PASSWORD_ENABLED CALL_TEXT_KEY -- \
+    npx --no-install tsx src/auth/migrate.ts --plan 2>&1 | scrub
+  exit "${PIPESTATUS[0]}"
+}
+
 # The jobs CLI (src/jobs/cli.ts: list, retry, match-backlog) on the scratch
 # branch, after the guard. It needs the database and nothing else.
 cmd_jobs() {
@@ -907,6 +919,7 @@ case "${1:-}" in
   run) shift; cmd_run "$@" ;;
   serve) shift; cmd_serve "$@" ;;
   cli) shift; cmd_cli "$@" ;;
+  auth-plan) shift; cmd_auth_plan "$@" ;;
   jobs) shift; cmd_jobs "$@" ;;
   demo-produce) shift; cmd_demo_produce "$@" ;;
   sql) shift; cmd_sql "$@" ;;

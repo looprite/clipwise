@@ -25,9 +25,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
-    "@better-auth/mcp": "1.7.7",
+    "@better-auth/mcp": "1.7.16",
     "@modelcontextprotocol/sdk": "1.32.1",
-    "better-auth": "1.7.7",
+    "better-auth": "1.7.16",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.45.2",
     "express": "^4.19.2",
@@ -44,9 +44,10 @@
     "typescript": "^5.5.3"
   },
   "overrides": {
-    "@better-auth/oauth-provider": "1.7.7",
+    "@better-auth/oauth-provider": "1.7.16",
+    "@better-auth/core": "1.7.16",
     "better-call": {
-      "zod": "$zod"
+      "zod": "^3.23.8"
     }
   }
 }
