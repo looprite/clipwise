@@ -58,6 +58,7 @@ import { makeStubEmbedder, makeStubModel } from "../extract/stub-model.js";
 import { applyCalendarMatch } from "../ingest/calendar-match.js";
 import { encrypt } from "../lib/crypto.js";
 import { resolveCalendarConnection } from "../pipeline/match-calendar.js";
+import { searchMomentsQuerySchema } from "../services/search-moments.js";
 import { MCP_TOOLS, ROUTES } from "./classification.js";
 import { listRoutes } from "./route-list.js";
 
@@ -531,6 +532,19 @@ async function main(): Promise<void> {
       );
       const tooBig = await http("POST", `/accounts/${acc}/recordings`, { token: capToken(A), raw: `{"title": "${"a".repeat(17 * 1024 * 1024)}"}` });
       record(tooBig.status === 413 && tooBig.json?.error === "payload_too_large", "an oversized body answers 413 payload_too_large", `got ${tooBig.status} ${JSON.stringify(tooBig.json)}`);
+    }
+
+    // ---- recording metadata is an object of any values (SAA-266) -------------
+    // z.record(z.string(), z.unknown()): zod 4 wants the key schema spelled out.
+    // An object is stored as sent; an array is refused.
+    {
+      const obj = await http("POST", `/accounts/${acc}/recordings`, { token: capToken(A), json: { slug: `check-access-${tag}-meta-obj`, metadata: { k: 1, nested: { a: [1, 2] } } } });
+      const arr = await http("POST", `/accounts/${acc}/recordings`, { token: capToken(A), json: { slug: `check-access-${tag}-meta-arr`, metadata: ["x"] } });
+      record(
+        obj.status === 201 && JSON.stringify(obj.json?.recording?.metadata) === JSON.stringify({ k: 1, nested: { a: [1, 2] } }) && arr.status === 400 && arr.json?.error === "invalid_request",
+        "recordings: metadata takes an object of any values, stored as sent, and refuses an array with 400 invalid_request",
+        `object ${obj.status} ${JSON.stringify(obj.json?.recording?.metadata)}; array ${arr.status} ${arr.json?.error ?? ""}`,
+      );
     }
 
     // ---- POST /captures (the recorder's endpoint) ---------------------------
@@ -1347,6 +1361,10 @@ async function main(): Promise<void> {
         ["version 0", { version: 0, acknowledgedAt: v1.acknowledgedAt }],
         ["version as a string", { version: "1", acknowledgedAt: v1.acknowledgedAt }],
         ["acknowledgedAt not a time", { version: 1, acknowledgedAt: "yesterday" }],
+        // zod 4 (SAA-266): RFC 3339 wants seconds wherever a time carries Z or an
+        // offset, and an offset as +HH:MM. zod 3 took both of these.
+        ["acknowledgedAt without seconds", { version: 1, acknowledgedAt: "2026-10-07T21:18Z" }],
+        ["acknowledgedAt with a +HHMM offset", { version: 1, acknowledgedAt: "2026-10-07T21:18:52+0100" }],
         ["no acknowledgedAt", { version: 1 }],
         ["an extra key", { version: 1, acknowledgedAt: v1.acknowledgedAt, text: "the notice" }],
       ];
@@ -1358,8 +1376,31 @@ async function main(): Promise<void> {
       }
       record(
         results.every((l) => l.startsWith("ok")) && (await allRecordings()) === nBefore && (await acks(A.memberId)).length === 2,
-        "captures 19f: a malformed stamp (version 0, a string version, a bad time, no time, an extra key) is 400 invalid_request, and nothing is written",
+        "captures 19f: a malformed stamp (version 0, a string version, a bad time, a time without seconds, a +HHMM offset, no time, an extra key) is 400 invalid_request, and nothing is written",
         results.filter((l) => l.startsWith("BAD")).join("; "),
+      );
+    }
+
+    // ---- search dates (SAA-266) ---------------------------------------------
+    // dateFrom and dateTo are UTC times to the second: zod 4 refuses one without
+    // seconds, which zod 3 took. A +HHMM offset is refused too.
+    {
+      const forms: Array<[string, boolean]> = [
+        ["2026-11-01T00:00:00Z", true],
+        ["2026-11-01T00:00:00.000Z", true],
+        ["2026-11-01T00:00Z", false],
+        ["2026-11-01T00:00:00+0100", false],
+      ];
+      const got = forms.flatMap(([v, want]) =>
+        (["dateFrom", "dateTo"] as const).map((k) => {
+          const ok = searchMomentsQuerySchema.safeParse({ [k]: v }).success;
+          return `${ok === want ? "ok" : "BAD"} ${k}=${v}: ${ok ? "taken" : "refused"}`;
+        }),
+      );
+      record(
+        got.every((l) => l.startsWith("ok")),
+        "search dates: dateFrom and dateTo take a Z time with seconds (with or without a fraction) and refuse one without seconds or with a +HHMM offset",
+        got.filter((l) => l.startsWith("BAD")).join("; "),
       );
     }
 

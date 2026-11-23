@@ -21,7 +21,7 @@ const createRecordingSchema = z.object({
   meetingKind: z.string().max(32).optional(),
   // Private unless the owner says otherwise.
   visibility: z.enum(["private", "shared"]).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const recordingsRouter = Router({ mergeParams: true });

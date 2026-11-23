@@ -16,7 +16,7 @@ const createMomentSchema = z.object({
   startSec: z.number().nonnegative(),
   endSec: z.number().nonnegative(),
   score: z.number().optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const momentsRouter = Router({ mergeParams: true });

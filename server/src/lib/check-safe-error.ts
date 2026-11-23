@@ -106,7 +106,10 @@ async function main(): Promise<void> {
   const jsonStart = (() => { try { JSON.parse(`${PHRASE} said this`); } catch (e) { return e; } })();
   const jsonMiddle = (() => { try { JSON.parse(`{"text": "${PHRASE}", oops}`); } catch (e) { return e; } })();
   const api = new Anthropic.APIError(400, { type: "error", error: { type: "invalid_request_error", message: `bad content: ${PHRASE}` } }, undefined, new Headers({ "request-id": "req_test_123" }));
-  const zod = (() => { try { z.enum(["a", "b"]).parse(PHRASE); } catch (e) { return e; } })();
+  // zod 4 leaves the received value out of an issue unless the parse asks for it
+  // (reportInput), so this one asks: the error then quotes the value, in its issues
+  // and its message, and describeErrorLine has to strip it.
+  const zod = (() => { try { z.enum(["a", "b"]).parse(PHRASE, { reportInput: true }); } catch (e) { return e; } })();
 
   // `control`: what the old code would have printed. Omitted where the error
   // carries no input to begin with (JSON.parse in the middle of a text gives a
@@ -120,7 +123,7 @@ async function main(): Promise<void> {
     { name: "JSON.parse failure, phrase at the start of the input", err: jsonStart, keeps: ["SyntaxError"] },
     { name: "JSON.parse failure, phrase in the middle of the input", err: jsonMiddle, keeps: ["SyntaxError", "position="], control: null },
     { name: "Anthropic API error (message quotes the input)", err: api, keeps: ["APIError", "status=400", "request_id=req_test_123", "type=invalid_request_error"] },
-    { name: "Zod error (message quotes the received value)", err: zod, keeps: ["ZodError", "invalid_enum_value"], handled: true },
+    { name: "Zod error (message quotes the received value)", err: zod, keeps: ["ZodError", "invalid_value"], handled: true },
     { name: "Voyage failure through the real embed()", err: voyageErr, keeps: ["voyage embed 400"], control: oldVoyageMessage },
   ];
 
