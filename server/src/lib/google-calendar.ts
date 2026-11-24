@@ -39,7 +39,8 @@ const CALENDAR_BASE = "https://www.googleapis.com/calendar/v3";
 // (RFC 6749 5.2: a fixed word such as invalid_grant), and only when it is such
 // a word: a refused refresh token is how a revoked grant shows, and the match
 // job removes the connection on it so the member is asked to reconnect
-// (SAA-198 step 5).
+// (SAA-198 step 5). The revoke endpoint answers the same way (invalid_token for
+// a grant Google no longer honours), so its word is kept too (SAA-347).
 export class GoogleApiError extends Error {
   constructor(
     call: string,
@@ -52,7 +53,7 @@ export class GoogleApiError extends Error {
 }
 
 async function googleError(call: string, res: Response): Promise<GoogleApiError> {
-  if (call !== "oauth token") {
+  if (call !== "oauth token" && call !== "oauth revoke") {
     await res.arrayBuffer().catch(() => undefined);
     return new GoogleApiError(call, res.status);
   }
@@ -129,6 +130,44 @@ export async function refreshAccessToken(refreshToken: string, signal?: AbortSig
     expiresAt: new Date(Date.now() + Number(data.expires_in) * 1000),
     scope: String(data.scope ?? ""),
   };
+}
+
+const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
+
+export type RevokeResult =
+  | { outcome: "revoked" }
+  | { outcome: "already_invalid" }
+  | { outcome: "refused"; status: number; error: string | null }
+  | { outcome: "unreachable" };
+
+// Revokes a member's grant at Google when they are removed (SAA-347): their
+// refresh token, which ends Clipwise's access to their calendar and, being the
+// one grant, their Google sign-in to Clipwise too. Single attempt, the same
+// deadline as every call here. Never throws: it runs after the removal has
+// committed, so its result is reported, not raised. 200 is revoked; 400
+// invalid_token is a token Google no longer honours (revoked or expired), so
+// there is nothing left to revoke; any other answer is refused, with the status
+// and the OAuth error word when there is one; no answer (timeout, network) is
+// unreachable. Nothing else of Google's reply is kept.
+export async function revokeToken(token: string, signal?: AbortSignal): Promise<RevokeResult> {
+  let res: Response;
+  try {
+    res = await fetch(REVOKE_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token }).toString(),
+      signal: deadline(signal),
+    });
+  } catch {
+    return { outcome: "unreachable" };
+  }
+  if (res.ok) {
+    await res.arrayBuffer().catch(() => undefined);
+    return { outcome: "revoked" };
+  }
+  const err = await googleError("oauth revoke", res);
+  if (res.status === 400 && err.oauthError === "invalid_token") return { outcome: "already_invalid" };
+  return { outcome: "refused", status: res.status, error: err.oauthError };
 }
 
 export type CalendarListEntry = {

@@ -602,8 +602,8 @@ async function main(): Promise<void> {
       const oneLine = lines.find((l) => l.startsWith(`  ${one} `)) ?? "";
       record(oneLine.trimEnd().endsWith(" removed"), "list-members: the removed member is still listed, with its state", JSON.stringify(oneLine));
       const limit =
-        'auth: notice: the server learns of an acknowledgement only from a capture that carries it, so "none" can mean the member agreed on their Mac but no capture of theirs has reached the server since';
-      record(lines.filter((l) => l === limit).length === 1, "list-members: one line under the list states that the server learns of an acknowledgement only from a capture");
+        'auth: notice: the server learns of an acknowledgement only when the member\'s Mac reports it (at once, or at their next sign-in) or from a capture that carries it, so "none" can mean the member agreed on their Mac but it has not reached the server yet';
+      record(lines.filter((l) => l === limit).length === 1, "list-members: one line under the list states how the server learns of an acknowledgement: from the Mac (at once or at the next sign-in) or from a capture");
       // No email beyond the member lines: one line with an @ per member.
       const [{ n }] = await db
         .select({ n: sql<number>`count(*)::int` })

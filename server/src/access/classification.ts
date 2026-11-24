@@ -82,6 +82,17 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
     requires: "capture",
     note: "an admin's own account's members who are not removed: name, email, role, and the latest notice version on record with when; a member is 403 admin_only; no other account's member; nothing else per member",
   },
+  // An admin adds or removes a member (SAA-347, routes/capture-members.ts).
+  "POST /captures/members": {
+    access: "admin",
+    requires: "capture",
+    note: "adds a member or an admin to the admin's own account by email, through addMember (demo calls included); a member is 403 admin_only; an existing member is 409 already_member, a removed one 409 member_removed; replies with the email, role and name stored, nothing else",
+  },
+  "POST /captures/members/remove": {
+    access: "admin",
+    requires: "capture",
+    note: "removes a member of the admin's own account by email, through removeMember: personal, trashed and demo calls deleted, live work and unlabelled calls kept, sign-ins and calendar connections deleted in one transaction, then each grant revoked at Google; a member is 403 admin_only; the caller is 409 cannot_remove_self, the last admin 409 last_admin; replies with ids and counts only",
+  },
   // The recording notice's acknowledgement, reported at once (Gate 1, routes/capture-notice.ts).
   "POST /captures/notice": {
     access: "member",

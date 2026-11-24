@@ -375,7 +375,7 @@ async function main(): Promise<void> {
     const rec: Record<string, { id: string; momentId: string; personnelId?: string }> = {};
     async function mk(
       key: string,
-      o: { owner: Who; visibility: "private" | "shared"; scope?: "work" | "personal"; trashed?: boolean; personnel?: boolean; kind?: string; person?: { id: string } },
+      o: { owner: Who; visibility: "private" | "shared"; scope?: "work" | "personal" | null; trashed?: boolean; personnel?: boolean; kind?: string; person?: { id: string } },
     ): Promise<void> {
       const [r] = await db
         .insert(schema.recordings)
@@ -383,7 +383,7 @@ async function main(): Promise<void> {
           accountId: acc,
           ownerMemberId: o.owner.memberId,
           visibility: o.visibility,
-          scope: o.scope ?? "work",
+          scope: o.scope === undefined ? "work" : o.scope,
           trashedAt: o.trashed ? new Date() : null,
           slug: `check-access-${tag}-${key}`,
           title: `${WORD} ${key}`,
@@ -2378,6 +2378,189 @@ async function main(): Promise<void> {
     });
     const refreshedMcp = refreshed.json?.access_token ? await rpc(refreshed.json.access_token, "tools/list") : null;
     record(refreshedMcp?.status === 200, "an MCP client's refresh grant still yields a token that works on /mcp", `refresh ${refreshed.status}; /mcp ${refreshedMcp?.status ?? "(no token)"}`);
+
+    // ---- an admin adds and removes members (SAA-347, routes/capture-members.ts) ----
+    // Mira is added through the route, so she gets the two demo calls; she signs
+    // in on both kinds of token and owns one call of each other kind: live
+    // personal (naming a person no other call names), live work (naming one A's
+    // calls name too), live unlabelled, trashed work. She has a calendar
+    // connection. Google is a stand-in for the whole block: a POST to its revoke
+    // URL is answered 200 and recorded, any other Google request fails.
+    {
+      const ADD = "/captures/members";
+      const REMOVE = "/captures/members/remove";
+      const miraEmail = `mira-${tag}@clipwise.test`;
+      const nellEmail = `nell-${tag}@clipwise.test`;
+      const memberRow = async (email: string) => (await db.select().from(schema.accountMembers).where(eq(schema.accountMembers.email, email)))[0] ?? null;
+      const countOf = async (q: string, p: unknown[]) => Number((await pool.query(q, p)).rows[0].n);
+      const rowsUnder = async (ids: string[]): Promise<Record<string, number>> => {
+        const one = (q: string) => countOf(q, [ids]);
+        const out: Record<string, number> = { recordings: await one(`select count(*) as n from recordings where id = any($1::uuid[])`) };
+        for (const t of ["transcripts", "speakers", "segments", "moments", "clips", "attendees", "invitees", "jobs"]) {
+          out[t] = await one(`select count(*) as n from ${t} where recording_id = any($1::uuid[])`);
+        }
+        out.shares = await one(`select count(*) as n from shares where recording_id = any($1::uuid[]) or clip_id in (select id from clips where recording_id = any($1::uuid[]))`);
+        return out;
+      };
+      const show = (c: Record<string, number>) => Object.entries(c).map(([t, n]) => `${t}=${n}`).join(" ");
+      const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+      const revokes: Array<{ method: string; type: string | null; body: string }> = [];
+      const realFetchMembers = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url === REVOKE_URL) {
+          revokes.push({ method: init?.method ?? "GET", type: new Headers(init?.headers).get("content-type"), body: String(init?.body ?? "") });
+          return new Response("", { status: 200 });
+        }
+        if (/^https:\/\/([^/]*\.)?(googleapis|google)\.com\//.test(url)) throw new Error(`stand-in: a Google request that is not the revoke: ${url}`);
+        return realFetchMembers(input, init);
+      }) as typeof fetch;
+      try {
+        // Who may call them.
+        const none = await http("POST", REMOVE, { json: { email: B.email } });
+        const mcpAdd = await http("POST", ADD, { token: C.token, json: { email: miraEmail } });
+        const mcpRemove = await http("POST", REMOVE, { token: C.token, json: { email: B.email } });
+        record(
+          none.status === 401 && mcpAdd.status === 403 && mcpAdd.json?.error === "insufficient_scope" && mcpRemove.status === 403 && mcpRemove.json?.error === "insufficient_scope",
+          "members: POST /captures/members and /remove give no token 401, and an admin's MCP token 403 insufficient_scope",
+          `got ${none.status} / ${mcpAdd.status} ${mcpAdd.json?.error ?? ""} / ${mcpRemove.status} ${mcpRemove.json?.error ?? ""}`,
+        );
+        const memberAdd = await http("POST", ADD, { token: capToken(A), json: { email: miraEmail } });
+        const memberRemove = await http("POST", REMOVE, { token: capToken(A), json: { email: B.email } });
+        record(
+          memberAdd.status === 403 && memberAdd.json?.error === "admin_only" && memberRemove.status === 403 && memberRemove.json?.error === "admin_only"
+            && (await memberRow(miraEmail)) === null && (await memberRow(B.email))?.removedAt === null,
+          "members: a member's capture token is 403 admin_only on both, and nothing changes",
+          `got ${memberAdd.status} ${memberAdd.json?.error ?? ""} / ${memberRemove.status} ${memberRemove.json?.error ?? ""}`,
+        );
+        const self = await http("POST", REMOVE, { token: capToken(C), json: { email: C.email } });
+        record(self.status === 409 && self.json?.error === "cannot_remove_self" && (await memberRow(C.email))?.removedAt === null,
+          "members: an admin removing themselves is 409 cannot_remove_self, and they stay", `got ${self.status} ${self.json?.error ?? ""}`);
+
+        // Adding.
+        const added = await http("POST", ADD, { token: capToken(C), json: { email: ` ${miraEmail.toUpperCase()} `, name: "Check mira" } });
+        const mira = await memberRow(miraEmail);
+        const demoIds = mira ? (await pool.query(`select id from recordings where owner_member_id = $1 and source = 'clipwise-demo'`, [mira.id])).rows.map((x) => String(x.id)) : [];
+        record(
+          added.status === 201 && sameSet(Object.keys(added.json?.added ?? {}), ["email", "role", "name"]) && added.json.added.email === miraEmail
+            && added.json.added.role === "member" && mira?.role === "member" && mira.removedAt === null && demoIds.length === 2,
+          "members: an admin adds a member by email (normalized), a member by default, with the two demo calls; the reply is the email, role and name",
+          `got ${added.status} ${JSON.stringify(added.json)}; demo calls ${demoIds.length}`,
+        );
+        const twice = await http("POST", ADD, { token: capToken(C), json: { email: miraEmail } });
+        const badEmail = await http("POST", ADD, { token: capToken(C), json: { email: "not-an-address" } });
+        const extra = await http("POST", REMOVE, { token: capToken(C), json: { email: miraEmail, memberId: mira?.id } });
+        record(
+          twice.status === 409 && twice.json?.error === "already_member" && badEmail.status === 400 && badEmail.json?.error === "invalid_email"
+            && extra.status === 400 && extra.json?.error === "invalid_request" && (await memberRow(miraEmail))?.removedAt === null,
+          "members: adding an existing member is 409 already_member, a bad address 400 invalid_email, an extra field 400 invalid_request",
+          `got ${twice.status} ${twice.json?.error ?? ""} / ${badEmail.status} ${badEmail.json?.error ?? ""} / ${extra.status} ${extra.json?.error ?? ""}`,
+        );
+
+        // Mira's sign-ins, calls and calendar.
+        await createPasswordLogin(miraEmail, "Check mira", PASSWORD);
+        const dt = await tokensFor(miraEmail);
+        const D: Who = { email: miraEmail, memberId: mira!.id, token: dt.access, refresh: dt.refresh };
+        const capD = await recFlow(D);
+        const miraUser = (await pool.query<{ id: string }>(`select id from auth_user where email = $1`, [miraEmail])).rows[0]?.id ?? null;
+        const onlyHers = (await db.insert(schema.people).values({ accountId: acc, email: `miraguest-${tag}@clipwise.test`, name: `Mira guest ${tag}` }).returning())[0];
+        await mk("d-personal", { owner: D, visibility: "shared", scope: "personal", person: onlyHers });
+        await mk("d-work", { owner: D, visibility: "shared", person: people.shared });
+        await mk("d-unlabelled", { owner: D, visibility: "shared", scope: null });
+        await mk("d-trashed", { owner: D, visibility: "shared", trashed: true });
+        process.env.CALENDAR_TOKEN_ENCRYPTION_KEY ??= randomBytes(32).toString("base64");
+        const miraRefresh = `check-access-${tag}-mira-refresh`;
+        const [conn] = await db
+          .insert(schema.calendarConnections)
+          .values({
+            accountId: acc, memberId: D.memberId, calendarEmail: miraEmail,
+            accessToken: encrypt(`check-access-${tag}-mira-access`), refreshToken: encrypt(miraRefresh),
+            tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), scope: "check", searchedCalendarIds: [miraEmail],
+          })
+          .returning({ id: schema.calendarConnections.id });
+        const goes = [rec["d-personal"].id, rec["d-trashed"].id, ...demoIds];
+        const stays = [rec["d-work"].id, rec["d-unlabelled"].id];
+        // Per table, as the report names them. Access tokens here are JWTs, so
+        // oauthAccessToken may hold none; the report must match whatever is there.
+        type SignIns = { sessions: number; accessTokens: number; refreshTokens: number; consents: number };
+        const signIns = async (): Promise<SignIns | null> => (miraUser === null ? null : (await pool.query<SignIns>(
+          `select (select count(*) from auth_session where "userId" = $1)::int as sessions, (select count(*) from "oauthAccessToken" where "userId" = $1)::int as "accessTokens",
+             (select count(*) from "oauthRefreshToken" where "userId" = $1)::int as "refreshTokens", (select count(*) from "oauthConsent" where "userId" = $1)::int as consents`, [miraUser])).rows[0]);
+        const calendarRows = () => countOf(`select count(*) as n from calendar_connections where member_id = $1`, [D.memberId]);
+        const beforeGoes = await rowsUnder(goes);
+        const beforeStays = await rowsUnder(stays);
+        const meBefore = await http("GET", "/accounts/me", { token: D.token });
+        const capBefore = await http("GET", "/captures/me", { token: capD.access ?? "" });
+        const signInsBefore = await signIns();
+        record(
+          beforeGoes.recordings === 4 && beforeGoes.segments >= 2 && beforeGoes.moments >= 2 && beforeStays.recordings === 2 && beforeStays.segments === 2
+            && meBefore.status === 200 && capBefore.status === 200 && !!signInsBefore && signInsBefore.sessions > 0 && signInsBefore.refreshTokens > 0 && signInsBefore.consents > 0
+            && (await calendarRows()) === 1,
+          "members, control: before Mira's removal her six calls and the rows under them are there, both her tokens work, and she has sessions, refresh tokens, consents and a calendar connection",
+          `goes ${show(beforeGoes)}; stays ${show(beforeStays)}; me ${meBefore.status}, capture ${capBefore.status}; sign-in rows ${JSON.stringify(signInsBefore)}`,
+        );
+
+        // Removing.
+        const out = await http("POST", REMOVE, { token: capToken(C), json: { email: miraEmail } });
+        const rep = out.json?.removed;
+        record(
+          out.status === 200 && rep?.memberId === D.memberId && rep.deleted?.recordings === 4 && rep.deleted.personal === 1 && rep.deleted.trashed === 1
+            && rep.deleted.demo === 2 && rep.kept?.work === 1 && rep.kept.unlabelled === 1 && (await memberRow(miraEmail))?.removedAt != null,
+          "members: removing Mira deletes her personal, trashed and two demo calls, keeps her work and unlabelled calls, and the report counts each",
+          `got ${out.status} deleted ${JSON.stringify(rep?.deleted)} kept ${JSON.stringify(rep?.kept)}`,
+        );
+        const afterGoes = await rowsUnder(goes);
+        const afterStays = await rowsUnder(stays);
+        record(Object.values(afterGoes).every((n) => n === 0), "members: the deleted calls have 0 rows left in every table under a recording", show(afterGoes));
+        record(show(afterStays) === show(beforeStays), "members: the kept calls and every row under them are unchanged", `before ${show(beforeStays)}; after ${show(afterStays)}`);
+        const peopleLeft = new Set((await pool.query(`select id from people where id = any($1::uuid[])`, [[onlyHers.id, people.shared.id]])).rows.map((x) => String(x.id)));
+        record(!peopleLeft.has(onlyHers.id) && peopleLeft.has(people.shared.id) && rep?.deleted?.peopleReleased >= 1,
+          "members: the person only her deleted call named is deleted, the one a kept call names stays", `people_released ${rep?.deleted?.peopleReleased}`);
+        record(
+          (await calendarRows()) === 0 && rep?.calendar?.connectionsDeleted === 1 && JSON.stringify(rep.calendar.google) === JSON.stringify([{ connectionId: conn.id, outcome: "revoked" }]) && rep.adminNote === null,
+          "members: her calendar connection is deleted (0 rows), revoked at Google, and the report has no Third-party apps line",
+          `rows ${await calendarRows()}; ${JSON.stringify(rep?.calendar)}; note ${rep?.adminNote}`,
+        );
+        record(
+          revokes.length === 1 && revokes[0].method === "POST" && revokes[0].type === "application/x-www-form-urlencoded" && revokes[0].body === `token=${miraRefresh}`,
+          "members: Google is asked once, a form POST of her decrypted refresh token to the revoke URL (the stand-in, never Google)",
+          `requests ${revokes.length}: ${JSON.stringify(revokes.map((x) => ({ ...x, body: x.body === `token=${miraRefresh}` ? "token=<hers>" : "other" })))}`,
+        );
+        const afterSignIns = await signIns();
+        const mcpRefresh = D.refresh ? await http("POST", "/api/auth/oauth2/token", { form: { grant_type: "refresh_token", refresh_token: D.refresh, client_id: clientId, resource: cfg.mcpResource } }) : null;
+        const capRefresh = capD.refresh ? await http("POST", "/api/auth/oauth2/token", { form: { grant_type: "refresh_token", refresh_token: capD.refresh, client_id: recorder.clientId, resource: cfg.captureResource } }) : null;
+        const meAfter = await http("GET", "/accounts/me", { token: D.token });
+        const mcpAfter = await rpc(D.token, "tools/list");
+        const capAfter = await http("GET", "/captures/me", { token: capD.access ?? "" });
+        record(
+          !!afterSignIns && Object.values(afterSignIns).every((x) => x === 0) && !!signInsBefore
+            && rep?.revoked?.sessions === signInsBefore.sessions && rep.revoked.accessTokens === signInsBefore.accessTokens
+            && rep.revoked.refreshTokens === signInsBefore.refreshTokens && rep.revoked.consents === signInsBefore.consents
+            && meAfter.status === 401 && mcpAfter.status === 401 && capAfter.status === 401
+            && !!mcpRefresh && mcpRefresh.status >= 400 && !mcpRefresh.json?.access_token && !!capRefresh && capRefresh.status >= 400 && !capRefresh.json?.access_token,
+          "members: her sessions, tokens and consents are deleted (0 rows, each counted in the report as it was before), her MCP and capture tokens are 401, and neither refresh token yields a token",
+          `before ${JSON.stringify(signInsBefore)}; after ${JSON.stringify(afterSignIns)}; revoked ${JSON.stringify(rep?.revoked)}; me ${meAfter.status}, mcp ${mcpAfter.status}, capture ${capAfter.status}; refresh ${mcpRefresh?.status}/${capRefresh?.status}`,
+        );
+        const replyText = JSON.stringify(out.json ?? {});
+        record(!replyText.includes("@") && !replyText.includes(miraRefresh), "members: the reply carries no email, no address and no token", replyText.slice(0, 300));
+        const again = await http("POST", REMOVE, { token: capToken(C), json: { email: miraEmail } });
+        const nobody = await http("POST", REMOVE, { token: capToken(C), json: { email: `nobody-${tag}@clipwise.test` } });
+        record(again.status === 409 && again.json?.error === "already_removed" && nobody.status === 404 && nobody.json?.error === "not_a_member",
+          "members: removing her again is 409 already_removed, an unknown address 404 not_a_member", `got ${again.status} ${again.json?.error ?? ""} / ${nobody.status} ${nobody.json?.error ?? ""}`);
+
+        // An admin adds an admin, and removes her while another admin stays.
+        const addAdmin = await http("POST", ADD, { token: capToken(C), json: { email: nellEmail, role: "admin" } });
+        record(addAdmin.status === 201 && addAdmin.json?.added?.role === "admin" && (await memberRow(nellEmail))?.role === "admin",
+          "members: an admin adds an admin", `got ${addAdmin.status} ${JSON.stringify(addAdmin.json)}`);
+        const rmNell = await http("POST", REMOVE, { token: capToken(C), json: { email: nellEmail } });
+        record(rmNell.status === 200 && rmNell.json?.removed?.deleted?.demo === 2 && rmNell.json.removed.calendar?.connectionsDeleted === 0 && (await memberRow(nellEmail))?.removedAt != null,
+          "members: an admin removes another admin while an admin stays, and her demo calls go with her", `got ${rmNell.status} ${JSON.stringify(rmNell.json?.removed?.deleted)}`);
+        const reAdd = await http("POST", ADD, { token: capToken(C), json: { email: nellEmail } });
+        record(reAdd.status === 409 && reAdd.json?.error === "member_removed", "members: adding a removed member is 409 member_removed", `got ${reAdd.status} ${reAdd.json?.error ?? ""}`);
+      } finally {
+        globalThis.fetch = realFetchMembers;
+      }
+    }
 
     // ---- fail closed -------------------------------------------------------
     const saved = process.env.BETTER_AUTH_SECRET;

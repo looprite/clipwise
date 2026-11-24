@@ -315,19 +315,33 @@ the owner.
 
 ## Removing a member
 
-When a member leaves, or asks for their account and calls to be removed, run both steps with the
-`auth` CLI:
+When a member leaves, run `npm run auth -- remove-member --email <email>`. An admin's
+`POST /captures/members/remove` (which the Mac app's admin items will call, SAA-348) runs the same
+code. In one transaction:
 
-1. `npm run auth -- remove-member --email <email>` marks the member removed and revokes their
-   sign-ins. Their calls stay.
-2. `npm run auth -- delete-member-calls --email <email>` permanently deletes every call they
-   recorded, trashed, personal and team-shared ones included, with everything taken from them.
-   Without `--apply` it changes nothing and prints what it would delete, per table. Check the
-   counts, then run it again with `--apply`. It refuses a member who hasn't been removed, and prints
-   `nothing to delete` when there is nothing left. Its output is ids and counts only.
+- the member is marked removed, and their sessions, MCP and recorder tokens and consents are
+  deleted;
+- every call they own that is personal, in the trash, or one of their demo calls is permanently
+  deleted, with everything taken from it;
+- their live work calls, and live calls with no label, stay with the team;
+- their calendar connections are deleted.
 
-The member's row, their sign-in rows and their calendar connection stay. Deleted rows remain in
-the database's backups for 14 days, as the privacy policy says.
+After that commits, Clipwise asks Google to revoke each connection's grant, once. Google's answer
+never undoes the removal. It's reported per connection: `revoked`, `already_invalid`, `refused`,
+`unreachable`, or `not_attempted` (the token couldn't be decrypted). When any connection isn't
+`revoked` or `already_invalid`, the report says to ask the member to remove Clipwise at
+myaccount.google.com → Third-party apps. The report is ids and counts only.
+
+An admin can't remove themselves through the route, and nobody can remove the last admin.
+
+To delete the calls a removed member still owns, their team-shared work calls included, run
+`npm run auth -- delete-member-calls --email <email>`. Without `--apply` it changes nothing and
+prints what it would delete, per table. Check the counts, then run it again with `--apply`. It
+refuses a member who hasn't been removed, and prints `nothing to delete` when there is nothing left.
+Its output is ids and counts only.
+
+The member's row and their Better Auth user and account rows stay. Deleted rows remain in the
+database's backups for 14 days, as the privacy policy says.
 
 ## Deploying the server
 

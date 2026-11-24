@@ -11,9 +11,19 @@
 //   tsx src/auth/cli.ts register-recorder
 //   tsx src/auth/cli.ts clear-google-tokens [--apply]
 //
-// remove-member marks the member removed and revokes their sign-ins; their calls
-// stay. delete-member-calls (SAA-289) then permanently deletes every recording
-// a removed member owns, trashed, personal and team-shared ones included, with
+// remove-member is a member's whole departure (SAA-347; members.ts removeMember),
+// in one transaction: the member is marked removed; their sessions, MCP and
+// recorder tokens and consents are deleted; every call they own that is personal,
+// in the trash or a demo call is permanently deleted, with everything taken from
+// it (db/delete-recordings.ts); their live work and unlabelled calls stay with the
+// team; their calendar connections are deleted. After it commits, each grant is
+// revoked at Google, once; Google's answer never undoes the removal. It prints a
+// report: ids, counts and Google's outcome per connection, never an email, a
+// name, call text or a token. An admin's POST /captures/members/remove runs the
+// same code.
+//
+// delete-member-calls (SAA-289) permanently deletes every recording a removed
+// member still owns, their team-shared work calls included, with
 // everything taken from them (db/delete-recordings.ts, the same deletion as the
 // recorder's "Delete permanently"), in one transaction. It refuses a member who
 // has not been removed. Without --apply it runs the same delete and rolls it
@@ -21,7 +31,7 @@
 // per table before and after, and one log line: the member's uuid, the counts,
 // whether it was applied, and the time. Never an email, a name or call text.
 // A member with nothing left prints "nothing to delete" and exits 0. The
-// member row, their sign-in rows and their calendar connection stay (Gate 2).
+// member row stays, and so do their auth_user and auth_account rows.
 // Database backups keep deleted rows for 14 days.
 //
 // list-members prints each member's email, role and state, and under it every
@@ -53,6 +63,7 @@ import {
   Refusal,
   addMember,
   createPasswordLogin,
+  formatRemovalReport,
   insertMember,
   removeMember,
   requireAccount,
@@ -158,9 +169,11 @@ async function listMembers(): Promise<void> {
       );
     }
   }
-  // The server records an acknowledgement from the capture that carries it
-  // (routes/captures.ts), and from nothing else.
-  say(`notice: the server learns of an acknowledgement only from a capture that carries it, so "none" can mean the member agreed on their Mac but no capture of theirs has reached the server since`);
+  // The server records an acknowledgement when the member's Mac reports it
+  // (POST /captures/notice, routes/capture-notice.ts: at once, or at the next
+  // sign-in when it was given before) and from any capture that carries it
+  // (routes/captures.ts).
+  say(`notice: the server learns of an acknowledgement only when the member's Mac reports it (at once, or at their next sign-in) or from a capture that carries it, so "none" can mean the member agreed on their Mac but it has not reached the server yet`);
 }
 
 // Rows under these recordings, per table: ids and counts only, never a column
@@ -251,9 +264,8 @@ async function main(): Promise<void> {
     }
     case "remove-member": {
       const email = requireEmail(values.email);
-      const { revoked } = await removeMember(email);
-      say(`removed: ${email}`);
-      if (revoked) say("sessions and OAuth tokens revoked");
+      const { report } = await removeMember(email);
+      for (const line of formatRemovalReport(report)) say(line);
       return;
     }
     case "delete-member-calls":

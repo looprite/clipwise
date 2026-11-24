@@ -16,8 +16,9 @@
 //   f0  deleteRecordings with no filter throws, and every count is unchanged
 //   r0  an unknown email is refused, counts unchanged
 //   a   A, not removed, is refused, counts unchanged
-//   d0  after remove-member, a dry run deletes nothing and says what --apply
-//       would delete
+//   d0  after remove-member (which deletes A's trashed personal call itself,
+//       SAA-347), a dry run deletes nothing and says what --apply would delete
+//       of the two calls left
 //   b   --apply: a query by owner finds 0 recordings for A, and 0 rows in every
 //       table found from pg_constraint for A's recording ids; the person only
 //       A's calls named is gone, the shared one stays
@@ -219,12 +220,16 @@ async function main(): Promise<void> {
       ra.status === 1 && ra.out.includes("has not been removed") && same(await countsFor(g, recA), beforeA) && same(await countsFor(g, recB), beforeB), `exit ${ra.status}: ${ra.out.trim()}`);
 
     const rm = cli("remove-member", "--email", emailA);
-    check("remove-member removes A", rm.status === 0 && rm.out.includes(`removed: ${emailA}`), `exit ${rm.status}: ${rm.out.trim()}`);
+    const leftA = await ownedBy(a.id);
+    const afterRemoveA = await countsFor(g, recA);
+    check("remove-member removes A, printing its report; A's trashed personal call goes with it and the two work calls stay",
+      rm.status === 0 && rm.out.includes(`removed member=${a.id}`) && rm.out.includes("deleted: recordings=1 (personal=0 trashed=1 demo=0)") && rm.out.includes("kept: work=2 unlabelled=0") && leftA.length === 2,
+      `exit ${rm.status}: ${rm.out.trim()}`);
 
     const dry = cli("delete-member-calls", "--email", emailA);
     console.log(dry.out.trimEnd());
     check("d0: without --apply nothing is deleted, the run says what --apply would delete, and every count is unchanged",
-      dry.status === 0 && dry.out.includes("nothing changed") && dry.out.includes(`recordings=${recA.length}`) && same(await countsFor(g, recA), beforeA) && same(await countsFor(g, recB), beforeB), `exit ${dry.status}`);
+      dry.status === 0 && dry.out.includes("nothing changed") && dry.out.includes(`recordings=${leftA.length}`) && same(await countsFor(g, recA), afterRemoveA) && same(await countsFor(g, recB), beforeB), `exit ${dry.status}`);
 
     const run = cli("delete-member-calls", "--email", emailA, "--apply");
     console.log(run.out.trimEnd());

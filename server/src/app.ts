@@ -34,6 +34,7 @@ import { accountsRouter } from "./routes/accounts.js";
 import { momentsRouter } from "./routes/moments.js";
 import { capturesPost } from "./routes/captures.js";
 import { calendarPreviewPost } from "./routes/calendar-preview.js";
+import { captureMembersPost, captureMembersRemovePost } from "./routes/capture-members.js";
 import { captureMembersNoticeGet, captureNoticePost } from "./routes/capture-notice.js";
 import { captureMeGet, capturePeopleGet } from "./routes/capture-people.js";
 import { captureScopeRouter } from "./routes/capture-scope.js";
@@ -132,6 +133,10 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   app.post("/captures/notice", requireCapture, captureNoticePost);
   // Who accepted it, for an admin's tray item (Gate 1, item 2). Admins only.
   app.get("/captures/members/notice", requireCapture, requireAdmin, captureMembersNoticeGet);
+  // An admin adds or removes a member (SAA-347; routes/capture-members.ts).
+  // Admins only, and here for the same reason.
+  app.post("/captures/members", requireCapture, requireAdmin, captureMembersPost);
+  app.post("/captures/members/remove", requireCapture, requireAdmin, captureMembersRemovePost);
   // What the recorder does with a stored capture of its owner's: the transcript,
   // trash, restore, delete permanently and job status (routes/capture-scope.ts).
   app.use("/captures/:captureId", requireCapture);
