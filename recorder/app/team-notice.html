@@ -5,13 +5,15 @@
 <!-- Scripts from the bundle's own files only, nothing remote (as SAA-243's
      window hardening has it for every window). Styles stay inline. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<!-- Who accepted the recording notice (Gate 1, item 2): the admin's tray item
-     "Who accepted the notice…". main.js asks the server
-     (GET /captures/members/notice), writes one line per member
-     (team-notice.js), and sends them; team-notice-page.js draws them as text.
-     Read only: nothing here changes anything. Loaded from file:// with no Node;
+<!-- Team members (Gate 1, item 2; SAA-348): the admin's tray item
+     "Team members…". main.js asks the server (GET /captures/members/notice),
+     writes one line per member (team-notice.js), and sends them;
+     team-notice-page.js draws them as text. Add and Remove send what was typed
+     or the row's address to main.js, which checks it, asks before any removal,
+     and sends the request (POST /captures/members, POST
+     /captures/members/remove). Loaded from file:// with no Node;
      team-notice-preload.js is all it reaches of the main process. -->
-<title>Who accepted the notice</title>
+<title>Team members</title>
 <style>
   :root { color-scheme: light dark; --fg: #1d1d1f; --muted: #6e6e73; --bg: #ececee; --error: #c4291c; }
   @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --muted: #98989d; --bg: #2a2a2c; --error: #ff6b5e; } }
@@ -23,14 +25,29 @@
   }
   h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
   #heading { color: var(--muted); margin: 0 0 12px; }
-  ul { margin: 0; padding-left: 18px; }
-  li { margin: 0 0 6px; }
+  #add { display: flex; gap: 8px; margin: 0 0 8px; }
+  #add[hidden] { display: none; }
+  #email { flex: 1; min-width: 0; }
+  #result { margin: 0 0 12px; }
+  #result p { margin: 0 0 4px; }
+  ul { margin: 0; padding-left: 0; list-style: none; }
+  li { margin: 0 0 6px; display: flex; align-items: baseline; gap: 10px; }
+  li span { flex: 1; }
   .error { color: var(--error); }
   .muted { color: var(--muted); }
 </style>
 </head>
 <body>
-  <h1>Who accepted the recording notice</h1>
+  <h1>Team members</h1>
+  <div id="add">
+    <input id="email" type="text" inputmode="email" autocomplete="off" spellcheck="false" placeholder="Email address" aria-label="Email address">
+    <select id="role" aria-label="Role">
+      <option value="member" selected>Member</option>
+      <option value="admin">Admin</option>
+    </select>
+    <button id="add-button" type="button">Add</button>
+  </div>
+  <div id="result" aria-live="polite"></div>
   <p id="heading"></p>
   <p id="error" class="error"></p>
   <p id="empty" class="muted"></p>

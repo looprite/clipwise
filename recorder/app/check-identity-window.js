@@ -54,6 +54,10 @@
 // each page it shows the page's own script ran, that require, process and
 // module are undefined, that an inserted inline script does not run, that its
 // own preload is in force, and what Electron applied (hardeningChecks).
+// The team fixture (SAA-348) opens only the admin's team window and drives Add
+// and Remove against the stub (teamChecks). The wrapper answers main.js's native
+// confirmation (CHECK_DIALOG_FILE, CHECK_DIALOG_ANSWERS) and writes down each
+// dialog it was shown; main.js is unchanged.
 // The groupCall fixture (SAA-283): 11 invitees and 12 voices, longer than the
 // window. Save and Skip must be in view without scrolling, and the people and
 // voices part (#middle) must scroll to its last voice. The window being within
@@ -487,11 +491,31 @@ const FIXTURES = [
     // (this support folder has no setup.json), Recent meetings and Recognize
     // voices by OPEN_SWITCH. See hardeningChecks.
     { name: 'hardening', hardening: true },
+    // SAA-348: Add and Remove in the team window, against the stub. Only the
+    // team window opens (no identity switch). See teamChecks.
+    { name: 'team', team: true, switchValue: null },
 ];
+
+// SAA-348: what the stub answers the team window. Two members, both with no name
+// on record, so each line starts with the address; last@x.test is the one the
+// stub refuses with 409 last_admin. The report is a removal in which Google
+// refused, so the server's Third-party apps note is in it, as written.
+const TEAM_MEMBERS = [
+    { name: null, email: 'b@x.test', role: 'member', latestVersion: null, acceptedAt: null },
+    { name: null, email: 'last@x.test', role: 'admin', latestVersion: null, acceptedAt: null },
+];
+const TEAM_REPORT = {
+    memberId: 'm-b',
+    deleted: { recordings: 3, personal: 1, trashed: 0, demo: 2, peopleReleased: 0 },
+    kept: { work: 4, unlabelled: 1 },
+    revoked: { sessions: 1, accessTokens: 1, refreshTokens: 1, consents: 0, recoveries: 0 },
+    calendar: { connectionsDeleted: 1, google: [{ connectionId: 'c1', outcome: 'refused', status: 400, error: 'invalid_request' }] },
+    adminNote: "Google did not confirm that Clipwise's calendar access ended for every connection: ask the member to remove Clipwise at myaccount.google.com → Third-party apps.",
+};
 
 // --- the stub server ------------------------------------------------------------
 function startStub() {
-    const state = { offline: false, people: PEOPLE, preview: null, me: { displayName: HOST }, posts: [], requests: [], peopleAsks: [] };
+    const state = { offline: false, people: PEOPLE, preview: null, me: { displayName: HOST }, posts: [], requests: [], peopleAsks: [], teamMembers: TEAM_MEMBERS, teamPosts: [] };
     const send = (res, status, json) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(json)); };
     const server = http.createServer((req, res) => {
         let body = '';
@@ -516,6 +540,18 @@ function startStub() {
             if (req.method === 'POST' && url.pathname === '/captures') {
                 try { state.posts.push(JSON.parse(body)); } catch { state.posts.push({ unparsed: true }); }
                 return send(res, 201, { recordingId: 'rec-check', people: { voices: {}, them: null } });
+            }
+            // SAA-348: the team window's list, Add and Remove (the team fixture).
+            if (req.method === 'GET' && url.pathname === '/captures/members/notice') return send(res, 200, { members: state.teamMembers });
+            if (req.method === 'POST' && (url.pathname === '/captures/members' || url.pathname === '/captures/members/remove')) {
+                let parsed = null;
+                try { parsed = JSON.parse(body); } catch {}
+                state.teamPosts.push({ at: Date.now(), path: url.pathname, body: parsed });
+                if (url.pathname === '/captures/members') {
+                    return send(res, 201, { added: { email: parsed && parsed.email, role: parsed && parsed.role === 'admin' ? 'admin' : 'member', name: null } });
+                }
+                if (parsed && parsed.email === 'last@x.test') return send(res, 409, { error: 'last_admin' });
+                return send(res, 200, { removed: TEAM_REPORT });
             }
             return send(res, 404, { error: 'not_found' });
         });
@@ -659,6 +695,103 @@ async function hardeningChecks(port, getLog, t) {
     }
 }
 
+// --- SAA-348: Add and Remove in the team window ------------------------------------
+// The team fixture opens only the team window (CLIPWISE_CHECK_OPEN_WINDOWS=
+// team-notice) against the stub, and drives the page over the DevTools protocol.
+// The confirmation before Remove is main.js's native dialog: the wrapper answers
+// it (Cancel, Remove, Remove) and writes down each one with when, so a case can
+// say the dialog came before the request. last_admin can't be reached from a real
+// window (the caller is an active admin too, and removing oneself is refused
+// first), so the stub gives it for last@x.test.
+async function teamChecks(port, getLog, t, stub, dialogFile) {
+    stub.teamPosts.length = 0;
+    const page = await connectPage(port, 20000, /\/team-notice\.html(\?|$)/);
+    check(t('the switch opens the team window'), !!page, `log tail: ${getLog().split('\n').slice(-5).join(' | ')}`);
+    if (!page) return;
+    const NOT_SENT = ['That couldn’t be sent. Check the address and try again.'];
+    const dialogs = () => {
+        try { return fs.readFileSync(dialogFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
+    };
+    const result = () => page.evaluate(`[...document.querySelectorAll('#result p')].map((p) => p.textContent)`);
+    const nextResult = () => waitFor(async () => { const r = await result(); return r.length ? r : null; }, 8000);
+    const ready = () => waitFor(() => page.evaluate(`!document.querySelector('#add-button').disabled`), 8000);
+    const listAsks = () => stub.requests.filter((r) => r === 'GET /captures/members/notice').length;
+    const clickRemove = (email) => page.evaluate(`(() => {
+      const li = [...document.querySelectorAll('#list li')].find((x) => x.querySelector('span') && x.querySelector('span').textContent.startsWith(${JSON.stringify(email)}));
+      const b = li && li.querySelector('button');
+      if (!b) return false;
+      b.click();
+      return true;
+    })()`);
+    try {
+        const rows = await waitFor(() => page.evaluate(`document.querySelectorAll('#list li button').length`), 8000);
+        check(t(`it lists the stub's members, each with a Remove button (${rows})`), rows === TEAM_MEMBERS.length);
+
+        // Add, as an admin, with spaces around the address.
+        let asks = listAsks();
+        await page.evaluate(`(() => { document.querySelector('#email').value = ' new@x.test '; document.querySelector('#role').value = 'admin'; document.querySelector('#add-button').click(); })()`);
+        const added = await nextResult();
+        check(t(`Add sends POST /captures/members with exactly {"email":"new@x.test","role":"admin"} (${JSON.stringify(stub.teamPosts.map((p) => [p.path, p.body]))})`),
+            stub.teamPosts.length === 1 && stub.teamPosts[0].path === '/captures/members' && JSON.stringify(stub.teamPosts[0].body) === '{"email":"new@x.test","role":"admin"}');
+        check(t(`Add shows ${JSON.stringify(added)}`), JSON.stringify(added) === '["Added new@x.test as an admin."]');
+        check(t('after Add the list is asked for again'), !!(await waitFor(() => listAsks() > asks, 5000)));
+
+        // Remove, then Cancel at the confirmation.
+        await ready();
+        const before = stub.teamPosts.length;
+        check(t('b@x.test has a Remove button to click'), await clickRemove('b@x.test'));
+        const cancelled = await nextResult();
+        const d1 = dialogs();
+        check(t(`Remove shows the confirmation: ${JSON.stringify(d1[0] && d1[0].message)}, buttons ${JSON.stringify(d1[0] && d1[0].buttons)}`),
+            d1.length === 1 && d1[0].message === 'Remove b@x.test from your team?' && /live team/.test(d1[0].detail || '')
+            && JSON.stringify(d1[0].buttons) === '["Cancel","Remove"]' && d1[0].defaultId === 0 && d1[0].cancelId === 0);
+        check(t(`Cancel sends nothing and shows ${JSON.stringify(cancelled)}`), stub.teamPosts.length === before && JSON.stringify(cancelled) === '["Nothing was changed."]');
+
+        // Remove, then Remove.
+        await ready();
+        asks = listAsks();
+        await clickRemove('b@x.test');
+        const removedLines = await nextResult();
+        const d2 = dialogs();
+        const post = stub.teamPosts[stub.teamPosts.length - 1];
+        check(t(`Remove then Remove: one POST /captures/members/remove with exactly {"email":"b@x.test"}, after the dialog (dialog at ${d2[1] && d2[1].at}, request at ${post && post.at})`),
+            d2.length === 2 && stub.teamPosts.length === before + 1 && post.path === '/captures/members/remove'
+            && JSON.stringify(post.body) === '{"email":"b@x.test"}' && d2[1].at <= post.at);
+        const wantReport = ['Removed b@x.test.', 'Deleted 3 calls: 1 personal, 0 in the trash, 2 demo.', 'Kept 5 calls for the team: 4 work, 1 not labelled.',
+            'Signed out of Clipwise everywhere.', "Google refused to end Clipwise's calendar access.", TEAM_REPORT.adminNote];
+        check(t(`the report is shown in plain words, with the Third-party apps line (${JSON.stringify(removedLines)})`), JSON.stringify(removedLines) === JSON.stringify(wantReport));
+        const redrawn = await waitFor(() => listAsks() > asks, 5000);
+        await pause(500);
+        const still = await result();
+        check(t('the list is asked for again, and the report is still shown after it is redrawn'), !!redrawn && JSON.stringify(still) === JSON.stringify(wantReport));
+
+        // A refusal: last_admin, from the stub.
+        await ready();
+        await clickRemove('last@x.test');
+        const last = await nextResult();
+        check(t(`a 409 last_admin is shown in plain words (${JSON.stringify(last)})`),
+            JSON.stringify(last) === JSON.stringify(["last@x.test is your team's only admin. Add another admin first."]));
+
+        // What main.js refuses from the page: nothing sent, no dialog.
+        await ready();
+        const posts = stub.teamPosts.length;
+        const shown = dialogs().length;
+        const got = [];
+        for (const [channel, payload] of [['team-notice:add', { email: 'x@x.test', role: 'owner' }], ['team-notice:add', { email: 'x@x.test', role: 'member', name: 'X' }], ['team-notice:remove', { email: 5 }]]) {
+            await page.evaluate(`document.querySelector('#result').replaceChildren()`);
+            await page.evaluate(`window.clipwise.send(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`);
+            got.push(await nextResult());
+        }
+        check(t(`a payload main.js refuses sends nothing and shows no dialog (${JSON.stringify(got)})`),
+            stub.teamPosts.length === posts && dialogs().length === shown && got.every((r) => JSON.stringify(r) === JSON.stringify(NOT_SENT)));
+        check(t(`three dialogs in all (${dialogs().length})`), dialogs().length === 3);
+        const teamLines = getLog().split('\n').filter((l) => /\[clipwise-recorder\] team: /.test(l));
+        check(t(`the app's team lines name no address (${teamLines.length} lines)`), teamLines.length > 0 && teamLines.every((l) => !l.includes('@')), teamLines.join(' | '));
+    } finally {
+        page.close();
+    }
+}
+
 // --- fixture folders ----------------------------------------------------------------
 function silentWav(file) {
     const samples = 1600;
@@ -734,6 +867,19 @@ if (process.env.CHECK_MODE === 'encrypt') {
     app.quit();
   });
 } else {
+  // The team fixture (SAA-348): main.js's native confirmation can't be clicked
+  // over the DevTools protocol, so the wrapper answers it. Each dialog it is
+  // shown is written to CHECK_DIALOG_FILE with when; CHECK_DIALOG_ANSWERS gives
+  // one answer per dialog, in order. main.js itself is unchanged.
+  if (process.env.CHECK_DIALOG_FILE) {
+    const { dialog } = require('electron');
+    const answers = String(process.env.CHECK_DIALOG_ANSWERS || '').split(',').filter(Boolean).map(Number);
+    dialog.showMessageBox = async (...args) => {
+      const o = args.find((a) => a && typeof a === 'object' && typeof a.message === 'string') || {};
+      fs.appendFileSync(process.env.CHECK_DIALOG_FILE, JSON.stringify({ at: Date.now(), message: o.message, detail: o.detail, buttons: o.buttons, defaultId: o.defaultId, cancelId: o.cancelId }) + '\\n');
+      return { response: answers.length ? answers.shift() : (o.cancelId ?? 0), checkboxChecked: false };
+    };
+  }
   require(${JSON.stringify(MAIN_JS)});
 }
 `);
@@ -836,6 +982,11 @@ async function runFixture(fx, n, ctx) {
             delete env[SWITCH];
             delete env[OPEN_SWITCH];
             if (fx.hardening) env[OPEN_SWITCH] = 'meetings,voice-prints,team-notice';
+            if (fx.team) {
+                env[OPEN_SWITCH] = 'team-notice';
+                env.CHECK_DIALOG_FILE = path.join(root, 'dialogs.jsonl');
+                env.CHECK_DIALOG_ANSWERS = '0,1,1';
+            }
             const value = fx.switchValue !== undefined ? fx.switchValue : fx.open ? `${STEM}:${fx.open}` : STEM;
             if (value !== null) env[SWITCH] = value;
             return env;
@@ -857,6 +1008,10 @@ async function runFixture(fx, n, ctx) {
     const t = (s) => `${fx.name}: ${s}`;
 
     try {
+        if (fx.team) {
+            await teamChecks(port, () => log, t, ctx.stub.state, path.join(root, 'dialogs.jsonl'));
+            return;
+        }
         if (fx.expectNoWindow) {
             // The app is up once its launch log reaches the update line; then a
             // window the switch opened would be on its way. Give it the same

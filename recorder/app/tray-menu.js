@@ -8,7 +8,7 @@
 //   Start or Stop recording, and "Copy recording notice" while recording
 //   Recent meetings, Recognize voices (Save transcript is in Recent meetings)
 //   Detected applications, then the notice items of setup.js trayAccountItems:
-//     Read the recording notice, Who accepted the notice (admins only); before
+//     Read the recording notice, Team members (admins only); before
 //     setup or the notice is done, Finish setting up or Recording notice in
 //     their place
 //   About (its message box opens the acknowledgements), Open at login, Sign out

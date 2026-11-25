@@ -2199,7 +2199,7 @@ function renderTray() {
         } else if (item === 'read-notice') {
             items.push({ label: 'Read the recording notice…', click: () => showSetupWindow('reread') });
         } else if (item === 'team-notice') {
-            items.push({ label: 'Who accepted the notice…', click: openTeamNoticeWindow });
+            items.push({ label: 'Team members…', click: openTeamNoticeWindow });
         } else if (item === 'sign-in') {
             items.push({ label: 'Sign in to Clipwise…', click: signInToCaptureServer });
         } else if (item === 'sign-out') {
@@ -3510,7 +3510,7 @@ function readCaptureServerUrl() {
 let captureTokens = null;
 // This member's role on the team, 'admin' or 'member' as GET /captures/me last
 // said (refreshTeamRole), or null while unknown or signed out. It only decides
-// whether the tray offers the admin's "Who accepted the notice…"; the
+// whether the tray offers the admin's "Team members…"; the
 // server answers that list to admins only, whatever this says.
 let teamRole = null;
 // The loopback listener of a sign-in in progress, if any.
@@ -4185,7 +4185,7 @@ function openTeamNoticeWindow() {
         height: 420,
         minWidth: 420,
         minHeight: 260,
-        title: 'Who accepted the notice',
+        title: 'Team members',
         show: false,
         webPreferences: windowPreferences('team-notice-preload.js'),
     });
@@ -4238,8 +4238,80 @@ async function sendTeamNoticeData() {
     send({ ...view, error: '' });
 }
 
+// Add and Remove (SAA-348), from the team window: POST /captures/members and
+// POST /captures/members/remove. What the page sent is checked first
+// (teamNotice.addPayload, removePayload) and nothing is sent when it fails.
+// Remove asks first, in a dialog shown from here (teamNotice.removeDialog), so
+// nothing the page does can skip it; only its Remove button sends. The window is
+// told what happened in plain words (team-notice:result), and after every answer,
+// or none, the list is asked for again. One change at a time. Logs the action,
+// status, code and counts, never the address.
+let teamChangeBusy = false;
+function fromTeamWindow(event) {
+    return !!teamNoticeWindow && !teamNoticeWindow.isDestroyed() && event.sender === teamNoticeWindow.webContents;
+}
+async function teamChange(action, payload) {
+    const win = teamNoticeWindow;
+    if (!win || win.isDestroyed()) return;
+    const result = (r) => { try { if (!win.isDestroyed()) win.webContents.send('team-notice:result', r); } catch {} };
+    const checked = action === 'add' ? teamNotice.addPayload(payload) : teamNotice.removePayload(payload);
+    if (!checked) {
+        console.error(`[clipwise-recorder] team: ${action} not sent: not a valid request from the page`);
+        result({ ok: false, lines: ['That couldn’t be sent. Check the address and try again.'] });
+        return;
+    }
+    if (teamChangeBusy) return;
+    teamChangeBusy = true;
+    try {
+        const server = signedInServer();
+        if (!server) {
+            result({ ok: false, lines: ['Sign in to Clipwise to do this.'] });
+            return;
+        }
+        if (action === 'remove') {
+            const { response } = await dialog.showMessageBox(win, teamNotice.removeDialog(checked.email));
+            if (response !== 1) {
+                console.error('[clipwise-recorder] team: remove cancelled at the confirmation');
+                result({ ok: true, lines: ['Nothing was changed.'] });
+                return;
+            }
+        }
+        const route = action === 'add' ? '/captures/members' : '/captures/members/remove';
+        const reply = await captureServerRequest(server, 'POST', route, checked);
+        const code = reply.json && typeof reply.json.error === 'string' ? reply.json.error : null;
+        if (reply.status === 403) {
+            teamRole = 'member';
+            renderTray();
+        }
+        const removed = action === 'remove' && reply.status === 200 && reply.json && reply.json.removed ? reply.json.removed : null;
+        if (action === 'add' && reply.status === 201) {
+            console.error('[clipwise-recorder] team: add: server 201');
+            result({ ok: true, clear: true, lines: [teamNotice.addedMessage(checked.email, reply.json && reply.json.added)] });
+        } else if (removed) {
+            const g = removed.calendar && Array.isArray(removed.calendar.google) ? removed.calendar.google.map((x) => x && x.outcome).join(',') : '';
+            console.error(`[clipwise-recorder] team: remove: server 200, deleted ${removed.deleted ? removed.deleted.recordings : '?'}, google ${g || 'none'}`);
+            result({ ok: true, lines: teamNotice.removalLines(checked.email, removed) });
+        } else {
+            console.error(`[clipwise-recorder] team: ${action}: server ${reply.status ?? 'no reply'}${code ? ` ${code}` : ''}`);
+            result({ ok: false, lines: [teamNotice.refusalMessage(checked.email, reply.status, code)] });
+        }
+    } catch (err) {
+        console.error(`[clipwise-recorder] team: ${action} failed: ${(err && err.name) || 'Error'}`);
+        result({ ok: false, lines: [teamNotice.refusalMessage(checked.email, null, null)] });
+    } finally {
+        teamChangeBusy = false;
+        await sendTeamNoticeData();
+    }
+}
+
 function registerTeamNoticeIpc() {
     ipcMain.on('team-notice:ready', () => { void sendTeamNoticeData(); });
+    ipcMain.on('team-notice:add', (event, payload) => {
+        if (fromTeamWindow(event)) void teamChange('add', payload);
+    });
+    ipcMain.on('team-notice:remove', (event, payload) => {
+        if (fromTeamWindow(event)) void teamChange('remove', payload);
+    });
 }
 
 // The server owns trash state (SAA-227 part L decision 8), and this Mac's marker

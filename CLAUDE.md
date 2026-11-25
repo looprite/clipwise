@@ -48,7 +48,9 @@ same holds for each window's page script and preload (`identity-page.js`,
 `setup-page.js`, `setup-preload.js`, `voice-prints-page.js`,
 `voice-prints-preload.js`, `prompt-panel-page.js`, `prompt-panel-preload.js`)
 and for `identity-rules.js`, `capture-sign-in.js`, `detect-answer.js`,
-`prompt-panel.js` and `prompt-panel.html`. After
+`prompt-panel.js`, `prompt-panel.html`, and the admin's Team members window
+(`team-notice.js`, `team-notice.html`, `team-notice-page.js`,
+`team-notice-preload.js`). After
 any change to those, run `recorder/app/build-app.sh` AND relaunch the app —
 the running bundle keeps the code it was built from. Symptom of skipping it is
 an edit that changes nothing: the prompt, the stop path or the hotkeys behave

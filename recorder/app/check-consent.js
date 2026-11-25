@@ -1148,17 +1148,18 @@ const CASES = [
     ['update: build-app.sh copies update-gate.js into the bundle', () =>
         BUILD.includes('cp "$APP_SRC/update-gate.js" "$C/Resources/app/update-gate.js"')],
 
-    // 9. Who accepted the notice, for an admin (Gate 1, item 2): a tray item and a
-    // small window, admins only; the role from GET /captures/me.
-    ['team: the tray offers "Who accepted the notice…" to a signed-in admin', () =>
+    // 9. Team members, for an admin (Gate 1, item 2): a tray item and a small
+    // window, admins only; the role from GET /captures/me. Add and Remove from
+    // that window (SAA-348).
+    ['team: the tray offers "Team members…" to a signed-in admin', () =>
         setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }).includes('team-notice')],
     ['team: not to a member, not to an admin who is signed out, and not while the role is unknown', () =>
         !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'member' }).includes('team-notice')
         && !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, signedIn: false, teamRole: 'admin' }).includes('team-notice')
         && !setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true }).includes('team-notice')],
-    ['team: main.js draws the item and opens the team window', () =>
-        /item === 'team-notice'\) \{\s*items\.push\(\{ label: 'Who accepted the notice…', click: openTeamNoticeWindow \}\);/.test(SRC)
-        && !SRC.includes('Team: who accepted the notice')],
+    ['team: main.js draws the item as "Team members…" and opens the team window; the old label is gone', () =>
+        /item === 'team-notice'\) \{\s*items\.push\(\{ label: 'Team members…', click: openTeamNoticeWindow \}\);/.test(SRC)
+        && !SRC.includes('Who accepted the notice') && !SRC.includes('Team: who accepted the notice')],
     ['team: the role is part of setupStatus, so the tray rule sees it', () => /teamRole,/.test(fnBody('setupStatus'))],
     ['team: the role is read from GET /captures/me, kept only as "admin" or "member", and the tray redrawn when it changes', () => {
         const body = fnBody('refreshTeamRole');
@@ -1219,18 +1220,118 @@ const CASES = [
         const csp = (s) => (/<meta http-equiv="Content-Security-Policy" content="([^"]*)">/.exec(s) || [])[1];
         return !!csp(html) && csp(html) === csp(readOr('setup.html')) && html.includes('<script src="team-notice-page.js"></script>')
             && !/<script>/.test(html); }],
-    ['team: its preload lets through its two channels and no others', () => {
+    ['team: its preload lets through its five channels and no others', () => {
         const pre = readOr('team-notice-preload.js');
-        return /const SEND = \['team-notice:ready'\];/.test(pre) && /const ON = \['team-notice:data'\];/.test(pre); }],
+        return /const SEND = \['team-notice:ready', 'team-notice:add', 'team-notice:remove'\];/.test(pre)
+            && /const ON = \['team-notice:data', 'team-notice:result'\];/.test(pre); }],
     ['team: the window opens with the hardened preferences', () => /webPreferences: windowPreferences\('team-notice-preload\.js'\)/.test(fnBody('openTeamNoticeWindow'))],
     ['team: the window-hardening check switch can open it', () => /'team-notice': openTeamNoticeWindow/.test(fnBody('openWindowsForCheck'))],
     ['team: build-app.sh copies team-notice.js, its page, its script and its preload into the bundle', () =>
         ['team-notice.js', 'team-notice.html', 'team-notice-page.js', 'team-notice-preload.js']
             .every((f) => BUILD.includes(`cp "$APP_SRC/${f}" "$C/Resources/app/${f}"`))],
+    ['team: the window is titled "Team members", in main.js and in the page', () =>
+        fnBody('openTeamNoticeWindow').includes("title: 'Team members',") && readOr('team-notice.html').includes('<title>Team members</title>')],
+    ['team: each row carries its member\'s email beside its line, for Remove', () => {
+        if (!teamNotice) return false;
+        const v = teamNotice.formatTeamNotice([
+            { name: 'Jon Dwyer', email: 'jon@x.test', role: 'admin', latestVersion: 2, acceptedAt: '2026-11-10T14:05:00.000Z' },
+            { name: null, email: 'new@x.test', role: 'member', latestVersion: null, acceptedAt: null }], 2, '2026-11-10');
+        return JSON.stringify(v.rows) === JSON.stringify([{ line: v.lines[0], email: 'jon@x.test' }, { line: v.lines[1], email: 'new@x.test' }]); }],
+    ['team: addPayload takes exactly { email, role }, role member or admin, email trimmed; anything else is null', () => {
+        if (!teamNotice || typeof teamNotice.addPayload !== 'function') return false;
+        const A = teamNotice.addPayload;
+        return JSON.stringify(A({ email: ' a@x.test ', role: 'admin' })) === '{"email":"a@x.test","role":"admin"}'
+            && JSON.stringify(A({ email: 'not an address', role: 'member' })) === '{"email":"not an address","role":"member"}'
+            && [null, undefined, 'a@x.test', [], {}, { email: 'a@x.test' }, { email: 'a@x.test', role: 'owner' }, { email: '  ', role: 'member' },
+                { email: 5, role: 'member' }, { email: 'a@x.test', role: 'member', name: 'A' }].every((p) => A(p) === null); }],
+    ['team: removePayload takes exactly { email }, trimmed; anything else is null', () => {
+        if (!teamNotice || typeof teamNotice.removePayload !== 'function') return false;
+        const R = teamNotice.removePayload;
+        return JSON.stringify(R({ email: ' b@x.test ' })) === '{"email":"b@x.test"}'
+            && [null, 'b@x.test', [], {}, { email: '' }, { email: 5 }, { email: 'b@x.test', role: 'member' }].every((p) => R(p) === null); }],
+    ['team: the remove dialog says it acts on the live team, what it deletes and keeps, and that the address can\'t be added again; Cancel is the default and the cancel', () => {
+        if (!teamNotice || typeof teamNotice.removeDialog !== 'function') return false;
+        const d = teamNotice.removeDialog('b@x.test');
+        return d.message === 'Remove b@x.test from your team?'
+            && d.detail === ["This changes your live team now, and it can't be undone.", '',
+                'Deleted: their sign-ins on every Mac and in Claude; their personal calls, the calls in their trash and their demo calls; and their calendar connection. Clipwise also asks Google to end its calendar access.', '',
+                'Kept: their work calls and their calls not yet labelled, which stay with the team.', '',
+                "This address can't be added to the team again."].join('\n')
+            && JSON.stringify(d.buttons) === '["Cancel","Remove"]' && d.defaultId === 0 && d.cancelId === 0; }],
+    ['team: after an add, the address and the role the server stored', () =>
+        !!teamNotice && typeof teamNotice.addedMessage === 'function'
+        && teamNotice.addedMessage('a@x.test', { role: 'admin' }) === 'Added a@x.test as an admin.'
+        && teamNotice.addedMessage('a@x.test', { role: 'member' }) === 'Added a@x.test as a member.'],
+    ['team: each refusal in plain words by status and code; no answer, and anything else, say to check the list', () => {
+        if (!teamNotice || typeof teamNotice.refusalMessage !== 'function') return false;
+        const e = 'b@x.test';
+        const want = [
+            [403, 'admin_only', 'Only an admin of your team can do this.'],
+            [400, 'invalid_email', '"b@x.test" isn\'t an email address.'],
+            [400, 'invalid_request', 'That address is too long.'],
+            [404, 'not_a_member', 'b@x.test isn\'t on your team.'],
+            [409, 'already_member', 'b@x.test is already on your team.'],
+            [409, 'member_removed', 'b@x.test was removed from your team earlier and can\'t be added again.'],
+            [409, 'already_removed', 'b@x.test has already been removed.'],
+            [409, 'cannot_remove_self', 'You can\'t remove yourself. Another admin can.'],
+            [409, 'last_admin', 'b@x.test is your team\'s only admin. Add another admin first.'],
+            [null, 'ECONNREFUSED', 'No answer from the server. Check the list to see whether it went through.'],
+            [500, 'internal', 'Something went wrong (server 500). Check the list to see whether it went through.'],
+        ];
+        const bad = want.filter(([s, c, w]) => teamNotice.refusalMessage(e, s, c) !== w);
+        for (const [s, c] of bad) console.log(`      refusal ${s} ${c}: ${JSON.stringify(teamNotice.refusalMessage(e, s, c))}`);
+        return bad.length === 0; }],
+    ['team: the removal report in plain words: deleted and kept counts, sign-ins, each calendar connection, and the server\'s Third-party apps note as written', () => {
+        if (!teamNotice || typeof teamNotice.removalLines !== 'function') return false;
+        const NOTE = "Google did not confirm that Clipwise's calendar access ended for every connection: ask the member to remove Clipwise at myaccount.google.com → Third-party apps.";
+        const refused = teamNotice.removalLines('b@x.test', { memberId: 'm', deleted: { recordings: 3, personal: 1, trashed: 0, demo: 2, peopleReleased: 0 }, kept: { work: 4, unlabelled: 1 },
+            revoked: { sessions: 1, accessTokens: 1, refreshTokens: 1, consents: 0, recoveries: 0 },
+            calendar: { connectionsDeleted: 1, google: [{ connectionId: 'c1', outcome: 'refused', status: 400, error: 'invalid_request' }] }, adminNote: NOTE });
+        const none = teamNotice.removalLines('n@x.test', { memberId: 'm', deleted: { recordings: 2, personal: 0, trashed: 0, demo: 2, peopleReleased: 0 }, kept: { work: 0, unlabelled: 0 },
+            revoked: { sessions: 0, accessTokens: 0, refreshTokens: 0, consents: 0, recoveries: 0 }, calendar: { connectionsDeleted: 0, google: [] }, adminNote: null });
+        const two = teamNotice.removalLines('t@x.test', { deleted: {}, kept: {}, revoked: {}, calendar: { google: [{ outcome: 'revoked' }, { outcome: 'already_invalid' }] }, adminNote: null });
+        return JSON.stringify(refused) === JSON.stringify(['Removed b@x.test.', 'Deleted 3 calls: 1 personal, 0 in the trash, 2 demo.', 'Kept 5 calls for the team: 4 work, 1 not labelled.',
+                'Signed out of Clipwise everywhere.', "Google refused to end Clipwise's calendar access.", NOTE])
+            && JSON.stringify(none) === JSON.stringify(['Removed n@x.test.', 'Deleted 2 calls: 0 personal, 0 in the trash, 2 demo.', 'Kept 0 calls for the team: 0 work, 0 not labelled.',
+                "They weren't signed in anywhere.", 'No calendar was connected.'])
+            && JSON.stringify(two.slice(-2)) === JSON.stringify(["Calendar 1: Clipwise's calendar access ended at Google.", "Calendar 2: Clipwise's calendar access had already ended at Google."]); }],
+    ['team: a change from the page is checked (addPayload, removePayload) before anything is sent, and stops there when it fails', () => {
+        const body = fnBody('teamChange');
+        const at = body.indexOf('teamNotice.addPayload(payload) : teamNotice.removePayload(payload)');
+        const stop = body.indexOf('if (!checked) {');
+        const send = body.indexOf('captureServerRequest(');
+        return at >= 0 && stop > at && send > stop && /if \(!checked\) \{[\s\S]{0,300}?return;\s*\}/.test(body); }],
+    ['team: Remove asks first: the dialog (removeDialog) comes before the remove request, which goes only on its Remove button', () => {
+        const body = fnBody('teamChange');
+        const ask = body.indexOf('await dialog.showMessageBox(win, teamNotice.removeDialog(checked.email))');
+        const stop = body.indexOf('if (response !== 1) {');
+        const send = body.indexOf("captureServerRequest(server, 'POST', route, checked)");
+        return ask >= 0 && stop > ask && send > stop && /if \(response !== 1\) \{[\s\S]{0,300}?return;\s*\}/.test(body)
+            && body.includes("const route = action === 'add' ? '/captures/members' : '/captures/members/remove';"); }],
+    ['team: a failure inside a change is caught: one line with the error name only, and the window is told there was no answer', () =>
+        /\} catch \(err\) \{\s*console\.error\(`\[clipwise-recorder\] team: \$\{action\} failed: \$\{\(err && err\.name\) \|\| 'Error'\}`\);\s*result\(\{ ok: false, lines: \[teamNotice\.refusalMessage\(checked\.email, null, null\)\] \}\);\s*\} finally \{/.test(fnBody('teamChange'))],
+    ['team: after every change, answered or not, the list is asked for again', () =>
+        /\} finally \{\s*teamChangeBusy = false;\s*await sendTeamNoticeData\(\);\s*\}/.test(fnBody('teamChange'))],
+    ['team: a 403 on a change drops the role and redraws the tray, as the list does', () =>
+        /if \(reply\.status === 403\) \{\s*teamRole = 'member';\s*renderTray\(\);\s*\}/.test(fnBody('teamChange'))],
+    ['team: Add and Remove are taken only from the team window', () =>
+        /ipcMain\.on\('team-notice:add', \(event, payload\) => \{\s*if \(fromTeamWindow\(event\)\) void teamChange\('add', payload\);\s*\}\);/.test(fnBody('registerTeamNoticeIpc'))
+        && /ipcMain\.on\('team-notice:remove', \(event, payload\) => \{\s*if \(fromTeamWindow\(event\)\) void teamChange\('remove', payload\);\s*\}\);/.test(fnBody('registerTeamNoticeIpc'))
+        && /return !!teamNoticeWindow && !teamNoticeWindow\.isDestroyed\(\) && event\.sender === teamNoticeWindow\.webContents;/.test(fnBody('fromTeamWindow'))],
+    ['team: no console line in teamChange names the address', () => {
+        const lines = fnBody('teamChange').split('\n').filter((l) => /console\.(error|log)\(/.test(l));
+        return lines.length >= 4 && lines.every((l) => !/email|checked|payload/.test(l)); }],
+    ['team: the page sends Add as { email, role } and Remove as { email }, and draws each result', () => {
+        const page = readOr('team-notice-page.js');
+        return page.includes("ipc.send('team-notice:add', { email, role: $('role').value });")
+            && page.includes("ipc.send('team-notice:remove', { email: row.email });")
+            && page.includes("ipc.on('team-notice:result', (_event, result) => showResult(result));"); }],
+    ['team: after a successful Add the page clears the address and puts the role back to Member', () =>
+        /if \(r\.ok && r\.clear\) \{\s*\$\('email'\)\.value = '';\s*\$\('role'\)\.value = 'member';\s*\}/.test(readOr('team-notice-page.js'))],
 
     // 10. The menu (SAA-281): tray-menu.js's order and status line, and how
     // main.js's renderTray uses them.
-    ['menu: stopped, signed-in admin, with a meeting to save: exactly status / Start or Stop / Recent meetings, Recognize voices / Detected applications, Read the recording notice, Who accepted the notice / About, Open at login, Sign out, Quit', () =>
+    ['menu: stopped, signed-in admin, with a meeting to save: exactly status / Start or Stop / Recent meetings, Recognize voices / Detected applications, Read the recording notice, Team members / About, Open at login, Sign out, Quit', () =>
         !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: false, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
             === JSON.stringify(['status', '-', 'start-stop', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'read-notice', 'team-notice',
                 '-', 'about', 'open-at-login', 'sign-out', 'quit'])],
@@ -1238,7 +1339,7 @@ const CASES = [
         !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: true, hasMeeting: true, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'admin' }) }))
             === JSON.stringify(['status', '-', 'start-stop', 'copy-notice', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'read-notice', 'team-notice',
                 '-', 'about', 'open-at-login', 'sign-out', 'quit'])],
-    ['menu: stopped, signed-in member: the same order without "Who accepted the notice…"', () =>
+    ['menu: stopped, signed-in member: the same order without "Team members…"', () =>
         !!trayMenu && JSON.stringify(trayMenu.trayMenuOrder({ active: false, accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, teamRole: 'member' }) }))
             === JSON.stringify(['status', '-', 'start-stop', '-', 'recent-meetings', 'recognize-voices', '-', 'detected-apps', 'read-notice',
                 '-', 'about', 'open-at-login', 'sign-out', 'quit'])],
@@ -1299,7 +1400,7 @@ const CASES = [
                 === JSON.stringify([...head, 'recording-notice', '-', 'about', 'open-at-login', 'sign-in', 'quit'])
             && order({ setupCompleted: true, acknowledged: true, server: 'https://t.example.com', signedIn: false })
                 === JSON.stringify([...head, 'read-notice', '-', 'about', 'open-at-login', 'sign-in', 'quit']); }],
-    ['menu: "Who accepted the notice…" only for a signed-in admin: not a member, not a signed-out admin, not an unknown role', () => {
+    ['menu: "Team members…" only for a signed-in admin: not a member, not a signed-out admin, not an unknown role', () => {
         if (!trayMenu) return false;
         const has = (o) => trayMenu.trayMenuOrder({ accountItems: setup.trayAccountItems({ ...ALL_DONE, setupCompleted: true, ...o }) }).includes('team-notice');
         return has({ teamRole: 'admin' }) && !has({ teamRole: 'member' }) && !has({ teamRole: 'admin', signedIn: false }) && !has({}); }],

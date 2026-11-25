@@ -206,7 +206,7 @@ cp "$APP_SRC/consent.js" "$C/Resources/app/consent.js"
 cp -R "$APP_SRC/notice" "$C/Resources/app/notice"
 # The menu bar menu's order and status line (SAA-281): main.js requires it.
 cp "$APP_SRC/tray-menu.js" "$C/Resources/app/tray-menu.js"
-# The admin's "Who accepted the notice…" window (Gate 1, item 2): main.js
+# The admin's "Team members…" window (Gate 1, item 2; SAA-348): main.js
 # requires team-notice.js, and the window is its page, script and preload.
 cp "$APP_SRC/team-notice.js" "$C/Resources/app/team-notice.js"
 cp "$APP_SRC/team-notice.html" "$C/Resources/app/team-notice.html"

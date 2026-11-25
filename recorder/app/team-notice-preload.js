@@ -1,4 +1,4 @@
-// The "Who accepted the notice…" window's preload (Gate 1, item 2), on
+// The "Team members…" window's preload (Gate 1, item 2; SAA-348), on
 // the pattern of SAA-243's window hardening. team-notice.html runs with no Node:
 // contextIsolation and sandbox on, nodeIntegration off. What it can reach of the
 // main process is this: the channels below and no others. A channel not listed
@@ -9,8 +9,8 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
-const SEND = ['team-notice:ready'];
-const ON = ['team-notice:data'];
+const SEND = ['team-notice:ready', 'team-notice:add', 'team-notice:remove'];
+const ON = ['team-notice:data', 'team-notice:result'];
 
 function allowed(list, how, channel) {
     if (!list.includes(channel)) throw new Error(`${how} ${channel}: not a channel of this window`);
