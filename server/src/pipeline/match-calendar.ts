@@ -5,12 +5,14 @@
 // run in no set order.
 //
 // The matching rule below is settled and measured against 22 real captures
-// (2026-09-17 dry run): start alignment, never overlap or containment,
-// never originalStartTime, 10-minute threshold. Not being revisited here.
+// (2026-09-17 dry run): start alignment, never originalStartTime, 10-minute
+// threshold. SAA-290 adds one condition: a capture that ended at or before the
+// event's start was not that meeting (c2f6c445, 19:55:07–19:57:25, took the
+// 20:00 event). A capture whose end is not known is matched on start alone.
 
 import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
-import { LeaseLostError } from "../extract/extract.js";
+import { CAPTURE_DURATION_SEC, LeaseLostError } from "../extract/extract.js";
 import { decrypt, encrypt } from "../lib/crypto.js";
 import {
   type CalendarEvent,
@@ -35,6 +37,7 @@ export const MATCH_THRESHOLD_MS = 10 * 60 * 1000; // settled 2026-09-17, margin 
 export function matchEvent(
   captureStartedAt: Date,
   events: CalendarEvent[],
+  captureEndedAt: Date | null = null,
 ): { event: CalendarEvent; offsetMs: number } | null {
   let best: { event: CalendarEvent; offsetMs: number } | null = null;
   for (const event of events) {
@@ -47,6 +50,7 @@ export function matchEvent(
     const offsetMs = captureStartedAt.getTime() - eventStart.getTime();
     const absOffsetMs = Math.abs(offsetMs);
     if (absOffsetMs > MATCH_THRESHOLD_MS) continue;
+    if (captureEndedAt && captureEndedAt.getTime() <= eventStart.getTime()) continue;
     if (!best || absOffsetMs < Math.abs(best.offsetMs)) {
       best = { event, offsetMs };
     }
@@ -246,6 +250,9 @@ export async function matchRecording(
       accountId: schema.recordings.accountId,
       ownerMemberId: schema.recordings.ownerMemberId,
       startedAt: schema.recordings.startedAt,
+      endedAt: schema.recordings.endedAt,
+      // Stored at POST /captures, so known before extraction writes ended_at.
+      captureDurationSec: sql<number | null>`${CAPTURE_DURATION_SEC}`,
       stem: sql<string | null>`${schema.recordings.metadata}->'capture'->>'stem'`,
     })
     .from(schema.recordings)
@@ -284,7 +291,10 @@ export async function matchRecording(
       return apply(tx);
     });
 
-  const result = matchEvent(captureStartedAt, events);
+  const captureEndedAt = recording.captureDurationSec != null
+    ? new Date(captureStartedAt.getTime() + recording.captureDurationSec * 1000)
+    : recording.endedAt ?? null;
+  const result = matchEvent(captureStartedAt, events, captureEndedAt);
   if (!result) {
     if (calendarErrors.length === searchedCalendarIds.length) {
       throw new CalendarFetchError(calendarErrors.length, searchedCalendarIds.length);

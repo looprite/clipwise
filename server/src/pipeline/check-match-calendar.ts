@@ -68,6 +68,23 @@ async function main(): Promise<number> {
   );
   if (!movedOk) failures += 1;
 
+  // SAA-290: a capture must not end at or before the event's start. Times from
+  // c2f6c445 and 657a78dc (2026-11-23), against the 20:00 event.
+  const EVENT_2000: CalendarEvent = { id: "evt-2000", start: { dateTime: "2026-11-23T20:00:00Z" } };
+  const END_CASES: Array<{ name: string; start: string; end: string | null; expectMatch: boolean }> = [
+    { name: "(a) c2f6c445: 19:55:07-19:57:24.796, ended before the 20:00 event", start: "2026-11-23T19:55:07.047Z", end: "2026-11-23T19:57:24.796Z", expectMatch: false },
+    { name: "(b) 657a78dc: starts 20:00:59, runs 20 min", start: "2026-11-23T20:00:59.039Z", end: "2026-11-23T20:20:59.039Z", expectMatch: true },
+    { name: "(c) starts 9 min early, runs into the event", start: "2026-11-23T19:51:00Z", end: "2026-11-23T20:15:00Z", expectMatch: true },
+    { name: "(d) no end time: start rule alone", start: "2026-11-23T19:55:07.047Z", end: null, expectMatch: true },
+    { name: "(e) ends exactly at the event's start", start: "2026-11-23T19:55:00Z", end: "2026-11-23T20:00:00Z", expectMatch: false },
+  ];
+  for (const c of END_CASES) {
+    const r = matchEvent(new Date(c.start), [EVENT_2000], c.end ? new Date(c.end) : null);
+    const ok = (r !== null) === c.expectMatch;
+    process.stdout.write(`${ok ? "PASS" : "FAIL"} ${c.name}: expected match=${c.expectMatch}, got match=${r !== null}\n`);
+    if (!ok) failures += 1;
+  }
+
   // A match job's signal reaches the Google call (SAA-227 part F): aborting it
   // ends a call in flight at once, not at the 5 s timeout. fetch is replaced for
   // this case by one that answers only when its own signal aborts; nothing
@@ -102,7 +119,8 @@ async function main(): Promise<number> {
   );
   if (!signalOk) failures += 1;
 
-  process.stdout.write(`\n${CASES.length + 2 - failures}/${CASES.length + 2} passed\n`);
+  const total = CASES.length + 2 + END_CASES.length;
+  process.stdout.write(`\n${total - failures}/${total} passed\n`);
   return failures === 0 ? 0 : 1;
 }
 
