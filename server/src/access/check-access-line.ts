@@ -11,6 +11,7 @@
 //   capture.transcript  GET /captures/:captureId/transcript
 //   mcp.search_moments  the MCP tool
 //   mcp.get_transcript  the MCP tool
+//   mcp.search_transcripts  the MCP tool
 // A read that finds nothing (404) writes no line. A planted phrase, in the
 // recording's title, its transcript and its moments, and used as the search
 // words, appears in no line written during the run; control: it is in what the
@@ -156,12 +157,14 @@ try {
   one("MCP search_moments", ms, `access: member=${M} route=mcp.search_moments recordings=1 ids=${R}`);
   const mt = await during(() => tool("get_transcript").run(ctx, { recordingId: R }));
   one("MCP get_transcript", mt, `access: member=${M} route=mcp.get_transcript recording=${R}`);
+  const mst = await during(() => tool("search_transcripts").run(ctx, { query: PHRASE, scope: "all" }));
+  one("MCP search_transcripts", mst, `access: member=${M} route=mcp.search_transcripts recordings=1 ids=${R}`);
 
   const missing = await during(() => get(`/recordings/${randomUUID()}/transcript`));
   check("a read that finds nothing (404) writes no access line", missing.result.status === 404 && missing.access.length === 0, JSON.stringify({ status: missing.result.status, access: missing.access }));
 
   // ---- nothing of the call in any line ----
-  const responses = [t.result.text, mo.result.text, s.result.text, cap.result.text, String(ms.result), String(mt.result)];
+  const responses = [t.result.text, mo.result.text, s.result.text, cap.result.text, String(ms.result), String(mt.result), String(mst.result)];
   check("control: the phrase is in what every read returned", responses.every((r) => r.includes(PHRASE)), responses.map((r) => r.includes(PHRASE)).join(","));
   const leaked = written.filter((l) => l.includes(PHRASE) || l.includes("marigold"));
   check("the phrase is in no line written during the run (access lines and every other)", leaked.length === 0, leaked.slice(0, 3).join(" / "));

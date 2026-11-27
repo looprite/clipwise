@@ -23,6 +23,7 @@ import { TOOLS, toolErrorText } from "./tools.js";
 const INSTRUCTIONS =
   "Clipwise holds the moments (decisions, commitments, questions, objections) and transcripts of the team's recorded calls. " +
   "Use search_moments to find what was said or decided, and its index mode to list which calls happened; use get_transcript to read a call. " +
+  "Use search_transcripts to find the lines where given words were said, then read around them with get_transcript; it matches words, not meaning. " +
   "You can only see calls you recorded and calls teammates shared with the team. " +
   "Results can be partial: check `truncated` on searches and the page notice on transcripts before concluding something is absent.";
 

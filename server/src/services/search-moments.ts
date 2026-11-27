@@ -62,7 +62,8 @@ export type SearchMomentsQuery = z.infer<typeof searchMomentsQuerySchema>;
 // dateFrom/dateTo, scope, kind) silently ignored the dates and returned the
 // whole scope instead. One implementation, called from both places, rather
 // than a second copy that could drift from this one.
-function pushDateRangeConditions(
+// search_transcripts calls it too (services/search-transcripts.ts).
+export function pushDateRangeConditions(
   conditions: (SQL | undefined)[],
   query: Pick<SearchMomentsQuery, "dateFrom" | "dateTo">,
 ): void {

@@ -15,6 +15,7 @@ import { HttpError } from "../lib/http.js";
 import { logError } from "../lib/safe-error.js";
 import { displayTitle, formatMinutes, formatTimestamp } from "../lib/transcript-file.js";
 import { searchMoments, searchMomentsQuerySchema } from "../services/search-moments.js";
+import { searchTranscripts, searchTranscriptsQuerySchema } from "../services/search-transcripts.js";
 import { getTranscriptPage } from "../services/transcript.js";
 import { DEFAULT_PAGE_CHARS, MAX_PAGE_CHARS, MIN_PAGE_CHARS } from "../services/transcript-page.js";
 
@@ -43,6 +44,20 @@ const DESC = {
     'Only recordings started at or after this ISO 8601 datetime (e.g. "2026-09-07T00:00:00Z") — bounds `index` results and moment-search results alike. Combine with dateTo to bound a window; either alone is a valid half-open range.',
   dateTo: "Only recordings started at or before this ISO 8601 datetime — bounds `index` results and moment-search results alike. See dateFrom.",
 
+  searchTranscriptsTool:
+    "Word search over the transcript lines of the team's calls: the calls you recorded and the calls your teammates have shared with the team; a call someone else keeps private is never searched, and nothing in a result says that one exists. " +
+    "Returns every line where all the words of `query` were said, ignoring case, within that one line: the call's recordingId, title and startedAt, the segment number, the time into the call, the speaker as get_transcript shows them, the line itself and the two lines either side. " +
+    "Use it to find which calls and where, then read around each hit with get_transcript (fromSegment a few below the hit's segment, or fromSec) before concluding what was said, decided or agreed: two lines of context can mislead. " +
+    "It matches words, not meaning: a miss is not evidence that something wasn't discussed, because people may have put it in other words. Try other wordings, or search_moments with semanticQuery. Speaker names are not searched, only what was said. " +
+    "The response carries `totalMatches` (the true count before `limit`) and `truncated`; check `truncated` before concluding something is absent or rare. A result larger than about 60,000 characters is cut from the end, with `trimmedForSize` and `truncated` true; narrow the query (recordingId, dateFrom/dateTo) rather than concluding the rest is absent. " +
+    "`scope` defaults to \"work\" (`scopeDefaulted` is then true): pass \"personal\" or \"all\" to search your own personal calls, also when you pass recordingId.",
+  stQuery: "The words to find. Every word must appear, ignoring case, in the same line; a word matches inside a longer one (\"price\" finds \"pricing\").",
+  stRecordingId: "Search one call only (UUID). A call you can't see is reported as not found.",
+  stLimit: "Max hits. Defaults to 50, at most 200.",
+  stScope: 'Personal-vs-work filter: "work" (default), "personal" or "all". Other people\'s personal calls are never searched. The response echoes the scope that ran.',
+  stDateFrom: 'Only calls started at or after this ISO 8601 datetime (e.g. "2026-11-01T00:00:00Z").',
+  stDateTo: "Only calls started at or before this ISO 8601 datetime.",
+
   getTranscriptTool:
     `Read a recording's transcript as text, one line per segment: \`[#12 3:04] Speaker: what was said\` (segment number, time into the call, speaker). Long transcripts are returned a page at a time, about ${DEFAULT_PAGE_CHARS.toLocaleString("en-US")} characters by default. The result's first lines say which segments are shown and whether there is more; when there is, they give the exact arguments for the next page (\`fromSegment\`). Keep asking for the next page until the result says it is the last one before concluding something was or was not said. To read around a moment from search_moments, pass its startSec as \`fromSec\`. Only recordings you recorded or that were shared with the team can be read; anything else is reported as not found.`,
   getTranscriptRecordingId: "The recording to read (UUID).",
@@ -65,6 +80,15 @@ const searchInput = z.object({
   dateTo: z.string().optional(),
 });
 
+const searchTranscriptsInput = z.object({
+  query: z.string(),
+  recordingId: z.string().uuid().optional(),
+  scope: z.enum(["work", "personal", "all"]).optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+  dateFrom: z.string().optional(),
+  dateTo: z.string().optional(),
+});
+
 const transcriptInput = z.object({
   recordingId: z.string().uuid(),
   fromSegment: z.number().int().min(0).optional(),
@@ -83,9 +107,10 @@ export type ToolDef = {
 
 // Cuts a search result from the end until its compact JSON fits, always keeping
 // at least one entry, and says so in the result so nobody reads a short list as
-// a complete one. Both response shapes (moments, or recordings in index mode).
+// a complete one. Every response shape: moments, recordings in index mode, and
+// search_transcripts' hits.
 export function fitToBudget(result: Record<string, unknown>, maxChars: number): string {
-  const key = Array.isArray(result.moments) ? "moments" : Array.isArray(result.recordings) ? "recordings" : null;
+  const key = Array.isArray(result.moments) ? "moments" : Array.isArray(result.recordings) ? "recordings" : Array.isArray(result.hits) ? "hits" : null;
   const whole = JSON.stringify(result);
   if (key === null || whole.length <= maxChars) return whole;
   const items = result[key] as unknown[];
@@ -149,6 +174,32 @@ export const TOOLS: ToolDef[] = [
       const sent = fitToBudget((await searchMoments(ctx, query)) as Record<string, unknown>, SEARCH_RESULT_CHARS);
       // What was sent, after any cut for size: those are the recordings read.
       logSearchAccess(ctx.memberId, "mcp.search_moments", JSON.parse(sent));
+      return sent;
+    },
+  },
+  {
+    name: "search_transcripts",
+    title: "Search call transcripts",
+    description: DESC.searchTranscriptsTool,
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: DESC.stQuery },
+        recordingId: { type: "string", description: DESC.stRecordingId },
+        limit: { type: "number", description: DESC.stLimit },
+        scope: { type: "string", enum: ["work", "personal", "all"], description: DESC.stScope },
+        dateFrom: { type: "string", description: DESC.stDateFrom },
+        dateTo: { type: "string", description: DESC.stDateTo },
+      },
+      required: ["query"],
+    },
+    run: async (ctx, args) => {
+      const input = searchTranscriptsInput.parse(args ?? {});
+      const query = searchTranscriptsQuerySchema.parse(input);
+      const sent = fitToBudget((await searchTranscripts(ctx, query)) as Record<string, unknown>, SEARCH_RESULT_CHARS);
+      // What was sent, after any cut for size: those are the recordings read.
+      // Ids and a count only; never the words searched for.
+      logSearchAccess(ctx.memberId, "mcp.search_transcripts", JSON.parse(sent));
       return sent;
     },
   },

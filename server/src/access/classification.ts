@@ -145,4 +145,9 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
 export const MCP_TOOLS: Record<string, { access: Access; requires: Requires; note: string }> = {
   search_moments: { access: "member", requires: "mcp", note: "services/search-moments.ts, filtered like GET .../moments" },
   get_transcript: { access: "member", requires: "mcp", note: "services/transcript.ts getTranscriptPage: paged text; not found unless the caller can see the recording" },
+  search_transcripts: {
+    access: "member",
+    requires: "mcp",
+    note: "services/search-transcripts.ts: word search over transcript lines of the recordings the caller can see, scoped like search_moments; a recordingId the caller can't see is not found; one access line, ids and a count only",
+  },
 };

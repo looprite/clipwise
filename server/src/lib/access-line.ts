@@ -24,6 +24,7 @@ export const ACCESS_ROUTES = [
   "capture.titles", //      GET /captures/titles (SAA-135)
   "mcp.search_moments",
   "mcp.get_transcript",
+  "mcp.search_transcripts",
 ] as const;
 export type AccessRoute = (typeof ACCESS_ROUTES)[number];
 
@@ -41,11 +42,13 @@ export function searchAccessLine(memberId: string, route: AccessRoute, recording
 }
 
 // The recordings in a search result as returned: moments[].recordingId for a
-// moment search, recordings[].id for the index.
+// moment search, recordings[].id for the index, hits[].recordingId for
+// search_transcripts.
 export function recordingIdsOf(result: unknown): unknown[] {
-  const r = (result ?? {}) as { moments?: Array<{ recordingId?: unknown }>; recordings?: Array<{ id?: unknown }> };
+  const r = (result ?? {}) as { moments?: Array<{ recordingId?: unknown }>; recordings?: Array<{ id?: unknown }>; hits?: Array<{ recordingId?: unknown }> };
   if (Array.isArray(r.moments)) return r.moments.map((m) => m?.recordingId);
   if (Array.isArray(r.recordings)) return r.recordings.map((x) => x?.id);
+  if (Array.isArray(r.hits)) return r.hits.map((h) => h?.recordingId);
   return [];
 }
 

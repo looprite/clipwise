@@ -57,13 +57,21 @@ export function clampPageChars(requested: number | undefined): number {
   return Math.min(MAX_PAGE_CHARS, Math.max(MIN_PAGE_CHARS, Math.floor(requested)));
 }
 
-export function pageTranscript(segments: FileSegment[], hostName: string | null, req: PageRequest = {}, micShared = false): Page {
+// Each segment's line as get_transcript shows it (null for an empty one, which
+// keeps its number but isn't shown), its text with whitespace collapsed, and
+// the speaker names worked out over the whole recording. search_transcripts
+// quotes these same lines, so a hit and get_transcript can't disagree.
+export function transcriptLines(segments: FileSegment[], hostName: string | null, micShared = false) {
   const names = resolveSpeakerNames(segments, hostName, micShared);
-  const lines: (string | null)[] = segments.map((s, i) => {
-    const text = collapse(s.text);
-    if (text === "") return null;
-    return `[#${i} ${formatTimestamp(s.startSec)}] ${names.get(s.speakerLabel) ?? UNATTRIBUTED}: ${text}`;
-  });
+  const texts = segments.map((s) => collapse(s.text));
+  const lines: (string | null)[] = segments.map((s, i) =>
+    texts[i] === "" ? null : `[#${i} ${formatTimestamp(s.startSec)}] ${names.get(s.speakerLabel) ?? UNATTRIBUTED}: ${texts[i]}`,
+  );
+  return { names, texts, lines };
+}
+
+export function pageTranscript(segments: FileSegment[], hostName: string | null, req: PageRequest = {}, micShared = false): Page {
+  const { lines } = transcriptLines(segments, hostName, micShared);
   const totalChars = lines.reduce((n, l) => n + (l === null ? 0 : l.length + 1), 0);
   const maxChars = clampPageChars(req.maxChars);
   const n = segments.length;
