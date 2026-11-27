@@ -3,9 +3,10 @@
 // (pipeline/match-calendar.ts matchRecording; SAA-227 part F), in one
 // transaction. No file passes between them any more.
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { titlePlaceholderFor } from "./clipwise.js";
+import { REPLACEABLE_TITLE_SOURCES } from "./title.js";
 
 export type CalendarMatchInvitee = {
   email: string;
@@ -126,51 +127,29 @@ export async function applyCalendarMatch(
     })
     .where(eq(schema.recordings.id, recordingId));
 
-  // Title-overwrite rule: every recording's title is set at ingest to the
-  // literal placeholder built by titlePlaceholderFor (ingest/clipwise.ts —
-  // the single, shared builder, called from both places rather than two
-  // hand-written copies of "Clipwise capture — " with an em dash that could
-  // drift apart by a character with no visible symptom) and there is no
-  // route today that lets a person hand-edit an existing recording's
-  // title. So "overwrite only if it still equals that exact placeholder"
-  // replaces the raw stem with the real event title (SAA-135) without
-  // risking a hand-set title later.
+  // Title-overwrite rule (SAA-135): the event's title replaces a placeholder or
+  // a fallback, never a calendar title an earlier match wrote and never one the
+  // member typed (schema.ts title_source). One guarded UPDATE, so a rename that
+  // lands while this job runs is not overwritten (ingest/title.ts).
+  //
+  // A row with no title_source (written before the column, until the backfill)
+  // keeps the earlier rule: replaced only while it still equals the exact
+  // placeholder built by titlePlaceholderFor (ingest/clipwise.ts, the single
+  // shared builder, never a hand-written copy of "Clipwise capture — "), and
+  // that UPDATE is guarded on the null, so a rename in between still wins.
   let titleApplied = false;
   let titleSkipReason: CalendarMatchApplication["titleSkipReason"] = null;
   if (match.title) {
-    const placeholder = titlePlaceholderFor(stem);
-    // "" is not a real stem, but titlePlaceholderFor("") yields exactly the
-    // fixed prefix ("Clipwise capture — ") with nothing appended — used
-    // here only to test "does this look placeholder-shaped at all", without
-    // hand-writing the em dash a second time.
-    const placeholderPrefix = titlePlaceholderFor("");
-    const [recording] = await executor
-      .select({ title: schema.recordings.title })
-      .from(schema.recordings)
-      .where(eq(schema.recordings.id, recordingId));
-    if (recording?.title === placeholder) {
-      await executor
-        .update(schema.recordings)
-        .set({ title: match.title })
-        .where(eq(schema.recordings.id, recordingId));
-      titleApplied = true;
-    } else if (recording?.title?.startsWith(placeholderPrefix)) {
-      // Placeholder-shaped but for a different stem than the one just
-      // computed. Shouldn't happen on the pipeline path — recorder
-      // captures always carry a stem, so ingest/clipwise.ts's
-      // basename(transcriptPath) fallback (used only when a transcript is
-      // ingested with no stamp at all) shouldn't be in play here. If this
-      // fires anyway, it's a real bug — a stem-resolution mismatch between
-      // ingest time and calendar-match apply time — and it must announce
-      // itself rather than look like an ordinary, correctly-skipped
-      // hand-set title.
-      titleSkipReason = "placeholder_mismatch";
-      // Ids only: both titles can carry a meeting's name (SAA-227 decision 11).
-      process.stdout.write(
-        `calendar-match: WARNING title placeholder mismatch for recording=${recordingId} — not overwriting\n`,
-      );
-    } else {
-      titleSkipReason = "custom_title";
+    const replaced = await executor
+      .update(schema.recordings)
+      .set({ title: match.title, titleSource: "calendar" })
+      .where(and(eq(schema.recordings.id, recordingId), inArray(schema.recordings.titleSource, [...REPLACEABLE_TITLE_SOURCES])))
+      .returning({ id: schema.recordings.id });
+    titleApplied = replaced.length > 0;
+    if (!titleApplied) {
+      const legacy = await legacyTitleRule(executor, recordingId, stem, match.title);
+      titleApplied = legacy.applied;
+      titleSkipReason = legacy.reason;
     }
   } else {
     titleSkipReason = "no_title_in_match";
@@ -183,6 +162,57 @@ export async function applyCalendarMatch(
     titleApplied,
     titleSkipReason,
   };
+}
+
+type TitleSkipReason = NonNullable<CalendarMatchApplication["titleSkipReason"]>;
+
+// The match's title on a row the guarded UPDATE did not take. A row with no
+// title_source gets the earlier rule: the exact placeholder only, guarded on the
+// null. Any other row holds a calendar or member title and is left alone.
+// Every branch that does not write returns a reason.
+async function legacyTitleRule(
+  executor: typeof db | Tx,
+  recordingId: string,
+  stem: string,
+  title: string,
+): Promise<{ applied: true; reason: null } | { applied: false; reason: TitleSkipReason }> {
+  const [recording] = await executor
+    .select({ title: schema.recordings.title, titleSource: schema.recordings.titleSource })
+    .from(schema.recordings)
+    .where(eq(schema.recordings.id, recordingId));
+  if (!recording || recording.titleSource !== null) return { applied: false, reason: "custom_title" };
+  const placeholder = titlePlaceholderFor(stem);
+  // "" is not a real stem, but titlePlaceholderFor("") yields exactly the
+  // fixed prefix ("Clipwise capture — ") with nothing appended — used
+  // here only to test "does this look placeholder-shaped at all", without
+  // hand-writing the em dash a second time.
+  const placeholderPrefix = titlePlaceholderFor("");
+  if (recording.title === placeholder) {
+    const written = await executor
+      .update(schema.recordings)
+      .set({ title, titleSource: "calendar" })
+      .where(and(eq(schema.recordings.id, recordingId), isNull(schema.recordings.titleSource)))
+      .returning({ id: schema.recordings.id });
+    // Not written: a rename gave the row a source since the read above.
+    return written.length > 0 ? { applied: true, reason: null } : { applied: false, reason: "custom_title" };
+  }
+  if (recording.title?.startsWith(placeholderPrefix)) {
+    // Placeholder-shaped but for a different stem than the one just
+    // computed. Shouldn't happen on the pipeline path — recorder
+    // captures always carry a stem, so ingest/clipwise.ts's
+    // basename(transcriptPath) fallback (used only when a transcript is
+    // ingested with no stamp at all) shouldn't be in play here. If this
+    // fires anyway, it's a real bug — a stem-resolution mismatch between
+    // ingest time and calendar-match apply time — and it must announce
+    // itself rather than look like an ordinary, correctly-skipped
+    // hand-set title.
+    // Ids only: both titles can carry a meeting's name (SAA-227 decision 11).
+    process.stdout.write(
+      `calendar-match: WARNING title placeholder mismatch for recording=${recordingId} — not overwriting\n`,
+    );
+    return { applied: false, reason: "placeholder_mismatch" };
+  }
+  return { applied: false, reason: "custom_title" };
 }
 
 // SAA-331: a match that asked the owner's calendar and found no event in range

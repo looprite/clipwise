@@ -11,8 +11,8 @@
 // they answer (recorder/app/main.js runTrashOnServer). The files on the Mac are
 // the recorder's business.
 
-import { Router, type Request } from "express";
-import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
+import { Router, type Request, type RequestHandler } from "express";
+import { and, asc, desc, eq, gte, isNotNull, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { normalizeEmail } from "../auth/membership.js";
@@ -20,7 +20,8 @@ import { db, schema } from "../db/index.js";
 import { deleteRecordings } from "../db/delete-recordings.js";
 import { CLIPWISE_SOURCE, titlePlaceholderFor } from "../ingest/clipwise.js";
 import { ownerAddressesFor } from "../ingest/invitee-names.js";
-import { logAccess } from "../lib/access-line.js";
+import { shownTitle } from "../ingest/title.js";
+import { logAccess, searchAccessLine } from "../lib/access-line.js";
 import { asyncHandler, HttpError, parseBody, parseQuery, uuidParam } from "../lib/http.js";
 import { buildTranscriptFile } from "../lib/transcript-read.js";
 
@@ -83,6 +84,66 @@ captureScopeRouter.post(
     res.json({ trashed: true, trashedAt: at.toISOString() });
   }),
 );
+
+// Rename (SAA-135): the owner only (ownCapture: anyone else's is 404, as for
+// trash), not a trashed capture. The title is trimmed and must be 1 to 200
+// characters with no control character. Stored like any title (encrypted), with
+// title_source member, which no calendar match or fallback replaces
+// (ingest/title.ts). The log line is ids and a length; the title is never logged.
+const titleSchema = z.object({ title: z.string() }).strict();
+const TITLE_MAX = 200;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+
+captureScopeRouter.post(
+  "/captures/:captureId/title",
+  asyncHandler(async (req, res) => {
+    const { id, trashedAt } = await ownCapture(req);
+    if (trashedAt) throw new HttpError(404, "capture_not_found");
+    const body = parseBody(titleSchema, req);
+    const title = body.title.trim();
+    if (title === "" || title.length > TITLE_MAX || CONTROL_CHARACTER.test(body.title)) throw new HttpError(400, "title_invalid");
+    await db.update(schema.recordings).set({ title, titleSource: "member", updatedAt: new Date() }).where(eq(schema.recordings.id, id));
+    console.log(`title: member=${accessOf(req).memberId} recording=${id} renamed chars=${title.length}`);
+    res.json({ title });
+  }),
+);
+
+// The caller's own capture titles since a time (SAA-135), for Recent meetings:
+// one reply instead of a jobs request per row, so a title set after the Mac
+// stopped asking (a backfill, a rename from another Mac) still reaches it.
+// since defaults to 8 days ago and is held to the last 31; trashed captures are
+// left out; at most 500, newest first. Each is { captureId, title }, title null
+// while it is the placeholder (ingest/title.ts shownTitle). Titles are call
+// text, so the read writes one access line (ids only). Mounted in app.ts with
+// requireCapture, ahead of /captures/:captureId.
+const titlesQuery = z.object({ since: z.string().datetime({ offset: true }).optional() });
+const TITLES_DEFAULT_DAYS = 8;
+const TITLES_MAX_DAYS = 31;
+const TITLES_LIMIT = 500;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export const captureTitlesGet: RequestHandler = asyncHandler(async (req, res) => {
+  const ctx = accessOf(req);
+  const q = parseQuery(titlesQuery, req);
+  const floor = Date.now() - TITLES_MAX_DAYS * DAY_MS;
+  const since = new Date(Math.max(floor, q.since ? Date.parse(q.since) : Date.now() - TITLES_DEFAULT_DAYS * DAY_MS));
+  const rows = await db
+    .select({ id: schema.recordings.id, captureId: schema.recordings.sourceId, title: schema.recordings.title, titleSource: schema.recordings.titleSource })
+    .from(schema.recordings)
+    .where(
+      and(
+        eq(schema.recordings.accountId, ctx.accountId),
+        eq(schema.recordings.source, CLIPWISE_SOURCE),
+        eq(schema.recordings.ownerMemberId, ctx.memberId),
+        isNull(schema.recordings.trashedAt),
+        gte(schema.recordings.startedAt, since),
+      ),
+    )
+    .orderBy(desc(schema.recordings.startedAt))
+    .limit(TITLES_LIMIT);
+  console.log(searchAccessLine(ctx.memberId, "capture.titles", rows.map((r) => r.id)));
+  res.json({ since: since.toISOString(), titles: rows.map((r) => ({ captureId: r.captureId, title: shownTitle(r.title, r.titleSource) })) });
+});
 
 captureScopeRouter.post(
   "/captures/:captureId/restore",
@@ -159,6 +220,16 @@ captureScopeRouter.get(
       .orderBy(asc(schema.jobs.createdAt));
     const matched = jobs.some((j) => j.kind === "match" && j.state === "done");
     const ctx = accessOf(req);
-    res.json({ jobs, calendar: matched ? await calendarOf(id, await ownerAddressesFor(db, ctx.memberId, ctx.email)) : null });
+    // The title as it stands, match or not (SAA-135): a fallback, a rename, or
+    // the event's; null while it is the placeholder. `calendar` is as before.
+    const [rec] = await db
+      .select({ title: schema.recordings.title, titleSource: schema.recordings.titleSource })
+      .from(schema.recordings)
+      .where(eq(schema.recordings.id, id));
+    res.json({
+      jobs,
+      title: rec ? shownTitle(rec.title, rec.titleSource) : null,
+      calendar: matched ? await calendarOf(id, await ownerAddressesFor(db, ctx.memberId, ctx.email)) : null,
+    });
   }),
 );

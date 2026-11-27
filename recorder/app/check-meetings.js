@@ -755,6 +755,98 @@ check('without the processing capture, the tray item is the newest ready meeting
         && renderSelbar.includes("send('meetings:delete', picked)"));
 }
 
+// --- SAA-135: the title file, Rename and the titles sync ---------------------
+// Its own temporary folder, so the rows above keep their counts. Every title
+// and name is invented.
+{
+    const lm = require('./last-meeting.js');
+    const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-titles-check-'));
+    const qdir = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-titles-queue-check-'));
+    const tw = (name, doc) => fs.writeFileSync(path.join(tdir, name), JSON.stringify(doc));
+    const made = (stem, o = {}) => {
+        tw(`manifest-${stem}.json`, { started_at: stem, recording_id: o.captureId || null, trigger_app: null, tracks: [{ duration_s: 600 }] });
+        tw(`pipeline-${stem}.json`, {
+            pipeline: 'capture',
+            updated_at: new Date(NOW - (o.updatedAgoMs ?? 3600e3)).toISOString(),
+            steps: { transcribe: { state: 'ok' }, ingest: { state: o.ingest || 'ok' } },
+        });
+        tw(`transcript-${stem}.json`, { segments: [{}] });
+        if (o.calendar !== undefined) tw(`calendar-match-${stem}.json`, { title: o.calendar, invitees: [] });
+        if (o.titleFile !== undefined) tw(`title-${stem}.json`, { title: o.titleFile });
+        if (o.upload) {
+            const entry = o.upload === 'sent' ? { stem, state: 'sent', jobState: 'done', recordingId: `rid-${stem}` } : { stem, state: o.upload };
+            fs.writeFileSync(path.join(qdir, `${stem}.json`), JSON.stringify(entry));
+        }
+    };
+    made('2026-03-06T10-00-00Z', { captureId: 'AAAA0001-0000-4000-8000-000000000001', calendar: 'Calendar Event (invented)', titleFile: 'Renamed By Hand (invented)', upload: 'sent' });
+    made('2026-03-06T11-00-00Z', { captureId: 'AAAA0002-0000-4000-8000-000000000002', calendar: 'Second Event (invented)', titleFile: null, upload: 'sent' });
+    made('2026-03-06T12-00-00Z', { captureId: 'AAAA0003-0000-4000-8000-000000000003', calendar: 'Third Event (invented)', upload: 'sent' });
+    made('2026-03-06T13-00-00Z', { captureId: 'AAAA0004-0000-4000-8000-000000000004', upload: 'failed' });
+    made('2026-03-06T19-59-00Z', { captureId: 'AAAA0005-0000-4000-8000-000000000005', ingest: 'pending', updatedAgoMs: 30e3, upload: 'sent' });
+
+    const NOTE = "Couldn't reach the Clipwise server. The title wasn't changed.";
+    let trows = [];
+    try {
+        trows = listMeetings(tdir, NOW, undefined, { uploadQueueDir: qdir, notes: { '2026-03-06T12-00-00Z': NOTE } });
+    } catch (err) {
+        console.log(`      ${err.message}`);
+    }
+    const t = Object.fromEntries(trows.map((r) => [r.stem, r]));
+    const tt = (s) => JSON.stringify(t[s] && t[s].title);
+    check('SAA-135 m1: the title file is read before the calendar file', t['2026-03-06T10-00-00Z']?.title === 'Renamed By Hand (invented)', tt('2026-03-06T10-00-00Z'));
+    check('SAA-135 m2: a title file holding null falls back to the calendar title', t['2026-03-06T11-00-00Z']?.title === 'Second Event (invented)', tt('2026-03-06T11-00-00Z'));
+    check('SAA-135 m3: control: with no title file the calendar title is shown, as before', t['2026-03-06T12-00-00Z']?.title === 'Third Event (invented)', tt('2026-03-06T12-00-00Z'));
+    check('SAA-135 m4: no title at all is still null (the page shows "Untitled")', t['2026-03-06T13-00-00Z']?.title === null, tt('2026-03-06T13-00-00Z'));
+    check('SAA-135 m5: Rename only on a sent capture that is not still processing',
+        t['2026-03-06T10-00-00Z']?.canRename === true && t['2026-03-06T13-00-00Z']?.canRename === false && t['2026-03-06T19-59-00Z']?.canRename === false,
+        trows.map((r) => `${r.stem}:${r.canRename}`).join(' '));
+    check('SAA-135 m6: a rename note shows on its own row only',
+        t['2026-03-06T12-00-00Z']?.note === NOTE && trows.filter((r) => r.note).length === 1,
+        trows.map((r) => `${r.stem}:${JSON.stringify(r.note)}`).join(' '));
+
+    // The server's reply to a rename, as the row shows it.
+    const ro = (reply, signedIn = true) => (lm.renameOutcome ? JSON.stringify(lm.renameOutcome(reply, signedIn)) : 'no renameOutcome');
+    check('SAA-135 m7: a rename reply, as the row shows it',
+        ro({ status: 200, json: { title: 'New Name (invented)' } }) === JSON.stringify({ ok: true, title: 'New Name (invented)' }) &&
+        ro({ status: 404, json: { error: 'capture_not_found' } }) === JSON.stringify({ ok: false, message: "Couldn't rename: this call isn't on the server." }) &&
+        ro({ status: 400, json: { error: 'title_invalid' } }) === JSON.stringify({ ok: false, message: 'A title must be 1 to 200 characters on one line.' }) &&
+        ro({ status: null, json: { error: 'ECONNREFUSED' } }) === JSON.stringify({ ok: false, message: NOTE }) &&
+        ro({ status: 200, json: {} }, false) === JSON.stringify({ ok: false, message: 'Sign in to Clipwise to rename calls.' }),
+        [ro({ status: 200, json: { title: 'New Name (invented)' } }), ro({ status: 404, json: {} }), ro({ status: 400, json: {} }), ro({ status: null, json: {} }), ro({ status: 200, json: {} }, false)].join(' | '));
+
+    // The titles sync: GET /captures/titles' reply, onto this Mac's captures.
+    let written = 'no applyTitles';
+    try {
+        written = lm.applyTitles(tdir, {
+            titles: [
+                { captureId: 'aaaa0003-0000-4000-8000-000000000003', title: 'Synced Title (invented)' },
+                { captureId: 'AAAA0004-0000-4000-8000-000000000004', title: null },
+                { captureId: 'FFFF9999-0000-4000-8000-000000000009', title: 'Not On This Mac (invented)' },
+            ],
+        });
+    } catch (err) {
+        written = err.message;
+    }
+    const tf = (s) => { try { return JSON.parse(fs.readFileSync(path.join(tdir, `title-${s}.json`), 'utf8')).title; } catch { return 'absent'; } };
+    check('SAA-135 m8: the titles sync writes a title file for each capture on this Mac, by its id in any case, and nothing for others',
+        written === 2 && tf('2026-03-06T12-00-00Z') === 'Synced Title (invented)' && tf('2026-03-06T13-00-00Z') === null &&
+        fs.readdirSync(tdir).filter((f) => f.startsWith('title-')).length === 4,
+        `written=${JSON.stringify(written)} t3=${JSON.stringify(tf('2026-03-06T12-00-00Z'))} t4=${JSON.stringify(tf('2026-03-06T13-00-00Z'))}`);
+
+    // The ⋯ menu, from the page's own menuItems.
+    let menuItems = null;
+    try { menuItems = pageFunction('meetings-page.js', 'menuItems'); } catch (err) { console.log(`      ${err.message}`); }
+    const mi = (r) => (menuItems ? JSON.stringify(menuItems(r)) : 'no menuItems');
+    check('SAA-135 m9: the ⋯ menu offers Rename… where it is allowed, between Change attendees and Move to trash',
+        mi({ canChangeIdentity: true, canRename: true }) === '["change-identity","rename","trash"]' &&
+        mi({ canChangeIdentity: false, canRename: true }) === '["rename","trash"]' &&
+        mi({ canChangeIdentity: true, canRename: false }) === '["change-identity","trash"]',
+        `${mi({ canChangeIdentity: true, canRename: true })} ${mi({ canChangeIdentity: false, canRename: true })} ${mi({ canChangeIdentity: true, canRename: false })}`);
+
+    fs.rmSync(tdir, { recursive: true, force: true });
+    fs.rmSync(qdir, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
     console.log(`\n${failed} check(s) failed`);

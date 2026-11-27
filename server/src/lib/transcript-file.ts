@@ -68,7 +68,8 @@ export function displayTitle(title: string | null | undefined): string {
   return t && !AUTO_TITLE.test(t) ? t : "Untitled";
 }
 
-function cleanName(name: string | null | undefined): string | null {
+// Also used by ingest/fallback-title.ts, so a call's title skips the same labels.
+export function cleanName(name: string | null | undefined): string | null {
   const n = (name ?? "").trim();
   return n && !NOT_A_NAME.test(n) ? n : null;
 }

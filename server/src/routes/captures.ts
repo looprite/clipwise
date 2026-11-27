@@ -61,6 +61,7 @@ import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { db, schema } from "../db/index.js";
 import { CLIPWISE_SOURCE, titlePlaceholderFor } from "../ingest/clipwise.js";
+import { refreshFallbackTitle } from "../ingest/title.js";
 import {
   applyIdentity,
   applyIdentityCorrection,
@@ -424,6 +425,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
         ownerMemberId: ctx.memberId,
         slug,
         title: titlePlaceholderFor(body.stem),
+        titleSource: "placeholder",
         source: CLIPWISE_SOURCE,
         sourceId,
         startedAt: new Date(body.startedAt),
@@ -528,6 +530,9 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
         // Only a speaker name actually written changes what extraction would see.
         namesWritten ||= mapping.applied.length > 0;
       }
+      // The title from the answer just applied, over a placeholder or an
+      // earlier fallback only (ingest/title.ts).
+      if (identityApplied) await refreshFallbackTitle(tx, existing.id);
       // Before voice names, so a voice named after a guest copies that guest's
       // person (voice-names.ts).
       const named = await nameInvitees(tx, existing.id);
@@ -598,6 +603,7 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
       await applyIdentity(tx, recording.id, identity, await chosenPeople(tx, ctx, identity, hostKeys));
       await applySpeakerNames(tx, recording.id, identity);
       await applyScope(tx, recording.id, identity);
+      await refreshFallbackTitle(tx, recording.id);
     }
     const named = await nameInvitees(tx, recording.id);
     const inviteeNamesLog = named.log;

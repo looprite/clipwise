@@ -73,6 +73,62 @@ function calendarTitle(dir, stem) {
     return doc && typeof doc.title === 'string' && doc.title.trim() ? doc.title.trim() : null;
 }
 
+// --- the title the server holds (SAA-135) -----------------------------------
+// title-<stem>.json is the title the server last gave for this capture: from
+// the jobs reply, GET /captures/titles when Recent meetings opens, or a rename's
+// reply. { title } with title null while the server still has the placeholder.
+// Read first; with none (or null), the calendar file as before; null shows as
+// "Untitled". It holds a title only, never a name list.
+
+function titleFilePath(dir, stem) {
+    return path.join(dir, `title-${stem}.json`);
+}
+
+function meetingTitle(dir, stem) {
+    const doc = readJson(titleFilePath(dir, stem));
+    if (doc && typeof doc.title === 'string' && doc.title.trim()) return doc.title.trim();
+    return calendarTitle(dir, stem);
+}
+
+// Written whole or not at all, as the calendar file is.
+function writeTitleFile(dir, stem, title) {
+    const file = titleFilePath(dir, stem);
+    const value = typeof title === 'string' && title.trim() ? title.trim() : null;
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ title: value }, null, 2) + '\n');
+    fs.renameSync(`${file}.tmp`, file);
+}
+
+// GET /captures/titles' reply onto this Mac's captures: one title file for each
+// capture here whose manifest recording_id the reply lists (ids compared in any
+// case). Returns how many were written.
+function applyTitles(dir, reply) {
+    const list = reply && Array.isArray(reply.titles) ? reply.titles : [];
+    const byId = new Map();
+    for (const t of list) {
+        if (t && typeof t.captureId === 'string' && (typeof t.title === 'string' || t.title === null)) byId.set(t.captureId.toUpperCase(), t.title);
+    }
+    let written = 0;
+    for (const stem of captureStems(dir)) {
+        const manifest = readJson(path.join(dir, `manifest-${stem}.json`));
+        const id = manifest && typeof manifest.recording_id === 'string' ? manifest.recording_id.toUpperCase() : null;
+        if (!id || !byId.has(id)) continue;
+        writeTitleFile(dir, stem, byId.get(id));
+        written++;
+    }
+    return written;
+}
+
+// POST /captures/:captureId/title's reply, as the row shows it: the new title,
+// or the line to show under the row. The old title stays on a refusal.
+function renameOutcome(reply, signedIn) {
+    if (!signedIn) return { ok: false, message: 'Sign in to Clipwise to rename calls.' };
+    if (!reply || reply.status === null || reply.status === undefined) return { ok: false, message: "Couldn't reach the Clipwise server. The title wasn't changed." };
+    if (reply.status === 200 && reply.json && typeof reply.json.title === 'string') return { ok: true, title: reply.json.title };
+    if (reply.status === 404) return { ok: false, message: "Couldn't rename: this call isn't on the server." };
+    if (reply.status === 400) return { ok: false, message: 'A title must be 1 to 200 characters on one line.' };
+    return { ok: false, message: `Couldn't rename: the server answered ${reply.status}.` };
+}
+
 // A capture the capture pipeline (capture-cli.ts, SAA-227) handled:
 // what this Mac does ends at the upload, and the rest is the server's. Ready once
 // the capture was sent and its server jobs are done, as its upload-queue entry
@@ -112,7 +168,7 @@ function classifyServerCapture(dir, stem, pipeline, title, now, uploadQueueDir) 
 // -> { state, stem, title, recordingId? }. `opts.uploadQueueDir` is where the
 // upload queue's entries are, for captures the capture pipeline handled.
 function classifyCapture(dir, stem, now = Date.now(), opts = {}) {
-    const title = calendarTitle(dir, stem);
+    const title = meetingTitle(dir, stem);
     const pipeline = readJson(path.join(dir, `pipeline-${stem}.json`));
     const startedMs = stemTimeMs(stem);
 
@@ -341,6 +397,7 @@ function writeCalendarMatchFile(dir, stem, calendar) {
 
 module.exports = {
     lastMeeting, classifyCapture, captureStems, isTrashed, trashedStems, calendarTitle, stemTimeMs, readJson,
+    meetingTitle, writeTitleFile, applyTitles, renameOutcome,
     jobStateOf, matchPendingOf, writeCalendarMatchFile, jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
     failureResolved,
 };

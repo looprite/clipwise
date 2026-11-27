@@ -414,6 +414,8 @@ export async function ingestTranscript(
         ownerMemberId,
         slug,
         title,
+        // titlePlaceholderFor above (SAA-135: schema.ts title_source).
+        titleSource: "placeholder",
         source: CLIPWISE_SOURCE,
         sourceId,
         mediaUrl: null,

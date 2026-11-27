@@ -37,7 +37,7 @@ import { calendarPreviewPost } from "./routes/calendar-preview.js";
 import { captureMembersPost, captureMembersRemovePost } from "./routes/capture-members.js";
 import { captureMembersNoticeGet, captureNoticePost } from "./routes/capture-notice.js";
 import { captureMeGet, capturePeopleGet } from "./routes/capture-people.js";
-import { captureScopeRouter } from "./routes/capture-scope.js";
+import { captureScopeRouter, captureTitlesGet } from "./routes/capture-scope.js";
 import { oauthRouter } from "./routes/oauth.js";
 import { demoRouter } from "./routes/demo.js";
 import { peopleRouter } from "./routes/people.js";
@@ -127,6 +127,8 @@ export async function buildApp(): Promise<{ app: Express; mounts: Mount[] }> {
   // The caller's own name, and people search, for the identity window (SAA-260
   // step 1; routes/capture-people.ts). Here for the same reason.
   app.get("/captures/me", requireCapture, captureMeGet);
+  // The owner's capture titles for Recent meetings (SAA-135; routes/capture-scope.ts).
+  app.get("/captures/titles", requireCapture, captureTitlesGet);
   app.get("/captures/people", requireCapture, capturePeopleGet);
   // The member's acknowledgement of the recording notice, reported at once
   // (Gate 1; routes/capture-notice.ts). Here for the same reason.

@@ -193,6 +193,19 @@ export const recordings = pgTable(
     // event's title as given (pipeline/match-calendar.ts); one longer than 512,
     // which the old column refused, is now stored.
     title: encryptedText("title"),
+    // Where the title came from (SAA-135), so the writers of `title` can tell a
+    // title they may replace from one they must not. Plain, not call text: the
+    // title itself is encrypted, so its text cannot say which kind it is.
+    //   placeholder  "Clipwise capture — <stem>", set at POST /captures
+    //   fallback     "Call with …", from the member's answer (ingest/title.ts)
+    //   calendar     the matched event's title (ingest/calendar-match.ts)
+    //   member       typed by the member (POST /captures/:captureId/title)
+    // A calendar match and a fallback replace only placeholder and fallback; a
+    // member title is replaced by nothing but another rename. Null on rows that
+    // are not recorder captures (imports, demo, check rows), and on recorder
+    // rows until the backfill (db/backfill-title-source.ts): a calendar match on
+    // a null row keeps the earlier rule, replacing only the exact placeholder.
+    titleSource: varchar("title_source", { length: 16 }),
     source: varchar("source", { length: 64 }),
     sourceId: varchar("source_id", { length: 256 }),
     // Google's id shared by every instance of a recurring series (SAA-115
@@ -289,6 +302,12 @@ export const recordings = pgTable(
     visibilityValid: check(
       "recordings_visibility_valid",
       sql`${t.visibility} IN ('private', 'shared')`,
+    ),
+    // Null is allowed on purpose (see title_source above). The explicit IS NOT
+    // NULL keeps a null from passing through the IN half, as on occurrence_key_rule.
+    titleSourceValid: check(
+      "recordings_title_source_valid",
+      sql`(${t.titleSource} IS NULL) OR (${t.titleSource} IS NOT NULL AND ${t.titleSource} IN ('placeholder', 'fallback', 'calendar', 'member'))`,
     ),
   }),
 );

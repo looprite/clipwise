@@ -35,7 +35,8 @@ const { stopMessageFor } = require('./voice-naming-wait.js');
 // What state a capture is in (SAA-199), for Recent meetings' Save transcript
 // and trash, and the server job poll.
 const {
-    classifyCapture, stemTimeMs, isTrashed, writeCalendarMatchFile, calendarTitle, jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
+    classifyCapture, stemTimeMs, isTrashed, writeCalendarMatchFile, calendarTitle, writeTitleFile, applyTitles, renameOutcome,
+    jobPollStep, JOB_POLL_MS, JOB_POLL_LIMIT_MS, JOB_SETTLED,
     failureResolved,
 } = require('./last-meeting.js');
 // The recent-meetings window's rows (SAA-217).
@@ -1147,7 +1148,7 @@ const STEM_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$/;
 function sendMeetingsData() {
     if (!meetingsWindow || meetingsWindow.isDestroyed()) return;
     meetingsWindow.webContents.send('meetings:data', {
-        rows: listMeetings(OUTDIR, undefined, undefined, captureStateOpts()),
+        rows: listMeetings(OUTDIR, undefined, undefined, { ...captureStateOpts(), notes: Object.fromEntries(renameNotes) }),
         trashed: listTrashed(OUTDIR),
         saving: savingTranscript,
         busy: trashBusy,
@@ -1261,6 +1262,8 @@ function windowPreferences(preload) {
 function openMeetingsWindow() {
     // A row whose status is unknown gets its answer while the window is open.
     askJobsAgain('Recent meetings opened');
+    // And every row its title as the server holds it now (SAA-135).
+    void syncTitles();
     if (meetingsWindow && !meetingsWindow.isDestroyed()) {
         meetingsWindow.show();
         try { app.focus({ steal: true }); } catch {}
@@ -1316,6 +1319,9 @@ function registerMeetingsIpc() {
         // A rename only when names were already saved; otherwise it is the
         // first naming of this call's voices.
         reopenVoiceNaming(stem, { rename: readVoiceNamesAnswer(OUTDIR, stem) !== null });
+    });
+    ipcMain.on('meetings:rename', (_event, payload) => {
+        void renameMeeting(payload && payload.stem, payload && payload.title);
     });
     ipcMain.on('meetings:change-identity', (_event, payload) => {
         const stem = payload && payload.stem;
@@ -4015,6 +4021,15 @@ async function pollJobStates() {
                 } catch (err) {
                     console.error(`[clipwise-recorder] upload ${entry.stem}: calendar match not written: ${err.code || err.name}`);
                 }
+                // The title as the server holds it (SAA-135), match or not. A server
+                // from before it sends none, and nothing is written.
+                if (Object.prototype.hasOwnProperty.call(reply.json, 'title')) {
+                    try {
+                        writeTitleFile(OUTDIR, entry.stem, reply.json.title);
+                    } catch (err) {
+                        console.error(`[clipwise-recorder] upload ${entry.stem}: title not written: ${err.code || err.name}`);
+                    }
+                }
             }
             // Ids, states and whether a match was written; never the title or a name.
             const retry = reply.status == null ? ` (next in ${Math.round((Date.parse(next.nextJobPollAt) - Date.now()) / 1000)} s)` : '';
@@ -4361,6 +4376,63 @@ async function runTrashOnServer(action, stems) {
         }
     }
     return results;
+}
+
+// --- titles (SAA-135) --------------------------------------------------------
+// Rename… in Recent meetings: POST /captures/:captureId/title. On success the
+// title file holds the server's answer; on a refusal the title is left as it was
+// and the row shows why (renameNotes, until the next rename of that row). The
+// log line is the status only, never the title.
+
+const renameNotes = new Map(); // stem -> the line under its row
+const TITLES_SYNC_DAYS = 8;
+
+async function renameMeeting(stem, title) {
+    if (typeof stem !== 'string' || !STEM_PATTERN.test(stem) || typeof title !== 'string') return;
+    const server = signedInServer();
+    const captureId = captureIdFor(stem);
+    if (!captureId) {
+        // Nothing to send: this Mac has no server id for the capture.
+        console.error(`[clipwise-recorder] rename ${stem}: no capture id here, not sent`);
+        renameNotes.set(stem, "Couldn't rename: this call has no server id on this Mac.");
+        sendMeetingsData();
+        return;
+    }
+    const reply = server ? await captureServerRequest(server, 'POST', `/captures/${captureId}/title`, { title }) : null;
+    const outcome = renameOutcome(reply, !!server);
+    console.error(`[clipwise-recorder] rename ${stem}: ${server ? `server ${reply.status ?? 'no reply'}${reply.json && reply.json.error ? ` ${reply.json.error}` : ''}` : 'not signed in'}`);
+    if (outcome.ok) {
+        try {
+            writeTitleFile(OUTDIR, stem, outcome.title);
+            renameNotes.delete(stem);
+        } catch (err) {
+            renameNotes.set(stem, "Renamed on the server, but this Mac couldn't save the new title. It will show after the next refresh.");
+            console.error(`[clipwise-recorder] rename ${stem}: title not written here: ${err.code || err.name}`);
+        }
+    } else {
+        renameNotes.set(stem, outcome.message);
+    }
+    sendMeetingsData();
+}
+
+// When Recent meetings opens: the server's titles for this Mac's recent
+// captures, in one request, so a title set after this Mac stopped asking (a
+// backfill, a rename elsewhere) is shown. Best effort: no reply changes nothing.
+async function syncTitles() {
+    const server = signedInServer();
+    if (!server) return;
+    const since = new Date(Date.now() - TITLES_SYNC_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const reply = await captureServerRequest(server, 'GET', `/captures/titles?since=${encodeURIComponent(since)}`);
+    if (reply.status !== 200) {
+        console.error(`[clipwise-recorder] titles: server ${reply.status ?? 'no reply'}`);
+        return;
+    }
+    try {
+        console.error(`[clipwise-recorder] titles: ${applyTitles(OUTDIR, reply.json)} written`);
+    } catch (err) {
+        console.error(`[clipwise-recorder] titles: not written: ${err.code || err.name}`);
+    }
+    sendMeetingsData();
 }
 
 function trashMarkerPath(stem) {

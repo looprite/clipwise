@@ -13,7 +13,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { classifyCapture, captureStems, trashedStems, calendarTitle, stemTimeMs, readJson } = require('./last-meeting.js');
+const { classifyCapture, captureStems, trashedStems, meetingTitle, stemTimeMs, readJson } = require('./last-meeting.js');
 const { namingSettled } = require('./identity-answer.js');
 
 const DAYS = 7;
@@ -112,6 +112,11 @@ function listMeetings(dir, now = Date.now(), days = DAYS, opts = {}) {
             // failed: the queue doesn't send that capture again, so a correction
             // would be written here and never reach the server.
             canChangeIdentity: !!identity && !(uploadEntry && uploadEntry.state === 'failed'),
+            // Rename (SAA-135) asks the server, so only a capture it has: sent,
+            // and not still processing.
+            canRename: c.state !== 'pending' && !!(uploadEntry && uploadEntry.state === 'sent'),
+            // The line a refused rename left under this row (main.js), if any.
+            note: (opts.notes && typeof opts.notes[stem] === 'string') ? opts.notes[stem] : null,
         };
         row.line = identifyingLine(row);
         rows.push(row);
@@ -134,7 +139,7 @@ function listTrashed(dir) {
         rows.push({
             stem,
             startedAtMs,
-            title: calendarTitle(dir, stem),
+            title: meetingTitle(dir, stem),
             participants: participantsFor(dir, stem),
             durationSec: durationSecFor(manifest),
             trashedAtMs: Number.isFinite(trashedAtMs) ? trashedAtMs : null,

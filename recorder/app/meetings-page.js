@@ -27,6 +27,21 @@ let last = { rows: [], trashed: [], saving: false, busy: false };
 // what the current view still lists.
 const picked = new Set();
 let openMenu = null; // stem whose ⋯ menu is open
+// Rename… (SAA-135): the row whose title is a text field, and what is typed in
+// it, kept across the 5-second refresh so a redraw does not lose it.
+let editing = null;
+let editValue = '';
+let focusAfterRender = null;
+
+// The ⋯ menu's items for a row, in order. The page's own, so it loads no module
+// (SAA-243 window hardening); check-meetings.js runs this copy.
+function menuItems(r) {
+  const items = [];
+  if (r.canChangeIdentity) items.push('change-identity');
+  if (r.canRename) items.push('rename');
+  items.push('trash');
+  return items;
+}
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -182,13 +197,43 @@ function render() {
     row.appendChild(checkbox(r.stem, r.canTrash && !busy));
     const main = el('div', 'main');
     const top = el('div', 'top');
-    top.appendChild(el('span', 'title', r.title || 'Untitled'));
+    if (editing === r.stem) {
+      // Enter saves (main.js asks the server; the row shows its answer), Escape
+      // keeps the title as it was.
+      const input = el('input', 'title-edit');
+      input.type = 'text';
+      input.maxLength = 200;
+      input.value = editValue;
+      input.setAttribute('aria-label', 'Title');
+      input.addEventListener('input', () => { editValue = input.value; });
+      input.addEventListener('click', (e) => e.stopPropagation());
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const title = input.value;
+          editing = null;
+          render();
+          ipcRenderer.send('meetings:rename', { stem: r.stem, title });
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          editing = null;
+          render();
+        }
+      });
+      top.appendChild(input);
+      focusAfterRender = input;
+    } else {
+      top.appendChild(el('span', 'title', r.title || 'Untitled'));
+    }
     top.appendChild(el('span', 'when', [date, time, dur].filter(Boolean).join(' · ')));
     main.appendChild(top);
     main.appendChild(r.participants.length
       ? el('div', 'people', r.participants.join(', '))
       : el('div', 'people none', 'No one named'));
     if (r.line) main.appendChild(el('div', 'line', r.line));
+    // What a refused rename said; the title above is unchanged.
+    if (r.note) main.appendChild(el('div', 'line note', r.note));
     row.appendChild(main);
 
     const acts = el('div', 'acts');
@@ -203,8 +248,9 @@ function render() {
       fix.addEventListener('click', () => ipcRenderer.send('meetings:fix', { stem: r.stem }));
       acts.appendChild(fix);
     }
-    // ⋯ menu: Change attendees (when it has a saved answer), and
-    // Move to trash (not while the capture is still processing).
+    // ⋯ menu (menuItems): Change attendees (when it has a saved answer),
+    // Rename… (when the server has the capture), and Move to trash (not while
+    // the capture is still processing).
     const wrap = el('div', 'menuwrap');
     const more = el('button', null, '⋯');
     more.setAttribute('aria-haspopup', 'menu');
@@ -217,21 +263,30 @@ function render() {
     if (openMenu === r.stem) {
       const menu = el('div', 'menu');
       menu.setAttribute('role', 'menu');
-      if (r.canChangeIdentity) {
-        const c = el('button', null, 'Change attendees…');
-        c.setAttribute('role', 'menuitem');
-        c.addEventListener('click', () => { openMenu = null; render(); ipcRenderer.send('meetings:change-identity', { stem: r.stem }); });
-        menu.appendChild(c);
+      const actions = {
+        'change-identity': [() => el('button', null, 'Change attendees…'), () => { openMenu = null; render(); ipcRenderer.send('meetings:change-identity', { stem: r.stem }); }],
+        rename: [() => el('button', null, 'Rename…'), () => { openMenu = null; editing = r.stem; editValue = r.title || ''; render(); }],
+        trash: [() => el('button', null, 'Move to trash'), () => send('meetings:trash', [r.stem])],
+      };
+      for (const key of menuItems(r)) {
+        const [button, act] = actions[key];
+        const b = button();
+        b.setAttribute('role', 'menuitem');
+        b.addEventListener('click', (e) => { e.stopPropagation(); act(); });
+        menu.appendChild(b);
       }
-      const t = el('button', null, 'Move to trash');
-      t.setAttribute('role', 'menuitem');
-      t.addEventListener('click', () => send('meetings:trash', [r.stem]));
-      menu.appendChild(t);
       wrap.appendChild(menu);
     }
     acts.appendChild(wrap);
     row.appendChild(acts);
     listEl.appendChild(row);
+  }
+  // The title field just drawn, with the caret at the end of what is typed.
+  if (focusAfterRender) {
+    const input = focusAfterRender;
+    focusAfterRender = null;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
   }
 }
 

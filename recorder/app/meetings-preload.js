@@ -16,7 +16,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const SEND = ['meetings:ready', 'meetings:save', 'meetings:trash', 'meetings:restore', 'meetings:delete',
-    'meetings:fix', 'meetings:change-identity'];
+    'meetings:fix', 'meetings:change-identity', 'meetings:rename'];
 const ON = ['meetings:data'];
 
 function allowed(list, how, channel) {

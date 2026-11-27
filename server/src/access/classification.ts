@@ -104,6 +104,12 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
     requires: "capture",
     note: "people personVisibleTo allows whose name holds ?q=, most recently seen on a recording the caller can see first, at most 10; id and name only, never an address; writes nothing",
   },
+  // Recent meetings' titles in one request (SAA-135, routes/capture-scope.ts captureTitlesGet).
+  "GET /captures/titles": {
+    access: "member",
+    requires: "capture",
+    note: "the caller's own capture titles since ?since= (8 days by default, held to 31), not trashed, at most 500: captureId and title, null while it is the placeholder; never another member's capture; one access line, ids only",
+  },
 
   // The recorder's own captures (SAA-227, 10-11): a capture token for reads too,
   // and only the caller's own capture; anyone else's is the same 404 as one that
@@ -111,8 +117,9 @@ export const ROUTES: Record<string, { access: Access; requires: Requires; note: 
   "GET /captures/:captureId/transcript": { access: "owner", requires: "capture", note: "the saved transcript file of the caller's own capture, dated in ?tz= (IANA) when given; a trashed one is 404" },
   "POST /captures/:captureId/trash": { access: "owner", requires: "capture", note: "sets trashed_at on the caller's own capture" },
   "POST /captures/:captureId/restore": { access: "owner", requires: "capture", note: "clears trashed_at on the caller's own capture" },
+  "POST /captures/:captureId/title": { access: "owner", requires: "capture", note: "renames the caller's own capture (SAA-135): 1 to 200 characters, one line, else 400; title_source member, which no calendar match or fallback replaces; a trashed one is 404; the log line is ids and a length, never the title" },
   "DELETE /captures/:captureId": { access: "owner", requires: "capture", note: "deletes the caller's own capture, only from the trash (409 otherwise)" },
-  "GET /captures/:captureId/jobs": { access: "owner", requires: "capture", note: "kind, state and attempts of the caller's own capture's jobs, no error text; and its calendar match once one is done: title and invitee names (an address when there is no name)" },
+  "GET /captures/:captureId/jobs": { access: "owner", requires: "capture", note: "kind, state and attempts of the caller's own capture's jobs, no error text; its title as it stands (null while the placeholder, SAA-135); and its calendar match once one is done: title and invitee names (an address when there is no name)" },
 
   "GET /accounts/me": { access: "member", requires: "mcp", note: "the caller's own account and membership" },
 

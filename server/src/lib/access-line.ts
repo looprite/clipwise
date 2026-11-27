@@ -21,6 +21,7 @@ export const ACCESS_ROUTES = [
   "moment", //              GET /accounts/:accountId/moments/:id
   "moments.search", //      GET /accounts/:accountId/moments
   "capture.transcript", //  GET /captures/:captureId/transcript (the saved file)
+  "capture.titles", //      GET /captures/titles (SAA-135)
   "mcp.search_moments",
   "mcp.get_transcript",
 ] as const;
