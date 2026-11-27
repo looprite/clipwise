@@ -419,7 +419,7 @@ async function main(): Promise<void> {
           tokensSeen.push(token);
           const ev = eventFor[token];
           const items = ev
-            ? [{ id: `evt-${token.slice(11, 12)}`, summary: ev.title, start: { dateTime: "2026-10-10T10:00:30.000Z" }, attendees: [{ email: ev.invitee, displayName: null, responseStatus: "accepted" }] }]
+            ? [{ id: `evt-${token.slice(11, 12)}`, summary: ev.title, start: { dateTime: "2026-10-10T10:00:02.000Z" }, attendees: [{ email: ev.invitee, displayName: null, responseStatus: "accepted" }] }]
             : [];
           return Response.json({ items });
         }
