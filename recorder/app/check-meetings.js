@@ -318,37 +318,66 @@ check('without the processing capture, the tray item is the newest ready meeting
     fs.rmSync(c4, { recursive: true, force: true });
 }
 
-// ---- a sent capture whose jobs went unconfirmed (SAA-183) ---------------------
-// "stale" is a status unknown, not a failure: the server was not heard from in
-// time, and is asked again. A capture whose jobs failed, or that the server
-// refused (409), still says it couldn't be processed.
-//   S   every step ok, transcript lines, sent, jobs stale
-//   JF  the same, jobs failed on the server
-//   R   the same, refused by the server (409)
+// ---- a sent capture is ready once the server has stored it (SAA-370 step 1) ---
+// What the server's extraction job is doing no longer decides it: a capture sent
+// with the server's recording id is ready whether its jobs have not been asked
+// about yet, are running, failed, are none, or went unconfirmed ("stale",
+// SAA-183). Only a server that no longer has it ("gone") or an upload the server
+// refused makes it "Couldn't be processed", and one still waiting to be sent is
+// "Still processing". Every capture: every step ok, transcript lines.
+//   NJ    sent, jobs not asked about yet
+//   RUN   sent, jobs running (the newest capture, for lastMeeting)
+//   JF    sent, jobs failed on the server
+//   NONE  sent, no jobs on the server
+//   S     sent, jobs stale
+//   G     sent, the server no longer has it
+//   R     refused by the server (409)
+//   Q     queued, not sent yet
 {
     const lm = require('./last-meeting.js');
     const c5 = fs.mkdtempSync(path.join(os.tmpdir(), 'clipwise-meetings-stale-check-'));
-    const Q = path.join(c5, 'upload-queue');
-    fs.mkdirSync(Q);
+    const QDIR = path.join(c5, 'upload-queue');
+    fs.mkdirSync(QDIR);
     const cw = (name, doc) => fs.writeFileSync(path.join(c5, name), JSON.stringify(doc));
     const sentCapture = (stem, entry) => {
         cw(`manifest-${stem}.json`, { started_at: stem, tracks: [{ duration_s: 1800 }] });
         cw(`pipeline-${stem}.json`, { pipeline: 'capture', updated_at: new Date(NOW - 3600e3).toISOString(), steps: { transcribe: { state: 'ok' }, classify: { state: 'ok' }, diarize: { state: 'ok' } } });
         cw(`transcript-${stem}.json`, { segments: [{}, {}, {}] });
-        fs.writeFileSync(path.join(Q, `${stem}.json`), JSON.stringify({ stem, sentAt: new Date(NOW - 3000e3).toISOString(), ...entry }));
+        fs.writeFileSync(path.join(QDIR, `${stem}.json`), JSON.stringify({ stem, sentAt: new Date(NOW - 3000e3).toISOString(), ...entry }));
     };
-    const S = '2026-03-06T13-00-00Z', JF = '2026-03-06T14-00-00Z', R = '2026-03-06T15-00-00Z';
-    sentCapture(S, { state: 'sent', lastStatus: 201, recordingId: 'rid-s', jobState: 'stale', matchPending: false });
-    sentCapture(JF, { state: 'sent', lastStatus: 201, recordingId: 'rid-jf', jobState: 'failed', matchPending: false });
+    const Q = '2026-03-06T12-00-00Z', S = '2026-03-06T13-00-00Z', JF = '2026-03-06T14-00-00Z', R = '2026-03-06T15-00-00Z';
+    const NJ = '2026-03-06T16-00-00Z', NONE = '2026-03-06T17-00-00Z', G = '2026-03-06T18-00-00Z', RUN = '2026-03-06T19-00-00Z';
+    const sent = (id, jobState) => ({ state: 'sent', lastStatus: 201, recordingId: `rid-${id}`, jobState, matchPending: false });
+    sentCapture(NJ, sent('nj', null));
+    sentCapture(RUN, sent('run', 'running'));
+    sentCapture(JF, sent('jf', 'failed'));
+    sentCapture(NONE, sent('none', 'none'));
+    sentCapture(S, sent('s', 'stale'));
+    sentCapture(G, sent('g', 'gone'));
     sentCapture(R, { state: 'failed', lastStatus: 409, recordingId: null, jobState: null });
-    const rows = Object.fromEntries(listMeetings(c5, NOW, undefined, { uploadQueueDir: Q }).map((r) => [r.stem, r]));
-    const shown = (r) => JSON.stringify(r && { state: r.state, line: r.line });
-    check('SAA-183: every step ok, transcript lines, sent with jobs stale -> not failed, the row says "Status unknown"',
-        !!rows[S] && rows[S].state !== 'failed' && rows[S].line === 'Status unknown', shown(rows[S]));
-    check('control: jobs failed on the server -> "Couldn\'t be processed"',
-        !!rows[JF] && rows[JF].state === 'failed' && rows[JF].line.startsWith("Couldn't be processed"), shown(rows[JF]));
-    check('control: refused by the server (409) -> "Couldn\'t be processed"',
+    sentCapture(Q, { state: 'queued', attempts: 0, recordingId: null, jobState: null });
+    const rows = Object.fromEntries(listMeetings(c5, NOW, undefined, { uploadQueueDir: QDIR }).map((r) => [r.stem, r]));
+    const shown = (r) => JSON.stringify(r && { state: r.state, line: r.line, canSave: r.canSave });
+    const ready = (r) => !!r && r.state === 'ready' && r.canSave === true && r.line === '';
+    for (const [name, stem] of [
+        ['NJ sent, jobs not asked about yet', NJ],
+        ['RUN sent, jobs running', RUN],
+        ['JF sent, jobs failed on the server', JF],
+        ['NONE sent, no jobs on the server', NONE],
+        ['S sent, jobs stale (SAA-183)', S],
+    ]) {
+        check(`SAA-370: ${name} -> ready, Save transcript on, no state line`, ready(rows[stem]), shown(rows[stem]));
+    }
+    check('SAA-370 G: sent, the server no longer has it -> "Couldn\'t be processed"',
+        !!rows[G] && rows[G].state === 'failed' && rows[G].line.startsWith("Couldn't be processed"), shown(rows[G]));
+    check('control R: refused by the server (409) -> "Couldn\'t be processed"',
         !!rows[R] && rows[R].state === 'failed' && rows[R].line.startsWith("Couldn't be processed"), shown(rows[R]));
+    check('control Q: queued, not sent yet -> "Still processing"',
+        !!rows[Q] && rows[Q].state === 'pending' && rows[Q].line === 'Still processing', shown(rows[Q]));
+    const last = lm.lastMeeting(c5, NOW, { uploadQueueDir: QDIR });
+    check('SAA-370: lastMeeting gives the newest capture (RUN, jobs running) as ready, with its recording id',
+        !!last && last.state === 'ready' && last.stem === RUN && last.recordingId === 'rid-run',
+        JSON.stringify(last && { state: last.state, stem: last.stem === RUN ? 'RUN' : last.stem, recordingId: last.recordingId }));
 
     // The poll decision, driven as pollJobStates drives it: each ask at the time
     // the entry says it is next due (every 20 s when it says nothing), no reply

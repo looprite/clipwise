@@ -57,6 +57,8 @@ function startStopLabel(active) {
 // "9:00 AM"; stemTimeMs(stem) is when a capture started; day is the Mac's
 // local { weekday(ms), date(ms) } formats, e.g. "Mon" and "Nov 3", for
 // dayAndTime.
+// A sent upload holding the server's recording id is ready, whatever its
+// extraction job is doing (SAA-370 step 1), unless the server no longer has it.
 function trayStatusLine(s, time, stemTimeMs, day) {
     if (s.state === 'starting') return 'Starting recording…';
     if (s.state === 'recording') return `Recording · started ${time(s.startedAtMs)}`;
@@ -69,6 +71,7 @@ function trayStatusLine(s, time, stemTimeMs, day) {
     if (!u) return 'Stopped';
     if (u.state === 'queued') return u.attempts > 0 ? 'Stopped · last call retrying upload' : 'Stopped · last call processing';
     if (u.state === 'failed') return "Stopped · last call didn't upload — see Recent meetings";
+    if (u.state === 'sent' && u.recordingId && u.jobState !== 'gone') return `Stopped · last call ready ${dayAndTime(stemTimeMs(u.stem), s.nowMs, time, day)}`;
     if (u.jobState === 'done') return `Stopped · last call ready ${dayAndTime(stemTimeMs(u.stem), s.nowMs, time, day)}`;
     if (u.jobState === 'failed') return 'Stopped · last call failed to process — see Recent meetings';
     if (u.jobState === 'none') return 'Stopped · last call uploaded';

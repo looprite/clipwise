@@ -131,13 +131,15 @@ function renameOutcome(reply, signedIn) {
 
 // A capture the capture pipeline (capture-cli.ts, SAA-227) handled:
 // what this Mac does ends at the upload, and the rest is the server's. Ready once
-// the capture was sent and its server jobs are done, as its upload-queue entry
-// records them (main.js pollJobStates); the recording id is the server's.
-// Failed when the server refused it, or its jobs failed, are gone, or there were
-// none. Unknown when its jobs went unconfirmed past the polling limit ("stale"):
-// nothing says they failed, and the server is asked again (SAA-183). Pending
-// while it waits to be sent or its jobs run. With no entry, it is pending only
-// while its pipeline was recently active, like a pre-cutover capture.
+// the server has stored it (SAA-370 step 1): its upload-queue entry is sent and
+// holds the server's recording id, whatever its extraction job is doing, since the
+// server marks it ready in the request that stores the transcript. Failed when the
+// upload failed or the server no longer has it ("gone"). Pending while it waits to
+// be sent. With no entry, it is pending only while its pipeline was recently
+// active, like a pre-cutover capture. A sent entry without a recording id (no
+// server reply leaves one) is read from its jobs as before: failed when they
+// failed or there were none, unknown when they went unconfirmed past the polling
+// limit ("stale", SAA-183).
 const SERVER_CAPTURE_FAILED_JOBS = new Set(['failed', 'gone', 'none']);
 
 // Whether a pipeline record shows every step finished: ok, or skipped.
@@ -156,7 +158,8 @@ function classifyServerCapture(dir, stem, pipeline, title, now, uploadQueueDir) 
     if (!(lines && lines > 0)) return { state: 'nospeech', stem, title };
     const entry = uploadQueueDir ? readJson(path.join(uploadQueueDir, `${stem}.json`)) : null;
     if (!entry) return { state: recentlyActive ? 'pending' : 'failed', stem, title };
-    if (entry.state === 'sent' && entry.jobState === 'done' && entry.recordingId) {
+    // Stored on the server is ready (SAA-370 step 1); only "gone" undoes it.
+    if (entry.state === 'sent' && entry.recordingId && entry.jobState !== 'gone') {
         return { state: 'ready', stem, title, recordingId: entry.recordingId };
     }
     if (entry.state === 'failed') return { state: 'failed', stem, title };
