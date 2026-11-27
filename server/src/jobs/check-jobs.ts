@@ -659,7 +659,7 @@ async function main(): Promise<void> {
       const jobs = await runToEnd(worker(stub, makeStubEmbedder()), recordingId);
       const rec = await recOf(recordingId);
       check("i three Anthropic failures end the job failed with attempts 3, an error class, and a last_error that holds none of the API's words", jobs[0].state === "failed" && jobs[0].attempts === 3 && jobs[0].errorClass === "BadRequestError" && !!jobs[0].lastError && !jobs[0].lastError.includes(PHRASE) && !jobs[0].lastError.includes("quoted back"), JSON.stringify({ state: jobs[0].state, attempts: jobs[0].attempts, errorClass: jobs[0].errorClass, lastError: jobs[0].lastError }));
-      check("i the recording stays pending, with no moments and no current run", rec.status === "pending" && rec.run === null && (await momentsOf(recordingId)).length === 0, JSON.stringify(rec));
+      check("i the recording stays ready from its upload, with no moments and no current run", rec.status === "ready" && rec.run === null && (await momentsOf(recordingId)).length === 0, JSON.stringify(rec));
       check("i each attempt called Anthropic once (a 400 is not retried by the SDK)", stub.calls.length === 3, String(stub.calls.length));
       const later = worker(model(), makeStubEmbedder());
       later.wake();
@@ -781,7 +781,7 @@ async function main(): Promise<void> {
         process.env.ANTHROPIC_API_KEY = "stub-key";
       }
       check("j a missing ANTHROPIC_API_KEY fails the job without using an attempt, with no Anthropic call", jobs[0].state === "failed" && jobs[0].attempts === 0 && jobs[0].errorClass === "MissingApiKeyError" && stub.calls.length === 0, JSON.stringify({ state: jobs[0].state, attempts: jobs[0].attempts, errorClass: jobs[0].errorClass, calls: stub.calls.length }));
-      check("j the recording stays pending", (await recOf(recordingId)).status === "pending");
+      check("j the recording stays ready from its upload, with no current run", (await recOf(recordingId)).status === "ready" && (await recOf(recordingId)).run === null);
     }
 
     // ---- d ---------------------------------------------------------------------
@@ -803,7 +803,7 @@ async function main(): Promise<void> {
       await w.stop();
       const rec = await recOf(recordingId);
       const [job] = await jobsOf(recordingId);
-      check("d a job whose lease was taken away runs to the end but cannot promote: the recording is still pending with no current run", rec.status === "pending" && rec.run === null && stub.calls.length === 4, JSON.stringify({ rec, calls: stub.calls.length }));
+      check("d a job whose lease was taken away runs to the end but cannot promote: the recording is still ready from its upload, with no current run", rec.status === "ready" && rec.run === null && stub.calls.length === 4, JSON.stringify({ rec, calls: stub.calls.length }));
       check("d and it does not mark the job done: the row still belongs to whoever holds the new token", job.state === "running" && job.leaseToken !== null, JSON.stringify({ state: job.state }));
 
       // d2: the renewal is on and finds the token gone: the job stands down at once.
@@ -827,7 +827,7 @@ async function main(): Promise<void> {
       const stoodDownAfter = Date.now() - t0;
       await w2.stop();
       const rec2 = await recOf(r2.recordingId);
-      check("d with renewal on, the renewal finds the token gone and aborts the in-flight call: no further call, nothing promoted, well inside the call's 5 s", stub2.calls.length === 1 && rec2.status === "pending" && rec2.run === null && stoodDownAfter < 4000, JSON.stringify({ calls: stub2.calls.length, rec: rec2, stoodDownAfterMs: stoodDownAfter }));
+      check("d with renewal on, the renewal finds the token gone and aborts the in-flight call: no further call, nothing promoted, well inside the call's 5 s", stub2.calls.length === 1 && rec2.status === "ready" && rec2.run === null && stoodDownAfter < 4000, JSON.stringify({ calls: stub2.calls.length, rec: rec2, stoodDownAfterMs: stoodDownAfter }));
     }
 
     // ---- c2 with the worker -------------------------------------------------------
@@ -901,7 +901,10 @@ async function main(): Promise<void> {
     // POST /captures refuses every shape but the recorder's (check-access case 13),
     // so the others are put on the row directly: the promotion reads defensively
     // all the same, because one that raised would fail the job three times and
-    // leave the recording pending for good.
+    // leave the recording without a current run for good. The upload has already
+    // written duration_sec and ended_at from the recorder's tracks (SAA-370 step 1),
+    // so they are cleared with the tracks, as on a row stored with that shape: what
+    // the promotion then writes is what it read from the shape alone.
     if (wanted("dur")) {
       const shapes: [string, unknown, number | null][] = [
         ["an array of tracks with duration_s (the recorder's shape)", TRACKS, 5.2],
@@ -915,7 +918,7 @@ async function main(): Promise<void> {
         await clearJobs();
         const p = payload();
         const recordingId = String((await post(p)).json.recordingId);
-        await pool.query(`update recordings set metadata = jsonb_set(metadata, '{capture,tracks}', $2::jsonb) where id = $1`, [recordingId, JSON.stringify(tracks)]);
+        await pool.query(`update recordings set metadata = jsonb_set(metadata, '{capture,tracks}', $2::jsonb), duration_sec = null, ended_at = null where id = $1`, [recordingId, JSON.stringify(tracks)]);
         const jobs = await runToEnd(worker(model(), makeStubEmbedder()), recordingId);
         const row = (await pool.query("select status, duration_sec from recordings where id = $1", [recordingId])).rows[0];
         check(`dur capture.tracks as ${name}: the job is done, the recording ready, duration_sec ${want ?? "null"}`, jobs[0].state === "done" && row.status === "ready" && (want === null ? row.duration_sec === null : Math.abs(Number(row.duration_sec) - want) < 1e-9), JSON.stringify({ job: jobs[0].state, error: jobs[0].lastError, row }));
@@ -1021,7 +1024,7 @@ async function main(): Promise<void> {
         check("f SIGTERM: the process exits 0 inside the 10 s drain cap", !!ex && ex.code === 0 && ex.t - sigAt < 10_000, JSON.stringify({ code: ex?.code, signal: ex?.signal, ms: ex ? ex.t - sigAt : null }));
         check("f the abort reached the model call (its connection closed) and the job was requeued before the exit", closedAt > sigAt && requeuedAt > sigAt && !!ex && requeuedAt <= ex.t, JSON.stringify({ closed: since(closedAt), requeued: since(requeuedAt) }));
         check("f the job is queued again with attempts unchanged and no lease", after.state === "queued" && after.attempts === before.attempts && after.leaseToken === null && after.leaseExpiresAt === null, JSON.stringify({ state: after.state, attemptsBefore: before.attempts, attemptsAfter: after.attempts, hasLease: after.leaseToken !== null, hasExpiry: after.leaseExpiresAt !== null }));
-        check("f no rows left: no moments for the recording, it is still pending with no current run, and this is the only job", moments.length === 0 && rec.status === "pending" && rec.run === null && allJobs === 1, JSON.stringify({ moments: moments.length, rec, jobs: allJobs }));
+        check("f no rows left: no moments for the recording, it is still ready from its upload with no current run, and this is the only job", moments.length === 0 && rec.status === "ready" && rec.run === null && allJobs === 1, JSON.stringify({ moments: moments.length, rec, jobs: allJobs }));
         // Then the job finishes, on one attempt: the shutdown's was not counted.
         const jobs = await runToEnd(worker(model(), makeStubEmbedder()), recordingId);
         check("f afterwards the job runs to done with attempts 1", jobs.length === 1 && jobs[0].state === "done" && jobs[0].attempts === 1 && (await recOf(recordingId)).status === "ready", JSON.stringify(jobs.map((j) => [j.state, j.attempts])));

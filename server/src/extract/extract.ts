@@ -581,11 +581,11 @@ export class LeaseLostError extends Error {
   }
 }
 
-// The status a recording carries once a run has been promoted onto it. The
-// promotion below is the only thing that writes it on the capture path, and
-// both the recovery loop and the double-extract guard (SAA-136) read it to
-// decide what still needs running — so it is named once here rather than
-// spelled out as a literal at each site.
+// The status a recording carries once its transcript is stored. On the capture
+// path POST /captures writes it (SAA-370 step 1, READY_COLUMNS below); the
+// promotion writes it again, and is what writes it on every other path. It does
+// not say moments exist: current_extraction_run does, and readExtractionCompletion
+// and enqueueReextractForLateNames require both.
 export const TERMINAL_STATUS = "ready";
 
 // Has this recording already finished a run? The inverse of what the promotion
@@ -595,9 +595,9 @@ export const TERMINAL_STATUS = "ready";
 // existed, and recording `failed_partial` for a run that died in pass 1 having
 // written nothing.
 //
-// Requires both halves. A terminal status without a promoted run would be a
-// row that claims to be done while search returns nothing for it; treating
-// that as incomplete is the safe reading.
+// Requires both halves. Since SAA-370 step 1 a capture is ready from its upload,
+// before any run, so the status alone says nothing about extraction; the promoted
+// run is the half that does.
 export type ExtractionCompletion = {
   exists: boolean;
   status: string | null;
@@ -649,6 +649,32 @@ export const CAPTURE_DURATION_SEC = sql`(
   WHERE jsonb_typeof(t->'duration_s') = 'number'
 )`;
 
+// The columns that say a recording is ready (SAA-134; SAA-370 step 1): its status,
+// and the capture's measured length and wall-clock end, read from the manifest the
+// row carries (metadata.capture.tracks). POST /captures writes them in the
+// transaction that stores the transcript (routes/captures.ts); the promotion
+// writes them again, and since metadata.capture is not rewritten after the insert,
+// the values come out the same.
+//
+// duration_sec is the tracks' length, not re-derived from segments: segments stop
+// at the last utterance, the tracks run to the end of the capture, and it is the
+// capture this column describes. max() across tracks because the tap and mic stop
+// a fraction of a second apart. ended_at is started_at (from the manifest) plus
+// that, the same clock; it stays null when the length is unknown rather than
+// borrowing "now", which would mean something else.
+//
+// Both coalesce: a value already on the row (a Fathom import's, or one a data
+// cleanup measured, metadata.duration_source) is not replaced by a null when the
+// manifest has no number.
+export const READY_COLUMNS = {
+  status: TERMINAL_STATUS,
+  durationSec: sql`coalesce(${CAPTURE_DURATION_SEC}, ${schema.recordings.durationSec})`,
+  endedAt: sql`coalesce(
+    ${schema.recordings.startedAt} + make_interval(secs => ${CAPTURE_DURATION_SEC}),
+    ${schema.recordings.endedAt}
+  )`,
+};
+
 // Promote a recording to `current_extraction_run`. The search gate
 // (routes/moments.ts:110) joins on
 //   moment.metadata.extraction_run = recording.metadata.current_extraction_run
@@ -665,10 +691,10 @@ export const CAPTURE_DURATION_SEC = sql`(
 // carry other keys (transcript source paths, capture stamps, etc.) that this
 // update must not clobber.
 //
-// status/ended_at/duration_sec ride along on this same statement (SAA-134).
-// They belong to the same fact the promotion already asserts — the capture
-// finished processing — so there is no window in which a row claims a
-// terminal status without a current run, or the reverse.
+// READY_COLUMNS ride along on this same statement (SAA-134). On the capture path
+// POST /captures has already written them (SAA-370 step 1) and this writes the
+// same values; on the other paths (ingest/clipwise.ts, routes/recordings.ts) this
+// is still what makes the row ready.
 //
 // Deliberately NOT idempotent-guarded with coalesce on status: a re-extract
 // (or a first extract of a zero-segment capture) that reaches here succeeded,
@@ -702,7 +728,7 @@ async function promoteRecording(
     `extract: promoted current_extraction_run = ${runUuid} on recording ${recordingId}`,
   );
   console.log(
-    `extract: marked recording ${recordingId} status=ready (ended_at and duration_sec from capture manifest)`,
+    `extract: recording ${recordingId} status=ready (ended_at and duration_sec from capture manifest, unchanged on a capture)`,
   );
 }
 
@@ -715,29 +741,7 @@ async function promoteStatement(
   await tx
     .update(schema.recordings)
     .set({
-      // Terminal status. "ready" matches the vocabulary transcripts already
-      // use (schema.ts:112, set at ingest) and reads as what promotion means:
-      // this recording's moments (zero or more) are now what search returns.
-      status: TERMINAL_STATUS,
-      // The measured capture length, read back from the manifest the ingest
-      // step already denormalised onto this row (ingest/clipwise.ts:352-360),
-      // not re-derived from segments. Segments stop at the last utterance;
-      // the tracks run to the end of the capture, and it is the capture this
-      // column describes. max() across tracks because the tap and mic stop a
-      // fraction of a second apart and the capture is not over until both are.
-      //
-      // Null for rows with no capture block — Fathom imports have no manifest
-      // and nothing measured a duration for them. Leaving it null is honest;
-      // inventing one from segment bounds would not be.
-      durationSec: sql`coalesce(${CAPTURE_DURATION_SEC}, ${schema.recordings.durationSec})`,
-      // Wall-clock end of the recording, not of the processing run: started_at
-      // came from the manifest, so started_at + measured duration is the same
-      // clock. A row whose duration is unknown keeps a null ended_at rather
-      // than borrowing "now", which would silently mean something else.
-      endedAt: sql`coalesce(
-        ${schema.recordings.startedAt} + make_interval(secs => ${CAPTURE_DURATION_SEC}),
-        ${schema.recordings.endedAt}
-      )`,
+      ...READY_COLUMNS,
       // extraction_speaker_fingerprint: the speaker names this run was built on
       // (hashOf), so a later re-extract job can tell whether names changed since.
       metadata: sql`coalesce(${schema.recordings.metadata}, '{}'::jsonb) || jsonb_build_object('current_extraction_run', ${runUuid}::text, 'extraction_speaker_fingerprint', ${hashOf(builtOnFingerprint)}::text)`,

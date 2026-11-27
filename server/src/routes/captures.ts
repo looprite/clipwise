@@ -47,8 +47,10 @@
 // "Same content" is a SHA-256 of the segments as sent, without their voice indexes
 // (metadata.capture.content_hash).
 //
-// The extraction job is queued in the same transaction as the capture, so a stored
-// capture always has one; so is a calendar match job, when the owner has a
+// A new capture is stored ready: status, duration_sec and ended_at (SAA-370 step
+// 1, extract.ts READY_COLUMNS). The extraction job is queued in the same
+// transaction as the capture, so a stored capture always has one; so is a
+// calendar match job, when the owner has a
 // calendar connected (SAA-227 part F). The end of the request is afterStore(): answer 201, then
 // wake the worker. A repeat creates no job, except that an identity answer or
 // voice names that name a speaker after extraction has started or finished queue
@@ -72,7 +74,7 @@ import {
   storeIdentityMetadata,
   type IdentityAnswer,
 } from "../ingest/identity.js";
-import { speakerFingerprintHash } from "../extract/extract.js";
+import { READY_COLUMNS, speakerFingerprintHash } from "../extract/extract.js";
 import { applyInviteeNames, describeInviteeNames, ownerAddressesFor } from "../ingest/invitee-names.js";
 import {
   chosenPeople,
@@ -646,6 +648,13 @@ export const capturesPost: RequestHandler = asyncHandler(async (req, res) => {
         `capture fidelity readback: expected ${expected.turnCount}/${expected.bodyChars}, stored ${stored.turnCount}/${stored.bodyChars}`,
       );
     }
+
+    // Ready once the transcript is stored and read back (SAA-370 step 1): status,
+    // duration_sec and ended_at from the manifest stored above, by the promotion's
+    // own expressions (extract.ts READY_COLUMNS). Extraction no longer decides it;
+    // current_extraction_run says whether moments exist. A repeat writes nothing
+    // here: a capture stored before this change becomes ready at its promotion.
+    await tx.update(schema.recordings).set(READY_COLUMNS).where(eq(schema.recordings.id, recording.id));
 
     const jobId = await enqueueJob(tx, { accountId: ctx.accountId, recordingId: recording.id, kind: "extract" });
     // The calendar match, beside extraction and in no set order with it (SAA-227

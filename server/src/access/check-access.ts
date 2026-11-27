@@ -614,11 +614,11 @@ async function main(): Promise<void> {
 
     // 3. The owner and the account come from the token, not the body; the server sets the rest.
     {
-      const p = capPayload({ extra: { ownerMemberId: B.memberId, owner_member_id: B.memberId, accountId: randomUUID(), account_id: randomUUID(), visibility: "shared", source: "elsewhere", sourceId: "mine", slug: "hijack", status: "ready", title: "hijack", scope: "personal" } });
+      const p = capPayload({ extra: { ownerMemberId: B.memberId, owner_member_id: B.memberId, accountId: randomUUID(), account_id: randomUUID(), visibility: "shared", source: "elsewhere", sourceId: "mine", slug: "hijack", status: "pending", title: "hijack", scope: "personal" } });
       const r = await capPost(A, p);
       const row = (await capRows(p.captureId))[0];
       record(
-        r.status === 201 && row?.owner_member_id === A.memberId && row.account_id === acc && row.source === "clipwise-recorder" && row.source_id === p.captureId && row.visibility === "private" && row.status === "pending" && String(row.title).startsWith("Clipwise capture") && row.slug === expectSlug(p.stem, p.captureId) && row.scope === null,
+        r.status === 201 && row?.owner_member_id === A.memberId && row.account_id === acc && row.source === "clipwise-recorder" && row.source_id === p.captureId && row.visibility === "private" && row.status === "ready" && String(row.title).startsWith("Clipwise capture") && row.slug === expectSlug(p.stem, p.captureId) && row.scope === null,
         "captures 3: the owner and account come from the token; source, title, slug, status and visibility are the server's, whatever the body says; an uppercase captureId is stored as sent",
         `${r.status}; owner ${row?.owner_member_id === A.memberId ? "A" : row?.owner_member_id}; ${row?.source}/${row?.source_id}; ${row?.visibility}/${row?.status}; ${row?.slug}`,
       );
