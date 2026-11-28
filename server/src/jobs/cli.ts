@@ -4,6 +4,7 @@
 //   tsx src/jobs/cli.ts list [--limit N]
 //   tsx src/jobs/cli.ts retry <job id>
 //   tsx src/jobs/cli.ts match-backlog [--queue]
+//   tsx src/jobs/cli.ts embed-backlog [--queue]
 //
 // list prints one line per job, newest first (50 unless --limit): its id, the
 // recording's id, kind, state, attempts, the error's class, and its times. Ids,
@@ -27,6 +28,15 @@
 // for each, in one transaction, and says how many it queued; a second run finds
 // none, since each now has a match job. The running server is not told, as for
 // retry: the jobs run when its worker next looks at the table.
+//
+// embed-backlog (SAA-370 step 2) lists the recordings that have transcript lines
+// and no transcript windows, and no embed_lines job of any state (a failed one
+// is for retry). One line each: the recording's id, its segment count and its
+// start time; ids, counts and times only. Without --queue it only lists. With
+// --queue it lists and queues one embed_lines job for each, in one transaction,
+// and says how many; a second run finds none. The server's worker does the
+// reading and the embedding, behind any other kind of job; this reads no call
+// text. The running server is not told, as for retry.
 //
 // Exit code 0 on success, 1 on a refusal or failure; messages say which.
 
@@ -136,6 +146,47 @@ async function matchBacklog(queue: boolean): Promise<void> {
   }
 }
 
+const EMBED_BACKLOG_SQL = `
+  select r.id, r.account_id, r.started_at,
+         (select count(*)::int from segments s where s.recording_id = r.id) as segments
+  from recordings r
+  where exists (select 1 from segments s where s.recording_id = r.id)
+    and not exists (select 1 from transcript_windows w where w.recording_id = r.id)
+    and not exists (select 1 from jobs j where j.recording_id = r.id and j.kind = 'embed_lines')
+  order by r.started_at nulls last, r.id`;
+
+type EmbedBacklogRow = { id: string; account_id: string; started_at: Date | null; segments: number };
+
+async function embedBacklog(queue: boolean): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const rows = (await client.query<EmbedBacklogRow>(queue ? `${EMBED_BACKLOG_SQL} for update of r` : EMBED_BACKLOG_SQL)).rows;
+    say(`${rows.length} recording(s) with transcript lines and no windows or embed_lines job`);
+    for (const r of rows) process.stdout.write(`  ${r.id} segments=${r.segments} started=${at(r.started_at)}\n`);
+    if (!queue) {
+      await client.query("rollback");
+      say("listed only; run again with --queue to queue an embed_lines job for each");
+      return;
+    }
+    let queued = 0;
+    for (const r of rows) {
+      const ins = await client.query(
+        `insert into jobs (account_id, recording_id, kind) values ($1, $2, 'embed_lines') on conflict do nothing`,
+        [r.account_id, r.id],
+      );
+      queued += ins.rowCount ?? 0;
+    }
+    await client.query("commit");
+    say(`queued ${queued} embed_lines job(s) (they run when the server's worker next looks, behind any other kind)`);
+  } catch (err) {
+    await client.query("rollback").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   const { values, positionals } = parseArgs({
@@ -150,8 +201,10 @@ async function main(): Promise<void> {
       return retry(positionals[0]);
     case "match-backlog":
       return matchBacklog(values.queue === true);
+    case "embed-backlog":
+      return embedBacklog(values.queue === true);
     default:
-      throw new Refusal("usage: list [--limit N] | retry <job id> | match-backlog [--queue] (see the header of src/jobs/cli.ts)");
+      throw new Refusal("usage: list [--limit N] | retry <job id> | match-backlog [--queue] | embed-backlog [--queue] (see the header of src/jobs/cli.ts)");
   }
 }
 

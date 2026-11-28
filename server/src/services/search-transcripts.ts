@@ -21,20 +21,36 @@
 // Order: search_moments' round-robin (SAA-108). Every call's first hit comes
 // before any call's second, newest call first at each depth, so a list cut by
 // `limit` still spans calls.
+//
+// By meaning (SAA-370 step 2): `semanticQuery` instead of `query`, exactly one of
+// the two. The same calls (the same conditions, built once below), then the
+// transcript windows of those calls (transcript_windows, jobs/embed-lines.ts),
+// nearest first by cosine distance to the query's vector (input_type "query";
+// Decision 13). A window that overlaps a nearer kept one of the same call is
+// dropped, so overlap doesn't fill the page. Each hit is the window's lines
+// exactly as get_transcript prints them now (current names). The answer says
+// how many calls in scope have windows (callsSearched) and how many don't yet
+// (callsNotYetSearchable), since a call not yet embedded is not an absence.
+// HNSW with iterative scan in strict order, so filtering to the caller's calls
+// can't leave a short page (pgvector 0.8; ef_search alone caps a scan).
 
-import { and, asc, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
+import { cosineDistance } from "drizzle-orm/sql/functions/vector";
 import { z } from "zod";
 import type { AccessContext } from "../access/context.js";
 import { recordingVisibleTo } from "../access/visibility.js";
 import { db, schema } from "../db/index.js";
 import { micSharedIn } from "../ingest/identity.js";
+import { WINDOW_RULE } from "../jobs/embed-lines.js";
 import { HttpError } from "../lib/http.js";
 import { UNATTRIBUTED, displayTitle, formatTimestamp, type FileSegment } from "../lib/transcript-file.js";
+import { embed } from "../lib/voyage.js";
 import { pushDateRangeConditions } from "./search-moments.js";
 import { transcriptLines } from "./transcript-page.js";
 
 export const searchTranscriptsQuerySchema = z.object({
-  query: z.string().max(512),
+  query: z.string().max(512).optional(),
+  semanticQuery: z.string().min(1).max(2048).optional(),
   recordingId: z.string().uuid().optional(),
   scope: z.enum(["work", "personal", "all"]).optional(),
   limit: z.number().int().min(1).max(200).optional(),
@@ -42,6 +58,9 @@ export const searchTranscriptsQuerySchema = z.object({
   dateTo: z.string().datetime().optional(),
 });
 export type SearchTranscriptsQuery = z.infer<typeof searchTranscriptsQuerySchema>;
+
+export const SEMANTIC_DEFAULT_LIMIT = 10;
+export const SEMANTIC_MAX_LIMIT = 50;
 
 export type TranscriptHit = {
   recordingId: string;
@@ -56,17 +75,28 @@ export type TranscriptHit = {
   after: string[];
 };
 
-const r = schema.recordings;
+export type MeaningHit = {
+  recordingId: string;
+  recordingTitle: string;
+  startedAt: string | null;
+  segment: number;
+  lastSegment: number;
+  time: string;
+  startSec: number;
+  similarity: number;
+  embeddingModel: string;
+  lines: string[];
+};
 
-export async function searchTranscripts(ctx: AccessContext, query: SearchTranscriptsQuery) {
-  const words = query.query.split(/\s+/).filter(Boolean).map((w) => w.toLowerCase());
-  if (words.length === 0) throw new HttpError(400, "query_has_no_words");
+const r = schema.recordings;
+const w = schema.transcriptWindows;
+
+// The calls a search reads, for both paths: visible, not trashed, the scope and
+// the dates; a recordingId the caller can't see is the same 404 as one that
+// doesn't exist.
+async function callsInScope(ctx: AccessContext, query: SearchTranscriptsQuery) {
   const resolvedScope = query.scope ?? "work";
   const scopeDefaulted = query.scope === undefined;
-  const limit = query.limit ?? 50;
-
-  // Asked for one call: it must be one the caller can see, whatever the scope,
-  // or it's the same "not found" as a call that isn't there.
   if (query.recordingId) {
     const [seen] = await db
       .select({ id: r.id })
@@ -74,20 +104,23 @@ export async function searchTranscripts(ctx: AccessContext, query: SearchTranscr
       .where(and(eq(r.id, query.recordingId), isNull(r.trashedAt), recordingVisibleTo(ctx)));
     if (!seen) throw new HttpError(404, "recording_not_found");
   }
-
   const conditions: (SQL | undefined)[] = [recordingVisibleTo(ctx), isNull(r.trashedAt)];
   if (query.recordingId) conditions.push(eq(r.id, query.recordingId));
   pushDateRangeConditions(conditions, query);
   if (resolvedScope === "work") conditions.push(or(isNull(r.scope), eq(r.scope, "work")));
   else if (resolvedScope === "personal") conditions.push(eq(r.scope, "personal"));
-
-  const empty = { hits: [] as TranscriptHit[], totalMatches: 0, truncated: false, scope: resolvedScope, scopeDefaulted };
   const recordings = await db
     .select({ id: r.id, title: r.title, startedAt: r.startedAt, metadata: r.metadata })
     .from(r)
     .where(and(...conditions));
-  if (recordings.length === 0) return empty;
+  return { recordings, resolvedScope, scopeDefaulted };
+}
+
+// Each call's lines as get_transcript renders them, keyed by recording.
+async function linesOf(recordings: Array<{ id: string; metadata: unknown }>) {
   const ids = recordings.map((x) => x.id);
+  const out = new Map<string, { segs: FileSegment[]; names: Map<string | null, string>; texts: string[]; lines: (string | null)[] }>();
+  if (ids.length === 0) return out;
 
   // The host attendee's name, for a `me` row with no name of its own, as
   // getTranscriptPage finds it.
@@ -106,7 +139,7 @@ export async function searchTranscripts(ctx: AccessContext, query: SearchTranscr
     .where(inArray(schema.transcripts.recordingId, ids))
     .orderBy(asc(schema.transcripts.createdAt));
   for (const t of transcriptRows) if (!firstTranscript.has(t.recordingId)) firstTranscript.set(t.recordingId, t.id);
-  if (firstTranscript.size === 0) return empty;
+  if (firstTranscript.size === 0) return out;
 
   const segmentRows = await db
     .select({
@@ -128,11 +161,32 @@ export async function searchTranscripts(ctx: AccessContext, query: SearchTranscr
     byTranscript.set(s.transcriptId, list);
   }
 
-  const matches: Array<TranscriptHit & { rank: number; startedMs: number }> = [];
   for (const rec of recordings) {
     const segs = byTranscript.get(firstTranscript.get(rec.id) ?? "") ?? [];
     if (segs.length === 0) continue;
-    const { names, texts, lines } = transcriptLines(segs, hosts.get(rec.id) ?? null, micSharedIn(rec.metadata));
+    out.set(rec.id, { segs, ...transcriptLines(segs, hosts.get(rec.id) ?? null, micSharedIn(rec.metadata)) });
+  }
+  return out;
+}
+
+export async function searchTranscripts(ctx: AccessContext, query: SearchTranscriptsQuery) {
+  if ((query.query === undefined) === (query.semanticQuery === undefined)) {
+    throw new HttpError(400, "pass_exactly_one_of_query_or_semanticQuery");
+  }
+  if (query.semanticQuery !== undefined) return searchTranscriptsByMeaning(ctx, query, query.semanticQuery);
+  const words = query.query!.split(/\s+/).filter(Boolean).map((x) => x.toLowerCase());
+  if (words.length === 0) throw new HttpError(400, "query_has_no_words");
+  const limit = query.limit ?? 50;
+  const { recordings, resolvedScope, scopeDefaulted } = await callsInScope(ctx, query);
+  const empty = { hits: [] as TranscriptHit[], totalMatches: 0, truncated: false, scope: resolvedScope, scopeDefaulted };
+  if (recordings.length === 0) return empty;
+  const rendered = await linesOf(recordings);
+
+  const matches: Array<TranscriptHit & { rank: number; startedMs: number }> = [];
+  for (const rec of recordings) {
+    const got = rendered.get(rec.id);
+    if (!got) continue;
+    const { segs, names, texts, lines } = got;
     const shown = lines.flatMap((l, i) => (l === null ? [] : [i]));
     let rank = 0;
     shown.forEach((i, k) => {
@@ -160,4 +214,69 @@ export async function searchTranscripts(ctx: AccessContext, query: SearchTranscr
   );
   const hits = matches.slice(0, limit).map(({ rank: _rank, startedMs: _startedMs, ...hit }) => hit);
   return { hits, totalMatches: matches.length, truncated: matches.length > hits.length, scope: resolvedScope, scopeDefaulted };
+}
+
+async function searchTranscriptsByMeaning(ctx: AccessContext, query: SearchTranscriptsQuery, semanticQuery: string) {
+  const limit = query.limit ?? SEMANTIC_DEFAULT_LIMIT;
+  if (limit > SEMANTIC_MAX_LIMIT) throw new HttpError(400, `limit_above_${SEMANTIC_MAX_LIMIT}_for_semanticQuery`);
+  const { recordings, resolvedScope, scopeDefaulted } = await callsInScope(ctx, query);
+  const ids = recordings.map((x) => x.id);
+  const withWindows =
+    ids.length === 0
+      ? new Set<string>()
+      : new Set(
+          (await db.selectDistinct({ id: w.recordingId }).from(w).where(and(inArray(w.recordingId, ids), eq(w.windowRule, WINDOW_RULE)))).map((x) => x.id),
+        );
+  const base = { scope: resolvedScope, scopeDefaulted, callsSearched: withWindows.size, callsNotYetSearchable: recordings.length - withWindows.size };
+  if (withWindows.size === 0) return { hits: [] as MeaningHit[], ...base };
+
+  // input_type=query is load-bearing (Decision 13): the windows were embedded as
+  // "document".
+  const [qvec] = await embed([semanticQuery], "query");
+  const distance = cosineDistance(w.embedding, qvec);
+  // Enough candidates that dropping overlaps still fills a page: a window
+  // overlaps at most its two neighbours.
+  const candidates = await db.transaction(async (tx) => {
+    await tx.execute(sql`set local hnsw.iterative_scan = strict_order`);
+    await tx.execute(sql`set local hnsw.ef_search = 200`);
+    return tx
+      .select({
+        recordingId: w.recordingId,
+        first: w.firstSegment,
+        last: w.lastSegment,
+        model: w.embeddingModel,
+        similarity: sql<number>`1 - (${distance})`,
+      })
+      .from(w)
+      .where(and(inArray(w.recordingId, [...withWindows]), eq(w.windowRule, WINDOW_RULE)))
+      .orderBy(asc(distance))
+      .limit(limit * 4);
+  });
+
+  const kept: typeof candidates = [];
+  for (const c of candidates) {
+    if (kept.length === limit) break;
+    if (kept.some((k) => k.recordingId === c.recordingId && k.first <= c.last && c.first <= k.last)) continue;
+    kept.push(c);
+  }
+  const byId = new Map(recordings.map((x) => [x.id, x]));
+  const rendered = await linesOf(recordings.filter((x) => kept.some((k) => k.recordingId === x.id)));
+  const hits: MeaningHit[] = kept.flatMap((k) => {
+    const rec = byId.get(k.recordingId);
+    const got = rendered.get(k.recordingId);
+    if (!rec || !got || !got.segs[k.first]) return [];
+    return [{
+      recordingId: k.recordingId,
+      recordingTitle: displayTitle(rec.title),
+      startedAt: rec.startedAt ? rec.startedAt.toISOString() : null,
+      segment: k.first,
+      lastSegment: k.last,
+      time: formatTimestamp(got.segs[k.first].startSec),
+      startSec: got.segs[k.first].startSec,
+      similarity: Number(k.similarity),
+      embeddingModel: k.model,
+      lines: got.lines.slice(k.first, k.last + 1).filter((l): l is string => l !== null),
+    }];
+  });
+  return { hits, ...base };
 }

@@ -91,7 +91,7 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { inspect } from "node:util";
 import { Client } from "pg";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
 import { makeStubEmbedder, makeStubModel, waitFor } from "../extract/stub-model.js";
 import { dropAccount, endPool, makeAccount, makeRecording, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
@@ -261,7 +261,11 @@ async function main(): Promise<void> {
     });
     return { status: res.status, json: (await res.json()) as Record<string, unknown> };
   };
-  const jobsOf = (recordingId: string) => db.select().from(schema.jobs).where(eq(schema.jobs.recordingId, recordingId)).orderBy(schema.jobs.createdAt);
+  // Extraction and match only: every upload also queues embed_lines (SAA-370 step
+  // 2), which check-embed-lines covers. The worker takes it only when nothing
+  // else is runnable, so it changes no order these cases assert.
+  const jobsOf = (recordingId: string) =>
+    db.select().from(schema.jobs).where(and(eq(schema.jobs.recordingId, recordingId), ne(schema.jobs.kind, "embed_lines"))).orderBy(schema.jobs.createdAt);
   const speakersOf = (recordingId: string) => db.select({ label: schema.speakers.label, name: schema.speakers.displayName }).from(schema.speakers).where(eq(schema.speakers.recordingId, recordingId));
   const clearJobs = async (): Promise<void> => {
     await db.delete(schema.jobs).where(eq(schema.jobs.accountId, fx.accountId));
@@ -1018,7 +1022,8 @@ async function main(): Promise<void> {
         const since = (t: number): string => (t && sigAt ? `${t - sigAt} ms` : "never");
         say(`f timings from SIGTERM: the model request's connection closed ${since(closedAt)}, "running→queued" logged ${since(requeuedAt)}, the process exited ${ex ? since(ex.t) : "never (killed at 15 s)"}`);
         const [after] = await jobsOf(recordingId);
-        const allJobs = (await pool.query("select count(*)::int as n from jobs")).rows[0].n;
+        // Not embed_lines: every upload queues one too (SAA-370 step 2; check-embed-lines covers it).
+        const allJobs = (await pool.query("select count(*)::int as n from jobs where kind <> 'embed_lines'")).rows[0].n;
         const moments = await momentsOf(recordingId);
         const rec = await recOf(recordingId);
         check("f SIGTERM: the process exits 0 inside the 10 s drain cap", !!ex && ex.code === 0 && ex.t - sigAt < 10_000, JSON.stringify({ code: ex?.code, signal: ex?.signal, ms: ex ? ex.t - sigAt : null }));

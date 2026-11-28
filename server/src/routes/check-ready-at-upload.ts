@@ -28,7 +28,7 @@
 import express from "express";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { db, pool, schema } from "../db/index.js";
 import { makeStubEmbedder, makeStubModel } from "../extract/stub-model.js";
 import { dropAccount, endPool, makeAccount, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
@@ -118,7 +118,9 @@ async function main(): Promise<void> {
     );
     return r.rows[0];
   };
-  const jobsOf = (recordingId: string) => db.select().from(schema.jobs).where(eq(schema.jobs.recordingId, recordingId)).orderBy(schema.jobs.createdAt);
+  // Not embed_lines (SAA-370 step 2; check-embed-lines covers it).
+  const jobsOf = (recordingId: string) =>
+    db.select().from(schema.jobs).where(and(eq(schema.jobs.recordingId, recordingId), ne(schema.jobs.kind, "embed_lines"))).orderBy(schema.jobs.createdAt);
   const settle = async (recordingId: string, ms = 30_000) => {
     const t0 = Date.now();
     for (;;) {

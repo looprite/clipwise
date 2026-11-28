@@ -12,6 +12,8 @@
 //   mcp.search_moments  the MCP tool
 //   mcp.get_transcript  the MCP tool
 //   mcp.search_transcripts  the MCP tool
+//   mcp.search_transcripts.semantic  the same tool with semanticQuery (Voyage
+//                       stubbed at the fetch boundary; one window written here)
 // A read that finds nothing (404) writes no line. A planted phrase, in the
 // recording's title, its transcript and its moments, and used as the search
 // words, appears in no line written during the run; control: it is in what the
@@ -26,7 +28,7 @@ import type { AddressInfo } from "node:net";
 import { eq } from "drizzle-orm";
 import express, { type NextFunction, type Request, type Response } from "express";
 import type { AccessContext } from "./context.js";
-import { db, schema } from "../db/index.js";
+import { db, pool, schema } from "../db/index.js";
 import { dropAccount, endPool, makeAccount, refuseUnlessScratch, type Fixture } from "../extract/fixtures-for-checks.js";
 import { errorHandler } from "../lib/http.js";
 import { TOOLS } from "../mcp/tools.js";
@@ -159,12 +161,31 @@ try {
   one("MCP get_transcript", mt, `access: member=${M} route=mcp.get_transcript recording=${R}`);
   const mst = await during(() => tool("search_transcripts").run(ctx, { query: PHRASE, scope: "all" }));
   one("MCP search_transcripts", mst, `access: member=${M} route=mcp.search_transcripts recordings=1 ids=${R}`);
+  // One window over R's one line, and Voyage answered here: the search's own
+  // vector is the window's, so R comes back.
+  const [tr] = (await pool.query(`select id from transcripts where recording_id = $1`, [R])).rows;
+  const vec = `[${new Array(1024).fill(1 / 32).join(",")}]`;
+  await pool.query(
+    `insert into transcript_windows (account_id, recording_id, transcript_id, first_segment, last_segment, embedding, embedding_model, window_rule)
+     values ($1, $2, $3, 0, 0, $4::vector, 'voyage-4', 'lines8-step4')`,
+    [fx.accountId, R, tr.id, vec],
+  );
+  process.env.VOYAGE_API_KEY = "stub-voyage-key";
+  const fetchBefore = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | globalThis.Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (!url.startsWith("https://api.voyageai.com/")) return fetchBefore(input, init);
+    return new Response(JSON.stringify({ data: [{ embedding: new Array(1024).fill(1 / 32) }] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const msem = await during(() => tool("search_transcripts").run(ctx, { semanticQuery: PHRASE, scope: "all" }));
+  globalThis.fetch = fetchBefore;
+  one("MCP search_transcripts by meaning", msem, `access: member=${M} route=mcp.search_transcripts.semantic recordings=1 ids=${R}`);
 
   const missing = await during(() => get(`/recordings/${randomUUID()}/transcript`));
   check("a read that finds nothing (404) writes no access line", missing.result.status === 404 && missing.access.length === 0, JSON.stringify({ status: missing.result.status, access: missing.access }));
 
   // ---- nothing of the call in any line ----
-  const responses = [t.result.text, mo.result.text, s.result.text, cap.result.text, String(ms.result), String(mt.result), String(mst.result)];
+  const responses = [t.result.text, mo.result.text, s.result.text, cap.result.text, String(ms.result), String(mt.result), String(mst.result), String(msem.result)];
   check("control: the phrase is in what every read returned", responses.every((r) => r.includes(PHRASE)), responses.map((r) => r.includes(PHRASE)).join(","));
   const leaked = written.filter((l) => l.includes(PHRASE) || l.includes("marigold"));
   check("the phrase is in no line written during the run (access lines and every other)", leaked.length === 0, leaked.slice(0, 3).join(" / "));

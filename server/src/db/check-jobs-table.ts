@@ -44,7 +44,7 @@ async function main(): Promise<void> {
   const cons = await pool.query("select conname, pg_get_constraintdef(oid) as def from pg_constraint where conrelid = 'jobs'::regclass order by conname");
   console.log("constraints:");
   for (const c of cons.rows) console.log(`  ${c.conname}: ${c.def}`);
-  check("kind and state have their CHECK constraints", cons.rows.some((c) => c.conname === "jobs_kind_allowed") && cons.rows.some((c) => c.conname === "jobs_state_valid"));
+  check("kind and state have their CHECK constraints", cons.rows.some((c) => c.conname === "jobs_kind_known") && cons.rows.some((c) => c.conname === "jobs_state_valid"));
 
   // What deleting an unpromoted run's moments (jobs/worker.ts) can touch: the
   // foreign keys that point at moments, read from the database.
@@ -86,8 +86,10 @@ async function main(): Promise<void> {
     check("once the queued one is done another may be queued", (await ins(a, "extract", "queued")) === "inserted");
     const matchKind = await ins(a, "match", "queued");
     check("a calendar match job is accepted by the CHECK (SAA-227 part F)", matchKind === "inserted", matchKind);
+    const embedKind = await ins(a, "embed_lines", "queued");
+    check("an embed_lines job is accepted by the CHECK (SAA-370 step 2)", embedKind === "inserted", embedKind);
     const badKind = await ins(a, "nonsense", "queued");
-    check("an unknown kind is refused by the CHECK", badKind === "refused 23514 jobs_kind_allowed", badKind);
+    check("an unknown kind is refused by the CHECK", badKind === "refused 23514 jobs_kind_known", badKind);
     const badState = await ins(b, "re_extract", "paused");
     check("an unknown state is refused by the CHECK", badState === "refused 23514 jobs_state_valid", badState);
     await pool.query("delete from recordings where id = $1", [b]);

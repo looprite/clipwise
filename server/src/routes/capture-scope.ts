@@ -12,7 +12,7 @@
 // the recorder's business.
 
 import { Router, type Request, type RequestHandler } from "express";
-import { and, asc, desc, eq, gte, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import { accessOf } from "../access/authenticate.js";
 import { normalizeEmail } from "../auth/membership.js";
@@ -213,10 +213,13 @@ captureScopeRouter.get(
   "/captures/:captureId/jobs",
   asyncHandler(async (req, res) => {
     const { id } = await ownCapture(req);
+    // Not embed_lines (SAA-370 step 2): the Mac folds every job but match into the
+    // capture's state (last-meeting.js jobStateOf), and windows for search are no
+    // part of a call being ready. Left out here, so no Mac version ever sees it.
     const jobs = await db
       .select({ kind: schema.jobs.kind, state: schema.jobs.state, attempts: schema.jobs.attempts })
       .from(schema.jobs)
-      .where(eq(schema.jobs.recordingId, id))
+      .where(and(eq(schema.jobs.recordingId, id), ne(schema.jobs.kind, "embed_lines")))
       .orderBy(asc(schema.jobs.createdAt));
     const matched = jobs.some((j) => j.kind === "match" && j.state === "done");
     const ctx = accessOf(req);

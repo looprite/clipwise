@@ -25,6 +25,7 @@
 // they are what says why a capture is waiting.
 
 import Anthropic from "@anthropic-ai/sdk";
+import { VoyageHttpError } from "./voyage.js";
 
 type ErrorLike = {
   name?: unknown;
@@ -62,9 +63,11 @@ const apiMessage = (e: ErrorLike): string | undefined => str((e.error as ApiBody
 // Anthropic's docs; it is the 400 reported in the wild.
 const LIMIT_400 = [/^You have reached your (specified )?(workspace )?API usage limits/, /credit balance is too low/i];
 
-// Anthropic's errors only, by the SDK's own class: another service's error with
-// the same shape (a status, headers, a body) is never a passing condition here.
+// Anthropic's errors by the SDK's own class, and Voyage's by VoyageHttpError
+// (SAA-370 step 2): another service's error with the same shape (a status,
+// headers, a body) is never a passing condition here.
 function isPassing(e: ErrorLike): boolean {
+  if (e instanceof VoyageHttpError) return e.status === 0 || e.status === 429 || (e.status >= 500 && e.status <= 599);
   if (!(e instanceof Anthropic.APIError) || typeof e.status !== "number") return false;
   const status = e.status;
   if (status === 402 || status === 429 || (status >= 500 && status <= 599)) return true;
@@ -76,6 +79,7 @@ function isPassing(e: ErrorLike): boolean {
 // Anthropic errors (Anthropic.APIError) that pass on their own, or once the
 // account is put right: a 402 billing_error, a 429, any 5xx (529 overloaded
 // among them), and a 400 whose message is a spend limit or the credit balance.
+// Voyage errors (VoyageHttpError): a 429, any 5xx, and no reply at all.
 // The jobs worker retries these on a long ladder, and describeError keeps their
 // message. The error or any of its causes.
 export function passingApiCondition(err: unknown): boolean {

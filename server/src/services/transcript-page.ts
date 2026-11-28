@@ -48,7 +48,9 @@ export type Page = {
   next: { fromSegment: number; fromSec: number } | null;
 };
 
-function collapse(text: string): string {
+// Shared with jobs/embed-lines.ts, so a window's lines are exactly the lines
+// get_transcript shows.
+export function collapse(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 

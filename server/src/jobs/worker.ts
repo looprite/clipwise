@@ -1,9 +1,11 @@
 // The jobs worker (SAA-227 parts D and E): takes the work POST /captures queued
-// and does it in this process. Extraction and its embeddings, and the calendar
-// match (part F).
+// and does it in this process. Extraction and its embeddings, the calendar
+// match (part F), and the transcript windows (SAA-370 step 2, embed-lines.ts).
 //
 // What it promises:
 //   - One job at a time.
+//   - embed_lines is taken only when no job of another kind is runnable, so a
+//     backfill of windows never holds up a new call's extraction or match.
 //   - No timer polls the table, and nothing listens for notifications; either
 //     would keep Neon awake. It runs when woken (a capture was stored), once at
 //     boot (start(): one SELECT), and from a one-shot timer set only when the
@@ -51,6 +53,7 @@ import { decryptCallText } from "../lib/call-text.js";
 import { describeErrorLine, errorClassOf, logError, passingApiCondition } from "../lib/safe-error.js";
 import { momentEmbedText } from "../lib/voyage.js";
 import { abortableFetch } from "./abort.js";
+import { embedLines } from "./embed-lines.js";
 import type { Wakeable } from "./registry.js";
 
 export type WorkerOptions = {
@@ -84,7 +87,7 @@ type JobRow = {
   id: string;
   account_id: string;
   recording_id: string;
-  kind: "extract" | "re_extract" | "match";
+  kind: "extract" | "re_extract" | "match" | "embed_lines";
   attempts: number;
   lease_token: string;
   run_ids: string[];
@@ -93,8 +96,8 @@ type JobRow = {
 type Running = { job: JobRow; ctl: AbortController; reason: "lease" | "shutdown" | null };
 
 class MissingApiKeyError extends Error {
-  constructor() {
-    super("ANTHROPIC_API_KEY not set");
+  constructor(variable = "ANTHROPIC_API_KEY") {
+    super(`${variable} not set`);
     this.name = "MissingApiKeyError";
   }
 }
@@ -272,7 +275,7 @@ export class JobWorker implements Wakeable {
        where id = (
          select id from jobs
          where (state = 'queued' and run_after <= now()) or (state = 'running' and lease_expires_at < now())
-         order by created_at, id
+         order by (kind = 'embed_lines'), created_at, id
          limit 1
          for update skip locked
        )
@@ -330,7 +333,22 @@ export class JobWorker implements Wakeable {
   // The work of one attempt, by the job's kind.
   private async execute(cur: Running): Promise<void> {
     if (cur.job.kind === "match") return this.executeMatch(cur);
+    if (cur.job.kind === "embed_lines") return this.executeEmbedLines(cur);
     return this.executeExtraction(cur);
+  }
+
+  // The call's transcript windows (embed-lines.ts). Voyage's 429, 5xx and no
+  // reply are passing conditions (safe-error.ts), so an outage retries on the
+  // long ladder; a missing key gives the attempt back, as for extraction.
+  private async executeEmbedLines(cur: Running): Promise<void> {
+    const { job, ctl } = cur;
+    if (!this.embedder && !process.env.VOYAGE_API_KEY) throw new MissingApiKeyError("VOYAGE_API_KEY");
+    const { windows } = await embedLines(
+      { jobId: job.id, leaseToken: job.lease_token, accountId: job.account_id, recordingId: job.recording_id },
+      { embedder: this.embedder, signal: ctl.signal },
+    );
+    ctl.signal.throwIfAborted();
+    this.log(job.id, job.recording_id, job.kind, "windows written", `${windows}`);
   }
 
   // A calendar match (SAA-227 part F): the owner's calendar only, the Google calls

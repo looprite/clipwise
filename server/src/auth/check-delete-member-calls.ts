@@ -148,6 +148,11 @@ async function call(
       startSec: i * 10, endSec: i * 10 + 9, text: `line ${i}: ${PHRASE}`, orderIndex: i,
     })),
   );
+  // One transcript window (SAA-370 step 2), as the embed_lines job would write it.
+  await db.insert(schema.transcriptWindows).values({
+    accountId, recordingId: id, transcriptId: t.id, firstSegment: 0, lastSegment: 2,
+    embedding: new Array(1024).fill(1 / 32), embeddingModel: "voyage-4", windowRule: "lines8-step4",
+  });
   const [m] = await db.insert(schema.moments).values({ accountId, recordingId: id, kind: "decision", title: "check moment", summary: `decided ${PHRASE}`, startSec: 0, endSec: 9 }).returning();
   const [clip] = await db.insert(schema.clips).values({ accountId, recordingId: id, momentId: m.id, createdBy: o.people[0], slug: `dmc-clip-${TAG}-${id.slice(0, 8)}`, startSec: 0, endSec: 9 }).returning();
   await db.insert(schema.shares).values([

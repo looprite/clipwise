@@ -396,6 +396,52 @@ export const segments = pgTable(
   }),
 );
 
+// Search by meaning over transcript lines (SAA-370 step 2, Architecture Decision 21).
+// One row per window of a call's first transcript: up to WINDOW_LINES shown lines
+// (an empty segment is numbered but not shown, as get_transcript does), stepping
+// WINDOW_STEP (jobs/embed-lines.ts). first_segment and last_segment are segment
+// numbers as get_transcript prints them (#n), so a hit hands over fromSegment.
+//
+// No text: the vector is of the window's words joined by "\n", with no speaker
+// names and no times, so a rename, voice names or a corrected identity answer
+// never makes a vector stale (segment text is written once, at upload), and a
+// result shows the names as they are now. The vectors are plain, as the moment
+// vectors are (Decision 20 amendment, 11-28).
+//
+// embedding_model and window_rule are state (Decision 13): a change of either is
+// a re-embed of the rows that carry the old value. The job writes a call's rows
+// in one transaction, so a call has all its windows or none.
+export const transcriptWindows = pgTable(
+  "transcript_windows",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    recordingId: uuid("recording_id")
+      .notNull()
+      .references(() => recordings.id, { onDelete: "cascade" }),
+    transcriptId: uuid("transcript_id")
+      .notNull()
+      .references(() => transcripts.id, { onDelete: "cascade" }),
+    firstSegment: integer("first_segment").notNull(),
+    lastSegment: integer("last_segment").notNull(),
+    embedding: vector("embedding", { dimensions: 1024 }).notNull(),
+    embeddingModel: varchar("embedding_model", { length: 64 }).notNull(),
+    windowRule: varchar("window_rule", { length: 32 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    transcriptRuleFirstIdx: uniqueIndex("transcript_windows_transcript_rule_first_idx").on(t.transcriptId, t.windowRule, t.firstSegment),
+    recordingIdx: index("transcript_windows_recording_idx").on(t.recordingId),
+    embeddingIdx: index("transcript_windows_embedding_idx").using("hnsw", t.embedding.op("vector_cosine_ops")),
+    // Both columns are NOT NULL, so no null can slip past this.
+    rangeValid: check("transcript_windows_range_valid", sql`${t.firstSegment} >= 0 AND ${t.lastSegment} >= ${t.firstSegment}`),
+  }),
+);
+
 export const moments = pgTable(
   "moments",
   {
@@ -604,6 +650,10 @@ export const shares = pgTable(
 //          're_extract'  another one, because an identity answer named a speaker
 //                        after the first run was started; it does nothing if the
 //                        promoted run was already built on the current names
+//          'match'       the calendar match (SAA-227 part F)
+//          'embed_lines' the call's transcript windows (SAA-370 step 2). Taken
+//                        only when no other kind is runnable, and never listed to
+//                        the Mac (GET /captures/:captureId/jobs leaves it out)
 //   state  'queued'      waiting; not before run_after (a retry's backoff)
 //          'running'     claimed under lease_token until lease_expires_at
 //          'done' | 'failed'
@@ -657,9 +707,12 @@ export const jobs = pgTable(
       .where(sql`${t.state} in ('queued', 'running')`),
     recordingIdx: index("jobs_recording_idx").on(t.recordingId),
     stateIdx: index("jobs_state_run_after_idx").on(t.state, t.runAfter),
-    // Renamed from jobs_kind_valid when 'match' was added: drizzle-kit push never
-    // alters a CHECK, it only adds and drops them by name.
-    kindValid: check("jobs_kind_allowed", sql`${t.kind} IN ('extract', 're_extract', 'match')`),
+    // Renamed each time a kind is added (jobs_kind_valid, then jobs_kind_allowed
+    // for 'match', now jobs_kind_known for 'embed_lines'): drizzle-kit push never
+    // alters a CHECK, it only adds and drops them by name. After a push, read the
+    // live definitions back with pg_get_constraintdef; jobs_kind_allowed must be
+    // gone, since it refuses 'embed_lines' and an upload queues one.
+    kindValid: check("jobs_kind_known", sql`${t.kind} IN ('extract', 're_extract', 'match', 'embed_lines')`),
     stateValid: check("jobs_state_valid", sql`${t.state} IN ('queued', 'running', 'done', 'failed')`),
   }),
 );

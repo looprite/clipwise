@@ -25,6 +25,7 @@ export const ACCESS_ROUTES = [
   "mcp.search_moments",
   "mcp.get_transcript",
   "mcp.search_transcripts",
+  "mcp.search_transcripts.semantic", // search_transcripts with semanticQuery (SAA-370 step 2)
 ] as const;
 export type AccessRoute = (typeof ACCESS_ROUTES)[number];
 

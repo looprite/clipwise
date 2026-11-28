@@ -29,6 +29,17 @@ const CHAR_BUDGET_PER_REQ = Math.floor(VOYAGE_MAX_TOKENS_PER_REQ * CHARS_PER_TOK
 
 export type VoyageInputType = "document" | "query";
 
+// A Voyage request that failed: the HTTP status, or 0 when no reply came (the
+// network). The status only, never the body, which can quote the input.
+// safe-error.ts treats 0, 429 and 5xx as passing conditions, so the jobs worker
+// retries them on its long ladder.
+export class VoyageHttpError extends Error {
+  constructor(readonly status: number, options?: { cause?: unknown }) {
+    super(status === 0 ? "voyage embed: no reply" : `voyage embed ${status}`, options);
+    this.name = "VoyageHttpError";
+  }
+}
+
 export function currentEmbeddingModel(): string {
   return DEFAULT_MODEL;
 }
@@ -70,19 +81,26 @@ async function embedOne(
   apiKey: string,
   signal?: AbortSignal,
 ): Promise<number[][]> {
-  const res = await fetch(VOYAGE_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ input: texts, model, input_type: inputType }),
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(VOYAGE_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ input: texts, model, input_type: inputType }),
+      signal,
+    });
+  } catch (err) {
+    // An abort stays an abort; anything else is "no reply".
+    if (signal?.aborted) throw err;
+    throw new VoyageHttpError(0, { cause: err });
+  }
   if (!res.ok) {
     // The status only. The response body is Voyage's error text, which can quote
     // the input, and the input is the words of a call.
-    throw new Error(`voyage embed ${res.status}`);
+    throw new VoyageHttpError(res.status);
   }
   const data = (await res.json()) as { data: { embedding: number[] }[] };
   return data.data.map((d) => d.embedding);

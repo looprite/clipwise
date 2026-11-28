@@ -45,15 +45,17 @@ const DESC = {
   dateTo: "Only recordings started at or before this ISO 8601 datetime — bounds `index` results and moment-search results alike. See dateFrom.",
 
   searchTranscriptsTool:
-    "Word search over the transcript lines of the team's calls: the calls you recorded and the calls your teammates have shared with the team; a call someone else keeps private is never searched, and nothing in a result says that one exists. " +
-    "Returns every line where all the words of `query` were said, ignoring case, within that one line: the call's recordingId, title and startedAt, the segment number, the time into the call, the speaker as get_transcript shows them, the line itself and the two lines either side. " +
+    "Search over the transcript lines of the team's calls, by words (`query`) or by meaning (`semanticQuery`); pass one, not both. It searches the calls you recorded and the calls your teammates have shared with the team; a call someone else keeps private is never searched, and nothing in a result says that one exists. " +
+    "With `query`: every line where all its words were said, ignoring case, within that one line: the call's recordingId, title and startedAt, the segment number, the time into the call, the speaker as get_transcript shows them, the line itself and the two lines either side. " +
     "Use it to find which calls and where, then read around each hit with get_transcript (fromSegment a few below the hit's segment, or fromSec) before concluding what was said, decided or agreed: two lines of context can mislead. " +
-    "It matches words, not meaning: a miss is not evidence that something wasn't discussed, because people may have put it in other words. Try other wordings, or search_moments with semanticQuery. Speaker names are not searched, only what was said. " +
-    "The response carries `totalMatches` (the true count before `limit`) and `truncated`; check `truncated` before concluding something is absent or rare. A result larger than about 60,000 characters is cut from the end, with `trimmedForSize` and `truncated` true; narrow the query (recordingId, dateFrom/dateTo) rather than concluding the rest is absent. " +
+    "`query` matches words, not meaning: a miss is not evidence that something wasn't discussed, because people may have put it in other words. Try other wordings, or `semanticQuery`. Speaker names are not searched, only what was said. " +
+    "With `semanticQuery`: the passages nearest in meaning, nearest first, each a few lines (segment to lastSegment) exactly as get_transcript prints them, with a similarity score and the embedding model; overlapping passages of one call are returned once. Every passage is ranked, so there is no count of matches: read the similarity, and read around a passage with get_transcript (fromSegment=segment). `callsSearched` and `callsNotYetSearchable` say how many calls in scope could and couldn't be searched this way yet; a call not yet searchable is not evidence of absence. " +
+    "With `query` the response carries `totalMatches` (the true count before `limit`) and `truncated`; check `truncated` before concluding something is absent or rare. A result larger than about 60,000 characters is cut from the end, with `trimmedForSize` and `truncated` true; narrow the query (recordingId, dateFrom/dateTo) rather than concluding the rest is absent. " +
     "`scope` defaults to \"work\" (`scopeDefaulted` is then true): pass \"personal\" or \"all\" to search your own personal calls, also when you pass recordingId.",
   stQuery: "The words to find. Every word must appear, ignoring case, in the same line; a word matches inside a longer one (\"price\" finds \"pricing\").",
+  stSemanticQuery: "Search by meaning instead of words: a question or a description of what was discussed (\"when the harvest date moved\"). Returns passages nearest in meaning. Pass this or `query`, not both.",
   stRecordingId: "Search one call only (UUID). A call you can't see is reported as not found.",
-  stLimit: "Max hits. Defaults to 50, at most 200.",
+  stLimit: "Max hits. With `query`: defaults to 50, at most 200. With `semanticQuery`: defaults to 10, at most 50.",
   stScope: 'Personal-vs-work filter: "work" (default), "personal" or "all". Other people\'s personal calls are never searched. The response echoes the scope that ran.',
   stDateFrom: 'Only calls started at or after this ISO 8601 datetime (e.g. "2026-11-01T00:00:00Z").',
   stDateTo: "Only calls started at or before this ISO 8601 datetime.",
@@ -81,7 +83,8 @@ const searchInput = z.object({
 });
 
 const searchTranscriptsInput = z.object({
-  query: z.string(),
+  query: z.string().optional(),
+  semanticQuery: z.string().optional(),
   recordingId: z.string().uuid().optional(),
   scope: z.enum(["work", "personal", "all"]).optional(),
   limit: z.number().int().min(1).max(200).optional(),
@@ -185,13 +188,13 @@ export const TOOLS: ToolDef[] = [
       type: "object",
       properties: {
         query: { type: "string", description: DESC.stQuery },
+        semanticQuery: { type: "string", description: DESC.stSemanticQuery },
         recordingId: { type: "string", description: DESC.stRecordingId },
         limit: { type: "number", description: DESC.stLimit },
         scope: { type: "string", enum: ["work", "personal", "all"], description: DESC.stScope },
         dateFrom: { type: "string", description: DESC.stDateFrom },
         dateTo: { type: "string", description: DESC.stDateTo },
       },
-      required: ["query"],
     },
     run: async (ctx, args) => {
       const input = searchTranscriptsInput.parse(args ?? {});
@@ -199,7 +202,7 @@ export const TOOLS: ToolDef[] = [
       const sent = fitToBudget((await searchTranscripts(ctx, query)) as Record<string, unknown>, SEARCH_RESULT_CHARS);
       // What was sent, after any cut for size: those are the recordings read.
       // Ids and a count only; never the words searched for.
-      logSearchAccess(ctx.memberId, "mcp.search_transcripts", JSON.parse(sent));
+      logSearchAccess(ctx.memberId, query.semanticQuery !== undefined ? "mcp.search_transcripts.semantic" : "mcp.search_transcripts", JSON.parse(sent));
       return sent;
     },
   },

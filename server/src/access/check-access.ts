@@ -1138,6 +1138,13 @@ async function main(): Promise<void> {
           { accountId: acc, recordingId: rid, token: `check-access-${tag}-${label}-recording` },
           { accountId: acc, clipId: clip.id, token: `check-access-${tag}-${label}-clip` },
         ]);
+        // One transcript window (SAA-370 step 2), written directly as the embed_lines
+        // job would, so the delete is shown to take windows with it.
+        await pool.query(
+          `insert into transcript_windows (account_id, recording_id, transcript_id, first_segment, last_segment, embedding, embedding_model, window_rule)
+           select $1, $2, t.id, 0, 0, $3::vector, 'voyage-4', 'lines8-step4' from transcripts t where t.recording_id = $2 order by t.created_at limit 1`,
+          [acc, rid, `[${new Array(1024).fill(1 / 32).join(",")}]`],
+        );
         return { p, rid, status: posted.status };
       };
       const target = await fillCapture("target");

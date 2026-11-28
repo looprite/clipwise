@@ -141,6 +141,17 @@ try {
   const shapes = (await pool.query(`select text from segments where recording_id = $1`, [rid])).rows.map((r) => r.text as string);
   check("every stored segment is in the encrypted shape", shapes.length === 2 && shapes.every(isEncryptedCallText), shapes.map((s) => s.slice(0, 14)).join(", "));
 
+  // transcript_windows (SAA-370 step 2) holds vectors and numbers, never text: no
+  // column of type text, and varchar only for the model and the rule.
+  const windowCols = (await pool.query(
+    `select column_name as c, udt_name as t from information_schema.columns where table_schema = 'public' and table_name = 'transcript_windows'`,
+  )).rows as Array<{ c: string; t: string }>;
+  check(
+    "transcript_windows has no text column (varchar only for embedding_model and window_rule)",
+    windowCols.length > 0 && !windowCols.some((x) => x.t === "text") && windowCols.filter((x) => x.t === "varchar").map((x) => x.c).sort().join(",") === "embedding_model,window_rule",
+    JSON.stringify(windowCols),
+  );
+
   // ---- the metadata keys searches filter on ----
   const filterable = (await pool.query(
     `select count(*)::int n from moments m join recordings r on r.id = m.recording_id
